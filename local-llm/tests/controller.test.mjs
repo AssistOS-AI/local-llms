@@ -391,7 +391,7 @@ test('a hanging Hugging Face lookup for Add model does not hold up Stop', async 
         new Promise((resolve) => setTimeout(() => resolve('still waiting'), 500)),
     ]);
     assert.equal(stopped, 'stopped');
-    // A request that comes back after a drain started is refused, not stored.
+    // Stop returned while the lookup still hangs, and nothing was stored.
     assert.equal(h.controller.state.registry.length, 0);
 });
 
