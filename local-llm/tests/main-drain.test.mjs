@@ -113,6 +113,7 @@ test('SIGTERM during a download drains and exits 0, keeping the partial and its 
     assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'tiny.gguf.partial.json'), 'utf8')).sha256, SHA256);
     const state = JSON.parse(fs.readFileSync(path.join(f.dataDir, 'state', 'controller.json'), 'utf8'));
     assert.equal(state.deployment.phase, 'paused');
+    assert.match(state.deployment.pausedReason, /restarted during the download/);
 
     // After the restart nothing resumes by itself; the next Run resumes with Range.
     const again = startMain(f, { LOCAL_LLM_HF_BASE_URL: base });

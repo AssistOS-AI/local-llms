@@ -533,8 +533,12 @@ export function createController({
                         runner = null;
                         await stopping.stop({ graceMs: stopGraceMs });
                     }
-                    const phase = current.cancelReason === 'cancel' && wasTransfer ? 'paused' : 'idle';
-                    setPhase(phase, { runner: null, pausedReason: phase === 'paused' ? 'Download cancelled; press Run to resume.' : null });
+                    const pausing = ['cancel', 'drain'].includes(current.cancelReason) && wasTransfer;
+                    const phase = pausing ? 'paused' : 'idle';
+                    const reason = current.cancelReason === 'drain'
+                        ? 'The agent restarted during the download; press Run to resume.'
+                        : 'Download cancelled; press Run to resume.';
+                    setPhase(phase, { runner: null, pausedReason: pausing ? reason : null });
                     return;
                 }
                 if (error instanceof DownloadError && ['PAUSED_ENOSPC', 'NETWORK'].includes(error.code)) {
@@ -774,7 +778,7 @@ export function createController({
         await Promise.race([queue.close(), sleep(DRAIN_QUEUE_WAIT_MS, waited.signal)]);
         waited.abort();
         if (job) {
-            job.cancelReason = 'cancel';
+            job.cancelReason = 'drain';
             job.abort.abort();
             await job.promise;
         }
