@@ -155,7 +155,13 @@ export function createController({
             const inspected = await inspect({ root: ggufRoot, artifact: source });
             return { ...inspected, total: source.size };
         }
-        const manifest = readOllamaManifest(ollamaModels, source.tag);
+        let manifest;
+        try {
+            manifest = readOllamaManifest(ollamaModels, source.tag);
+        } catch (error) {
+            if (error?.code !== 'invalid_manifest') throw error;
+            manifest = null;
+        }
         if (manifest?.complete) return { state: 'complete', bytes: manifest.size, total: manifest.size };
         const partial = partialPullBytes(ollamaModels, state.ollamaPulls?.[source.tag] || []);
         return { state: partial ? 'partial' : 'absent', bytes: partial, total: source.size ?? null };
