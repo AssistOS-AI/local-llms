@@ -17,6 +17,9 @@ export function emptyState() {
         params: {},
         requests: {},
         registry: [],
+        // Blob digests each Ollama tag's pulls have touched, so partial
+        // downloads are counted and deleted per tag.
+        ollamaPulls: {},
     };
 }
 
@@ -41,6 +44,9 @@ function normalizeState(value) {
     if (value.params && typeof value.params === 'object' && !Array.isArray(value.params)) state.params = value.params;
     if (value.requests && typeof value.requests === 'object' && !Array.isArray(value.requests)) state.requests = value.requests;
     if (Array.isArray(value.registry)) state.registry = value.registry;
+    if (value.ollamaPulls && typeof value.ollamaPulls === 'object' && !Array.isArray(value.ollamaPulls)) {
+        state.ollamaPulls = value.ollamaPulls;
+    }
     return state;
 }
 

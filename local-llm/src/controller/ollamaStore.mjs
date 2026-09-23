@@ -93,13 +93,61 @@ export function deleteOllamaModel(modelsDir, tag, { fsApi = fs } = {}) {
     return freed;
 }
 
-/** Bytes of partial pull data Ollama keeps for resuming (blob-*-partial files). */
-export function partialPullBytes(modelsDir, { fsApi = fs } = {}) {
-    let total = 0;
+// Ollama resumes a blob download from `sha256-<hex>-partial` and keeps its
+// part records in `sha256-<hex>-partial-<n>` files next to it.
+const PARTIAL_RE = /^sha256-([0-9a-f]{64})-partial(?:-\d+)?$/;
+
+/** Partial pull files, grouped by the blob digest they belong to. */
+export function partialPullFiles(modelsDir, { fsApi = fs } = {}) {
+    const byDigest = new Map();
+    let entries = [];
     try {
-        for (const entry of fsApi.readdirSync(path.join(modelsDir, 'blobs'))) {
-            if (entry.endsWith('-partial')) total += fsApi.statSync(path.join(modelsDir, 'blobs', entry)).size;
+        entries = fsApi.readdirSync(path.join(modelsDir, 'blobs'));
+    } catch {
+        return byDigest;
+    }
+    for (const entry of entries) {
+        const match = PARTIAL_RE.exec(entry);
+        if (!match) continue;
+        const digest = `sha256:${match[1]}`;
+        if (!byDigest.has(digest)) byDigest.set(digest, []);
+        byDigest.get(digest).push(path.join(modelsDir, 'blobs', entry));
+    }
+    return byDigest;
+}
+
+/** Bytes of partial blob data for the given digests (one tag's pull). */
+export function partialPullBytes(modelsDir, digests = [], { fsApi = fs } = {}) {
+    const wanted = new Set(digests);
+    let total = 0;
+    for (const [digest, files] of partialPullFiles(modelsDir, { fsApi })) {
+        if (!wanted.has(digest)) continue;
+        for (const file of files) {
+            if (!file.endsWith('-partial')) continue;
+            try { total += fsApi.statSync(file).size; } catch {}
         }
-    } catch {}
+    }
     return total;
+}
+
+/**
+ * Delete one tag's partial pull files, and orphans: partials that no manifest
+ * references and no other tag's recorded pull claims.
+ */
+export function deleteOllamaPartials(modelsDir, { digests = [], claimedByOthers = [], fsApi = fs } = {}) {
+    const own = new Set(digests);
+    const others = new Set(claimedByOthers);
+    const referenced = referencedDigests(modelsDir, fsApi, null);
+    let freed = 0;
+    for (const [digest, files] of partialPullFiles(modelsDir, { fsApi })) {
+        const orphan = !others.has(digest) && !referenced.has(digest);
+        if (!own.has(digest) && !orphan) continue;
+        for (const file of files) {
+            try {
+                freed += fsApi.statSync(file).size;
+                fsApi.rmSync(file, { force: true });
+            } catch {}
+        }
+    }
+    return freed;
 }

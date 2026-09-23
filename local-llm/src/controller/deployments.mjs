@@ -26,13 +26,14 @@ import {
     resolveHuggingFaceArtifact,
 } from './downloader.mjs';
 import { readSnapshot } from './hardware.mjs';
-import { deleteOllamaModel, partialPullBytes, readOllamaManifest } from './ollamaStore.mjs';
+import { deleteOllamaModel, deleteOllamaPartials, partialPullBytes, readOllamaManifest } from './ollamaStore.mjs';
 import { createLogBuffer, parseRunnerReport, startRunnerProcess } from './runnerProcess.mjs';
 import { createStateStore, reconcileAfterRestart } from './stateStore.mjs';
 
 const ACTIVE_PHASES = new Set(['downloading', 'verifying', 'starting', 'loading', 'ready', 'stopping']);
 const TRANSFER_PHASES = new Set(['downloading', 'verifying']);
 const REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
+const OLLAMA_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 const DEFAULT_PORTS = Object.freeze({ 'llama.cpp': 18080, ollama: 18434 });
 const DRAIN_QUEUE_WAIT_MS = 5000;
 const PROBE_TIMEOUT_MS = 10_000;
@@ -150,7 +151,7 @@ export function createController({
         }
         const manifest = readOllamaManifest(ollamaModels, source.tag);
         if (manifest?.complete) return { state: 'complete', bytes: manifest.size, total: manifest.size };
-        const partial = partialPullBytes(ollamaModels);
+        const partial = partialPullBytes(ollamaModels, state.ollamaPulls?.[source.tag] || []);
         return { state: partial ? 'partial' : 'absent', bytes: partial, total: source.size ?? null };
     }
 
@@ -438,6 +439,16 @@ export function createController({
         setPhase('ready', { runner: { pid: process.pid, port: process.port, startedAt: now().toISOString() } });
     }
 
+    // Remember which blobs a tag's pull touched, so its partial files can be
+    // counted and deleted per tag rather than across every Ollama model.
+    function recordPullDigest(tag, digest) {
+        state.ollamaPulls ||= {};
+        const digests = state.ollamaPulls[tag] ||= [];
+        if (digests.includes(digest)) return;
+        digests.push(digest);
+        save();
+    }
+
     async function streamOllamaPull(base, tag, signal) {
         const response = await fetchImpl(`${base}/api/pull`, {
             method: 'POST',
@@ -459,6 +470,7 @@ export function createController({
                 if (!line) continue;
                 const event = JSON.parse(line);
                 if (event.error) throw new LocalLlmError('pull_failed', `Ollama pull failed: ${event.error}`);
+                if (typeof event.digest === 'string' && OLLAMA_DIGEST_RE.test(event.digest)) recordPullDigest(tag, event.digest);
                 if (event.digest && event.total) layers.set(event.digest, { total: event.total, completed: event.completed || 0 });
                 const total = [...layers.values()].reduce((sum, layer) => sum + layer.total, 0);
                 const bytes = [...layers.values()].reduce((sum, layer) => sum + layer.completed, 0);
@@ -487,6 +499,10 @@ export function createController({
         }
         const pulled = readOllamaManifest(ollamaModels, tag);
         if (!pulled?.complete) throw new LocalLlmError('pull_failed', `Ollama reports ${tag} but its files are incomplete.`);
+        if (state.ollamaPulls?.[tag]) {
+            delete state.ollamaPulls[tag];
+            save();
+        }
         if (deployment.artifact.manifestDigest && pulled.manifestDigest !== deployment.artifact.manifestDigest) {
             throw new LocalLlmError('identity_changed', `The Ollama tag ${tag} now resolves to ${pulled.manifestDigest}, `
                 + `not the pinned ${deployment.artifact.manifestDigest}; update the model entry to accept it.`);
@@ -685,7 +701,16 @@ export function createController({
                 if (!source.commit) return { freedBytes: 0 };
                 freed = await remove({ root: ggufRoot, artifact: source });
             } else {
-                freed = deleteOllamaModel(ollamaModels, source.tag);
+                const pulls = state.ollamaPulls || {};
+                const claimedByOthers = Object.entries(pulls)
+                    .filter(([tag]) => tag !== source.tag)
+                    .flatMap(([, digests]) => digests);
+                freed = deleteOllamaModel(ollamaModels, source.tag)
+                    + deleteOllamaPartials(ollamaModels, { digests: pulls[source.tag] || [], claimedByOthers });
+                if (pulls[source.tag]) {
+                    delete pulls[source.tag];
+                    save();
+                }
             }
             const deployment = state.deployment;
             if (deployment && artifactKey(deployment.runnerId, deployment.artifact) === artifactKey(runnerId, source)

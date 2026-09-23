@@ -79,6 +79,7 @@ function harness(t, {
     extraSeed = [],
     quietAfterFirst = false,
     resolveHf = null,
+    fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({}) }),
 } = {}) {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-controller-'));
     t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
@@ -105,7 +106,7 @@ function harness(t, {
         inspect: async () => ({ state: 'absent', bytes: 0 }),
         remove: async (options) => { calls.remove.push(options); return 123; },
         startRunner: runners.startRunner,
-        fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }),
+        fetchImpl,
         detectRunner: (runner) => ({ installed: runner.supported, version: runner.pinnedVersion, reason: null }),
         pollMs: 2,
         stopGraceMs: 50,
@@ -387,4 +388,64 @@ test('a hanging Hugging Face lookup for Add model does not hold up Stop', async 
     assert.equal(stopped, 'stopped');
     // A request that comes back after a drain started is refused, not stored.
     assert.equal(h.controller.state.registry.length, 0);
+});
+
+const PARTIAL_D = `sha256-${'d'.repeat(64)}-partial`;
+const PARTIAL_E = `sha256-${'e'.repeat(64)}-partial`;
+
+function writePartial(h, name, bytes) {
+    const blobs = path.join(h.dataDir, 'models', 'ollama', 'blobs');
+    fs.mkdirSync(blobs, { recursive: true });
+    fs.writeFileSync(path.join(blobs, name), Buffer.alloc(bytes));
+    return path.join(blobs, name);
+}
+
+test('another tag\'s partial Ollama pull neither counts for nor blocks removing a user Ollama model', async (t) => {
+    const user = { id: 'user-olla', sources: { ollama: { type: 'ollama', tag: 'qwen3:0.6b' } } };
+    const h = harness(t, { initialState: {
+        version: 1, deployment: null, params: {}, requests: {}, registry: [user],
+        ollamaPulls: { 'gpt-oss:20b': [`sha256:${'d'.repeat(64)}`] },
+    } });
+    writePartial(h, PARTIAL_D, 4096);
+    const overview = await h.controller.overview();
+    assert.equal(overview.models.find((model) => model.id === 'user-olla').runners.ollama.download.state, 'absent');
+    assert.deepEqual(overview.models.find((model) => model.id === 'gpt-oss-20b').runners.ollama.download,
+        { state: 'partial', bytes: 4096, total: GPT.sources.ollama.size });
+    await h.controller.removeModel({ modelId: 'user-olla' });
+    assert.equal(h.controller.state.registry.length, 0);
+});
+
+test('deleting a tag\'s Ollama weights frees its paused partial and orphans, and leaves other tags\' partials', async (t) => {
+    const h = harness(t, { initialState: {
+        version: 1, deployment: null, params: {}, requests: {}, registry: [],
+        ollamaPulls: { 'gpt-oss:20b': [`sha256:${'e'.repeat(64)}`], 'granite4:tiny-h': [`sha256:${'d'.repeat(64)}`] },
+    } });
+    const own = writePartial(h, PARTIAL_E, 4096);
+    const ownParts = writePartial(h, `${PARTIAL_E}-0`, 10);
+    const other = writePartial(h, PARTIAL_D, 2048);
+    const orphan = writePartial(h, `sha256-${'f'.repeat(64)}-partial`, 1024);
+    const deleted = await h.controller.deleteWeights({ modelId: 'gpt-oss-20b', runnerId: 'ollama' });
+    assert.equal(deleted.freedBytes, 4096 + 10 + 1024);
+    assert.equal(fs.existsSync(own) || fs.existsSync(ownParts) || fs.existsSync(orphan), false);
+    assert.equal(fs.existsSync(other), true);
+    assert.deepEqual(Object.keys(h.controller.state.ollamaPulls), ['granite4:tiny-h']);
+});
+
+test('an Ollama pull records the blob digests it touches', async (t) => {
+    const digest = `sha256:${'a'.repeat(64)}`;
+    const events = [
+        { status: 'pulling manifest' },
+        { status: `pulling ${digest.slice(7, 19)}`, digest, total: 1000, completed: 100 },
+        { status: 'pulling x', digest: 'sha256:../../etc/passwd', total: 1, completed: 0 },
+        { error: 'connection reset' },
+    ];
+    const body = [new TextEncoder().encode(events.map((event) => JSON.stringify(event)).join('\n') + '\n')];
+    const h = harness(t, {
+        fetchImpl: async (url) => (String(url).endsWith('/api/pull')
+            ? { ok: true, status: 200, body }
+            : { ok: true, status: 200, json: async () => ({}) }),
+    });
+    await h.controller.run({ modelId: 'gpt-oss-20b', runnerId: 'ollama', requestId: 'request-0001' });
+    await until(() => phase(h) === 'error');
+    assert.deepEqual(h.controller.state.ollamaPulls, { 'gpt-oss:20b': [digest] });
 });
