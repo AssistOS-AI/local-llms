@@ -1,7 +1,8 @@
 // local_llm_test_prompt: an admin smoke chat against this agent's own runner.
 //
-// Exception to the workspace inference-routing rule, approved on 2026-09-23
-// through the user's delegated monitor and recorded in
+// Exception to the workspace inference-routing rule, approved by the user in
+// the implementation session's question dialog on 2026-09-23, with its bounds
+// set in the user's follow-up message, and recorded in
 // docs/specs/DS001-agent-contract.md (Question #3) and the plan: Soul
 // Gateway refuses an agent calling its own discovered model, so this admin
 // check cannot take the AchillesAgentLib -> Soul Gateway path. It sends the

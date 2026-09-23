@@ -90,7 +90,7 @@ Response: `llama-server` b11125 reads the key from `--api-key`, `LLAMA_API_KEY` 
 
 ### Question #3: How does the admin test prompt reach the model?
 
-Response: Through a narrow exception to the workspace rule that request-time inference goes through AchillesAgentLib. It was approved on 2026-09-23 through the user's delegated monitor, after Soul Gateway's self-call guard was observed to refuse the planned path (AchillesAgentLib from inside local-llm to `soul_gateway/local-llms/local-llm/default`). The exception covers `local_llm_test_prompt` only (`src/testPrompt.mjs`), with these bounds:
+Response: Through a narrow exception to the workspace rule that request-time inference goes through AchillesAgentLib. It was approved by the user in the implementation session's question dialog on 2026-09-23, with its bounds set in the user's follow-up message the same day, after Soul Gateway's self-call guard was observed to refuse the planned path (AchillesAgentLib from inside local-llm to `soul_gateway/local-llms/local-llm/default`). The exception covers `local_llm_test_prompt` only (`src/testPrompt.mjs`), with these bounds:
 
 | Bound | How it is enforced |
 | --- | --- |
