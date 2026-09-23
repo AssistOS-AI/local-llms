@@ -7,7 +7,9 @@ import test from 'node:test';
 import { loadSeedCatalog } from '../src/controller/catalog.mjs';
 import { createController } from '../src/controller/deployments.mjs';
 import { DownloadError } from '../src/controller/downloader.mjs';
+import { manifestPath } from '../src/controller/ollamaStore.mjs';
 import { createStateStore } from '../src/controller/stateStore.mjs';
+import { DRAIN_RUNNER_GRACE_MS } from '../src/drainBudget.mjs';
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
@@ -48,7 +50,8 @@ function fakeRunnerFactory({ quietAfterFirst = false } = {}) {
                 env,
                 exited: exit.promise,
                 get running() { return running; },
-                async stop() {
+                async stop(options) {
+                    handle.stopOptions = options;
                     if (running) {
                         running = false;
                         handle.stopped = true;
@@ -80,6 +83,7 @@ function harness(t, {
     quietAfterFirst = false,
     resolveHf = null,
     fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({}) }),
+    stopGraceMs = 50,
 } = {}) {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-controller-'));
     t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
@@ -110,7 +114,7 @@ function harness(t, {
         fetchImpl,
         detectRunner: (runner) => ({ installed: runner.supported, version: runner.pinnedVersion, reason: null }),
         pollMs: 2,
-        stopGraceMs: 50,
+        stopGraceMs,
         ...(resolveHf ? { resolveHf } : {}),
     });
     return { controller, runners, calls, dataDir, stateStore, setInspect: (next) => { inspectImpl = next; } };
@@ -574,4 +578,104 @@ test('an abort that lands as the download completes starts no runner', async (t)
     await h.controller.drain();
     assert.equal(h.runners.started.length, 0);
     assert.notEqual(phase(h), 'ready');
+});
+
+test('two Add model requests for one id store it once', async (t) => {
+    const lookups = [];
+    const h = harness(t, { resolveHf: () => { const lookup = deferred(); lookups.push(lookup); return lookup.promise; } });
+    const entry = {
+        id: 'user-qwen', displayName: 'Q',
+        sources: { 'llama.cpp': { type: 'huggingface', repo: 'Qwen/Qwen3-0.6B-GGUF', file: 'Qwen3-0.6B-Q8_0.gguf', revision: 'main' } },
+    };
+    // Both pass the early id check while their lookups run outside the queue.
+    const results = Promise.allSettled([h.controller.addModel(entry), h.controller.addModel(entry)]);
+    await until(() => lookups.length === 2);
+    for (const lookup of lookups) lookup.resolve({ commit: 'a'.repeat(40), size: 4, sha256: 'c'.repeat(64) });
+    const settled = await results;
+    assert.deepEqual(settled.map((result) => result.status).sort(), ['fulfilled', 'rejected']);
+    assert.equal(settled.find((result) => result.status === 'rejected').reason.code, 'duplicate_model');
+    assert.equal(h.controller.state.registry.length, 1);
+});
+
+const OLLAMA_USER = Object.freeze({ id: 'user-olla', displayName: 'Q', sources: { ollama: { type: 'ollama', tag: 'qwen3:0.6b' } } });
+
+// A complete Ollama store entry: a manifest and its one blob.
+function writeOllamaModel(h, tag, bytes = 16) {
+    const modelsDir = path.join(h.dataDir, 'models', 'ollama');
+    const hex = 'b'.repeat(64);
+    fs.mkdirSync(path.join(modelsDir, 'blobs'), { recursive: true });
+    fs.writeFileSync(path.join(modelsDir, 'blobs', `sha256-${hex}`), Buffer.alloc(bytes));
+    const target = manifestPath(modelsDir, tag);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, JSON.stringify({
+        schemaVersion: 2, layers: [{ digest: `sha256:${hex}`, size: bytes, mediaType: 'application/vnd.ollama.image.model' }],
+    }));
+}
+
+test('an abort that lands as an Ollama pull completes neither re-checks admission nor loads the model', async (t) => {
+    let snapshots = 0;
+    const generate = [];
+    const encoder = new TextEncoder();
+    const h = harness(t, {
+        initialState: { version: 1, deployment: null, params: {}, requests: {}, registry: [OLLAMA_USER] },
+        snap: () => { snapshots += 1; return snapshot(); },
+        fetchImpl: async (url, options = {}) => {
+            if (String(url).endsWith('/api/generate')) generate.push(url);
+            if (!String(url).endsWith('/api/pull')) return { ok: true, status: 200, json: async () => ({ models: [] }) };
+            const body = {
+                async *[Symbol.asyncIterator]() {
+                    // The pull finishes exactly as the abort lands.
+                    await new Promise((resolve) => options.signal.addEventListener('abort', resolve, { once: true }));
+                    writeOllamaModel(h, 'qwen3:0.6b');
+                    yield encoder.encode(`${JSON.stringify({ status: 'success' })}\n`);
+                },
+            };
+            return { ok: true, status: 200, body };
+        },
+    });
+    await h.controller.run({ modelId: 'user-olla', runnerId: 'ollama', requestId: 'request-0001' });
+    await until(() => phase(h) === 'downloading');
+    const before = snapshots;
+    await h.controller.stop();
+    assert.equal(snapshots, before, 'no admission re-check after the abort');
+    assert.deepEqual(generate, []);
+});
+
+test('an abort during the Ollama admission re-check does not load the model', async (t) => {
+    let snapshots = 0;
+    const recheck = deferred();
+    const generate = [];
+    const h = harness(t, {
+        initialState: { version: 1, deployment: null, params: {}, requests: {}, registry: [OLLAMA_USER] },
+        snap: async () => {
+            snapshots += 1;
+            // The first snapshot is Run's admission; the second is the re-check.
+            if (snapshots === 2) {
+                recheck.resolve();
+                await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            return snapshot();
+        },
+        fetchImpl: async (url) => {
+            if (String(url).endsWith('/api/generate')) generate.push(url);
+            return { ok: true, status: 200, json: async () => ({ models: [] }) };
+        },
+    });
+    writeOllamaModel(h, 'qwen3:0.6b');
+    await h.controller.run({ modelId: 'user-olla', runnerId: 'ollama', requestId: 'request-0001' });
+    await recheck.promise;
+    await h.controller.stop();
+    assert.deepEqual(generate, []);
+    assert.notEqual(phase(h), 'ready');
+});
+
+test('a drain stops the runner with the short drain grace, a Stop with the full grace', async (t) => {
+    for (const [action, graceMs] of [['drain', DRAIN_RUNNER_GRACE_MS], ['stop', 10_000]]) {
+        const h = harness(t, { stopGraceMs: 10_000 });
+        await h.controller.run({ ...RUN, requestId: 'request-0001' });
+        h.calls.download[0].entry.resolve({ status: 'complete', path: '/data/models/gpt.gguf', bytesTransferred: 0 });
+        await until(() => phase(h) === 'ready');
+        await h.controller[action]();
+        assert.deepEqual(h.runners.started[0].stopOptions, { graceMs }, action);
+    }
 });

@@ -272,3 +272,49 @@ test('a failed status call backs off and keeps polling while the modal is open',
     assert.equal(h.pending.size, 1);
     assert.equal([...h.pending.values()][0].ms, 1500, 'back to the normal interval after a success');
 });
+
+function deferred() {
+    let resolve;
+    const promise = new Promise((ok) => { resolve = ok; });
+    return { promise, resolve };
+}
+
+test('at most one status request is in flight; a poll asked for meanwhile runs once after it', { timeout: 5000 }, async (t) => {
+    const replies = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const h = pollingHarness(t, async () => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        const reply = deferred();
+        replies.push(reply);
+        try {
+            return await reply.promise;
+        } finally {
+            inFlight -= 1;
+        }
+    });
+    const p = h.presenter;
+    p.status = { phase: 'downloading' };
+    const first = p.poll();
+    await h.settle();
+    assert.equal(replies.length, 1);
+    // A direct poll and a forced restart while the request is pending only
+    // mark a follow-up; they neither send a request nor arm a timer.
+    const second = p.poll();
+    p.startPollingIfActive(true);
+    await h.settle();
+    assert.equal(replies.length, 1);
+    assert.equal(h.pending.size, 0);
+    await second;
+    replies[0].resolve(statusText('downloading'));
+    await first;
+    await h.settle();
+    assert.equal(h.pending.size, 1);
+    assert.equal([...h.pending.values()][0].ms, 0, 'the follow-up runs at once');
+    await h.fireAll();
+    assert.equal(replies.length, 2);
+    assert.equal(maxInFlight, 1);
+    replies[1].resolve(statusText('ready'));
+    await h.settle();
+});
