@@ -281,3 +281,19 @@ test('overview lists runners, per-runner sizes, download state and admission', a
     assert.equal(gpt.runners.lmstudio.admission.status, 'incompatible');
     assert.equal(gpt.runners['llama.cpp'].context.totalContext, 16384);
 });
+
+test('completion speed is recorded only while a model is ready and is shown in status', async (t) => {
+    const h = harness(t, { downloads: ['complete'] });
+    assert.deepEqual(h.controller.recordCompletion({ generationTokensPerSecond: 50 }), { recorded: false });
+    await h.controller.run({ ...RUN, requestId: 'request-0001' });
+    await until(() => phase(h) === 'ready');
+    const stats = { promptTokens: 12, completionTokens: 34, promptTokensPerSecond: 400.5, generationTokensPerSecond: 58.2, source: 'runner timings' };
+    assert.deepEqual(h.controller.recordCompletion({ ...stats, apiKey: 'ignored', promptTokens: -1 }), { recorded: true });
+    const { lastCompletion, logs } = await h.controller.status({ sinceSeq: 0 });
+    assert.equal(lastCompletion.modelId, 'gpt-oss-20b');
+    assert.equal(lastCompletion.runnerId, 'llama.cpp');
+    assert.equal(lastCompletion.promptTokens, null);
+    assert.equal(lastCompletion.generationTokensPerSecond, 58.2);
+    assert.equal(lastCompletion.apiKey, undefined);
+    assert.ok(logs.some((entry) => /completion served: 34 tokens at 58\.2 tokens\/s/.test(entry.line)));
+});

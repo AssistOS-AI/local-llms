@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import test from 'node:test';
 
 import { TOOL_NAMES, TOOL_OPERATIONS, assertAdmin, authInfoFromEnvelope, handleTool } from '../tools/local_llm_tool.mjs';
-import { buildRunnerRequest, respond } from '../src/chatResponder.mjs';
+import { buildRunnerRequest, completionStats, respond } from '../src/chatResponder.mjs';
+import { GATEWAY_MODEL, runTestPrompt } from '../src/testPrompt.mjs';
 
 const ROOT = new URL('..', import.meta.url);
 const read = (file) => JSON.parse(fs.readFileSync(new URL(file, ROOT), 'utf8'));
@@ -96,4 +97,77 @@ test('the chat responder forwards to the ready runner with its key, and answers 
     assert.deepEqual(JSON.parse(forwarded.init.body), { model: 'gpt-oss-20b', messages: [{ role: 'user', content: 'hi' }], max_tokens: 5 });
     assert.equal(JSON.parse(written).choices[0].message.content, 'hello');
     assert.deepEqual(buildRunnerRequest({ messages: [], stream: true }, { model: 'gpt-oss:20b' }), { messages: [], stream: true, model: 'gpt-oss:20b' });
+});
+
+test('the chat responder reports runner timings from a response and from the last stream chunk', async () => {
+    const timings = { prompt_n: 20, prompt_per_second: 812.5, predicted_n: 7, predicted_per_second: 61.25 };
+    assert.deepEqual(completionStats({ timings, usage: { prompt_tokens: 20, completion_tokens: 7 } }), {
+        promptTokens: 20, completionTokens: 7, promptTokensPerSecond: 812.5, generationTokensPerSecond: 61.25, source: 'runner timings',
+    });
+    assert.deepEqual(completionStats({ usage: { prompt_tokens: 3, completion_tokens: 4 } }).source, 'usage');
+    assert.equal(completionStats({ choices: [] }), null);
+
+    const target = { baseUrl: 'http://127.0.0.1:18080', apiKey: 'k', model: 'gpt-oss-20b' };
+    const reported = [];
+    const call = async (op, args) => {
+        if (op === 'chatTarget') return target;
+        reported.push([op, args]);
+        return { recorded: true };
+    };
+    await respond({ request: { messages: [{ role: 'user', content: 'hi' }] } }, {
+        call,
+        fetchImpl: async () => ({ ok: true, json: async () => ({ choices: [], timings }) }),
+        out: { write() {} },
+    });
+    const sse = [
+        'data: {"choices":[{"delta":{"content":"he"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"llo"}}],"timings":{"prompt_n":5,"predicted_n":2,"predicted_per_second":44}}\n',
+        '\ndata: [DONE]\n\n',
+    ];
+    let streamed = '';
+    await respond({ request: { messages: [], stream: true } }, {
+        call,
+        fetchImpl: async () => ({ ok: true, body: sse.map((part) => new TextEncoder().encode(part)) }),
+        out: { write(chunk) { streamed += new TextDecoder().decode(chunk); } },
+    });
+    assert.equal(streamed, sse.join(''));
+    assert.deepEqual(reported.map(([op, args]) => [op, args.generationTokensPerSecond, args.completionTokens]), [
+        ['recordCompletion', 61.25, 7],
+        ['recordCompletion', 44, 2],
+    ]);
+    // A failed report never fails the completion.
+    await respond({ request: { messages: [] } }, {
+        call: async (op) => { if (op === 'chatTarget') return target; throw new Error('socket gone'); },
+        fetchImpl: async () => ({ ok: true, json: async () => ({ timings }) }),
+        out: { write() {} },
+    });
+});
+
+test('the test prompt goes through AchillesAgentLib to the gateway model and reports runner speed', async () => {
+    const seen = {};
+    class FakeLLMAgent {
+        constructor(options) { seen.name = options.name; }
+        async complete(options) { seen.options = options; return 'PONG'; }
+    }
+    const at = new Date(Date.now() + 5).toISOString();
+    const call = async (op) => {
+        if (op === 'chatTarget') return { runnerId: 'llama.cpp', modelId: 'gpt-oss-20b', baseUrl: 'http://127.0.0.1:18080', apiKey: 'secret-key' };
+        if (op === 'status') return { lastCompletion: { at, modelId: 'gpt-oss-20b', promptTokens: 9, completionTokens: 2, promptTokensPerSecond: 300, generationTokensPerSecond: 60, source: 'runner timings' } };
+        throw new Error(op);
+    };
+    const result = await runTestPrompt({ prompt: 'Reply with exactly: PONG', maxTokens: 16, call, loadAgent: async () => FakeLLMAgent });
+    assert.equal(seen.options.model, GATEWAY_MODEL);
+    assert.equal(GATEWAY_MODEL, 'soul_gateway/local-llms/local-llm/default');
+    assert.deepEqual(seen.options.params, { max_tokens: 16 });
+    assert.equal(result.text, 'PONG');
+    assert.equal(result.generationTokensPerSecond, 60);
+    assert.equal(result.statsSource, 'runner timings');
+    assert.equal(JSON.stringify(result).includes('secret-key'), false);
+    const notReady = async () => { throw Object.assign(new Error('No local model is ready.'), { code: 'not_ready' }); };
+    await assert.rejects(() => runTestPrompt({ prompt: 'x', call: notReady, loadAgent: async () => assert.fail('not loaded') }), { code: 'not_ready' });
+});
+
+test('the manifest keeps local-llm out of the generic agent tier', () => {
+    const manifest = read('manifest.json');
+    assert.deepEqual(manifest.capabilities.tags, ['local-llm']);
 });

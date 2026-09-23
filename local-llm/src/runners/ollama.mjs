@@ -102,6 +102,10 @@ function buildLaunch({ params, port, dataDir, model } = {}) {
         OLLAMA_NUM_PARALLEL: '1',
         OLLAMA_MAX_LOADED_MODELS: '1',
         OLLAMA_KV_CACHE_TYPE: values.kvCacheType,
+        // The OpenAI-compatible /v1 endpoint takes no `options`; this makes
+        // num_ctx the server default so a chat request does not reload the
+        // model with a different context.
+        OLLAMA_CONTEXT_LENGTH: String(values.numCtx),
         OLLAMA_KEEP_ALIVE: values.keepAlive,
         OLLAMA_NO_CLOUD: '1',
         LD_LIBRARY_PATH: NVIDIA_LIB_DIR

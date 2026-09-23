@@ -85,6 +85,7 @@ const startup = (async () => {
             updateModel: (args) => controller.updateModel(args.model),
             removeModel: (args) => controller.removeModel(args),
             chatTarget: () => controller.chatTarget(),
+            recordCompletion: (args) => controller.recordCompletion(args),
         },
     });
     if (stopping) return;

@@ -43,6 +43,13 @@
       "supportsStream": true
     }
   },
+  "capabilities": {
+    "tags": [
+      "local-llm"
+    ],
+    "summary": "Serves the open-weight model an administrator runs on this workspace's GPU.",
+    "whenToUse": "Call soul_gateway/local-llms/local-llm/default for private, on-machine generation once a model is ready; it answers 503 not_ready otherwise."
+  },
   "profiles": {
     "default": {
       "env": {

@@ -246,6 +246,7 @@ describe('Ollama runner', () => {
             OLLAMA_NUM_PARALLEL: '1',
             OLLAMA_MAX_LOADED_MODELS: '1',
             OLLAMA_KV_CACHE_TYPE: 'q8_0',
+            OLLAMA_CONTEXT_LENGTH: '4096',
             OLLAMA_KEEP_ALIVE: '30m',
             OLLAMA_NO_CLOUD: '1',
             LD_LIBRARY_PATH: '/usr/local/nvidia/lib64'

@@ -85,6 +85,9 @@ export function createController({
     let job = null;
     let runner = null;
     let draining = false;
+    // Speed of the last completion served by the ready runner, as the chat
+    // responder reported it. In memory only: it describes this runner start.
+    let lastCompletion = null;
 
     // Every runner lookup goes through the injected table, so tests and the
     // overview see the same definitions the pipelines launch.
@@ -234,7 +237,29 @@ export function createController({
             gpu,
             runnerReport: parseRunnerReport(log.all()),
             context: deployment && definition?.describeContext ? definition.describeContext(deployment.params) : null,
+            lastCompletion,
         };
+    }
+
+    function recordCompletion(stats = {}) {
+        const deployment = state.deployment;
+        if (!deployment || deployment.phase !== 'ready') return { recorded: false };
+        const count = (value) => (Number.isFinite(value) && value >= 0 && value < 1e9 ? value : null);
+        lastCompletion = Object.freeze({
+            at: now().toISOString(),
+            deploymentId: deployment.id,
+            runnerId: deployment.runnerId,
+            modelId: deployment.modelId,
+            promptTokens: count(stats.promptTokens),
+            completionTokens: count(stats.completionTokens),
+            promptTokensPerSecond: count(stats.promptTokensPerSecond),
+            generationTokensPerSecond: count(stats.generationTokensPerSecond),
+            source: stats.source === 'runner timings' ? 'runner timings' : 'usage',
+        });
+        const speed = lastCompletion.generationTokensPerSecond;
+        log.append('controller', `completion served: ${lastCompletion.completionTokens ?? '?'} tokens`
+            + `${speed === null ? '' : ` at ${speed.toFixed(1)} tokens/s`}`);
+        return { recorded: true };
     }
 
     function chatTarget() {
@@ -724,6 +749,7 @@ export function createController({
         overview,
         status,
         chatTarget,
+        recordCompletion,
         run,
         stop,
         cancelDownload,

@@ -15,6 +15,60 @@ const FORWARDED_FIELDS = new Set([
     'reasoning_effort', 'chat_template_kwargs', 'logprobs', 'top_logprobs',
 ]);
 
+// Runner-reported speed for the Settings test prompt: llama.cpp adds
+// `timings` to a response and to the last stream chunk; Ollama's /v1 gives
+// token counts in `usage` only.
+export function completionStats(body) {
+    if (!body || typeof body !== 'object') return null;
+    const timings = body.timings && typeof body.timings === 'object' ? body.timings : null;
+    const usage = body.usage && typeof body.usage === 'object' ? body.usage : null;
+    if (!timings && !usage) return null;
+    const count = (value) => (Number.isFinite(value) && value >= 0 ? value : null);
+    return {
+        promptTokens: count(timings?.prompt_n) ?? count(usage?.prompt_tokens),
+        completionTokens: count(timings?.predicted_n) ?? count(usage?.completion_tokens),
+        promptTokensPerSecond: count(timings?.prompt_per_second),
+        generationTokensPerSecond: count(timings?.predicted_per_second),
+        source: timings ? 'runner timings' : 'usage',
+    };
+}
+
+// Watches SSE `data:` lines as they pass through and keeps the last stats.
+function createStreamStatsReader() {
+    const decoder = new TextDecoder();
+    let pending = '';
+    let stats = null;
+    const scan = (line) => {
+        if (!line.startsWith('data:') || !/"(timings|usage)"/.test(line)) return;
+        try {
+            stats = completionStats(JSON.parse(line.slice(5).trim())) || stats;
+        } catch {}
+    };
+    return {
+        push(chunk) {
+            pending += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
+            let newline;
+            while ((newline = pending.indexOf('\n')) >= 0) {
+                scan(pending.slice(0, newline).trim());
+                pending = pending.slice(newline + 1);
+            }
+        },
+        finish() {
+            scan(pending.trim());
+            return stats;
+        },
+    };
+}
+
+async function reportStats(call, stats) {
+    if (!stats) return;
+    try {
+        await call('recordCompletion', stats, { timeoutMs: 2000 });
+    } catch {
+        // Stats are informational; the completion was already delivered.
+    }
+}
+
 export function buildRunnerRequest(request, target) {
     const body = {};
     for (const [key, value] of Object.entries(request || {})) {
@@ -59,10 +113,17 @@ export async function respond(payload, { call = callController, fetchImpl = glob
         return { status: response.status >= 500 ? 502 : response.status, code: 'runner_error', message: `The runner answered HTTP ${response.status}: ${text}` };
     }
     if (request.stream === true) {
-        for await (const chunk of response.body) out.write(chunk);
+        const reader = createStreamStatsReader();
+        for await (const chunk of response.body) {
+            out.write(chunk);
+            reader.push(chunk);
+        }
+        await reportStats(call, reader.finish());
         return null;
     }
-    out.write(JSON.stringify(await response.json()));
+    const body = await response.json();
+    out.write(JSON.stringify(body));
+    await reportStats(call, completionStats(body));
     return null;
 }
 
