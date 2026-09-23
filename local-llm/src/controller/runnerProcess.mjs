@@ -6,6 +6,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 
 const LOG_FILE_MAX_BYTES = 20 * 1024 * 1024;
 
@@ -83,6 +84,35 @@ export function parseRunnerReport(lines) {
     return report;
 }
 
+// Runner output arrives in arbitrary chunks. Only whole lines are logged, so a
+// line split across chunks (or a multi-byte character) still parses; a line
+// longer than the bound is logged in pieces rather than held forever.
+const MAX_PENDING_LINE = 64 * 1024;
+
+function wholeLines(emit) {
+    const decoder = new StringDecoder('utf8');
+    let pending = '';
+    return {
+        push(chunk) {
+            pending += decoder.write(chunk);
+            const newline = pending.lastIndexOf('\n');
+            if (newline >= 0) {
+                emit(pending.slice(0, newline));
+                pending = pending.slice(newline + 1);
+            }
+            if (pending.length > MAX_PENDING_LINE) {
+                emit(pending);
+                pending = '';
+            }
+        },
+        flush() {
+            pending += decoder.end();
+            if (pending) emit(pending);
+            pending = '';
+        },
+    };
+}
+
 export function startRunnerProcess({ command, args, env, cwd = '/', log, spawnImpl = spawn }) {
     if (!Array.isArray(args) || args.some((value) => typeof value !== 'string')) {
         throw new Error('Runner arguments must be an array of strings');
@@ -95,8 +125,12 @@ export function startRunnerProcess({ command, args, env, cwd = '/', log, spawnIm
         });
         child.once('exit', (code, signal) => resolve({ code, signal, error: null }));
     });
-    child.stdout?.on('data', (chunk) => log.append('stdout', chunk.toString('utf8')));
-    child.stderr?.on('data', (chunk) => log.append('stderr', chunk.toString('utf8')));
+    for (const [name, stream] of [['stdout', child.stdout], ['stderr', child.stderr]]) {
+        if (!stream) continue;
+        const lines = wholeLines((text) => log.append(name, text));
+        stream.on('data', (chunk) => lines.push(chunk));
+        stream.on('end', () => lines.flush());
+    }
     let exitResult = null;
     exited.then((result) => { exitResult = result; });
 
