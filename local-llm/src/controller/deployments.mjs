@@ -29,13 +29,13 @@ import { readSnapshot } from './hardware.mjs';
 import { deleteOllamaModel, deleteOllamaPartials, partialPullBytes, readOllamaManifest } from './ollamaStore.mjs';
 import { createLogBuffer, parseRunnerReport, startRunnerProcess } from './runnerProcess.mjs';
 import { createStateStore, reconcileAfterRestart } from './stateStore.mjs';
+import { DRAIN_QUEUE_WAIT_MS, DRAIN_RUNNER_GRACE_MS } from '../drainBudget.mjs';
 
 const ACTIVE_PHASES = new Set(['downloading', 'verifying', 'starting', 'loading', 'ready', 'stopping']);
 const TRANSFER_PHASES = new Set(['downloading', 'verifying']);
 const REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
 const OLLAMA_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 const DEFAULT_PORTS = Object.freeze({ 'llama.cpp': 18080, ollama: 18434 });
-const DRAIN_QUEUE_WAIT_MS = 5000;
 const PROBE_TIMEOUT_MS = 10_000;
 
 function paramsKey(modelId, runnerId) {
@@ -100,6 +100,12 @@ export function createController({
     // Log sequence number before the current runner started: its report is
     // read only from lines after it, never from a previous runner's output.
     let runnerLogStart = 0;
+
+    // A drain has a fixed time budget (drainBudget.mjs); a Stop gives the
+    // runner the full grace period.
+    function runnerGraceMs() {
+        return draining ? Math.min(stopGraceMs, DRAIN_RUNNER_GRACE_MS) : stopGraceMs;
+    }
 
     // Every runner lookup goes through the injected table, so tests and the
     // overview see the same definitions the pipelines launch.
@@ -568,7 +574,7 @@ export function createController({
                     if (runner && runner.deploymentId === deployment.id) {
                         const stopping = runner;
                         runner = null;
-                        await stopping.stop({ graceMs: stopGraceMs });
+                        await stopping.stop({ graceMs: runnerGraceMs() });
                     }
                     const pausing = ['cancel', 'drain'].includes(current.cancelReason) && wasTransfer;
                     const phase = pausing ? 'paused' : 'idle';
@@ -585,7 +591,7 @@ export function createController({
                 if (runner && runner.deploymentId === deployment.id) {
                     const stopping = runner;
                     runner = null;
-                    await stopping.stop({ graceMs: stopGraceMs });
+                    await stopping.stop({ graceMs: runnerGraceMs() });
                 }
                 setPhase('error', { error: error.message, runner: null });
             })
@@ -605,7 +611,7 @@ export function createController({
             const stopping = runner;
             runner = null;
             if (state.deployment && ACTIVE_PHASES.has(state.deployment.phase)) setPhase('stopping');
-            await stopping.stop({ graceMs: stopGraceMs });
+            await stopping.stop({ graceMs: runnerGraceMs() });
         }
         if (state.deployment && ACTIVE_PHASES.has(state.deployment.phase)) {
             setPhase(reason === 'cancel' && TRANSFER_PHASES.has(state.deployment.phase) ? 'paused' : 'idle', { runner: null });
@@ -874,7 +880,7 @@ export function createController({
         if (runner) {
             const stopping = runner;
             runner = null;
-            await stopping.stop({ graceMs: stopGraceMs });
+            await stopping.stop({ graceMs: runnerGraceMs() });
         }
         if (state.deployment) {
             if (TRANSFER_PHASES.has(state.deployment.phase)) {

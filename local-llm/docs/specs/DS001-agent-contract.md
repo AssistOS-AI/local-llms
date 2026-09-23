@@ -71,10 +71,10 @@ Soul Gateway refuses a call whose caller is the agent that the target model fron
 
 On SIGTERM, SIGINT or SIGHUP the controller:
 
-1. stops accepting new commands, waits up to 5 s for a command already in progress (a Run that reaches its start then refuses with `shutting_down`), and aborts the active job, which checkpoints a download as `paused` and keeps the `.partial` file and its identity sidecar;
-2. stops the runner (SIGTERM, then SIGKILL after the grace period) and reaps it;
-3. closes the control socket and stops AgentServer (SIGTERM, SIGKILL after 15 s);
-4. exits 0, or exits 1 if the whole drain exceeds 30 s.
+1. stops accepting new commands, waits up to 1 s for a command already in progress (a Run that reaches its start then refuses with `shutting_down`), and aborts the active job, which checkpoints a download as `paused` and keeps the `.partial` file and its identity sidecar;
+2. stops the runner (SIGTERM, then SIGKILL after 3 s) and reaps it;
+3. closes the control socket and stops AgentServer (SIGTERM; its own shutdown waits up to 20 s for in-flight tool calls, and it is killed after 21 s);
+4. exits 0, or exits 1 if the whole drain exceeds 30 s. The worst case of steps 1–3 is 25 s, 5 s under that deadline and 10 s under Ploinky's 35 s restart window (`src/drainBudget.mjs`).
 
 If AgentServer exits on its own, the controller stops the runner and exits non-zero, so Ploinky restarts the agent.
 
