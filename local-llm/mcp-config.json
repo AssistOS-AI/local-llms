@@ -12,7 +12,37 @@
       "timeoutMs": 60000,
       "inputSchema": {
         "type": "object",
-        "properties": {},
+        "properties": {
+          "preview": {
+            "type": "object",
+            "description": "Admission for a Run form's values, without saving or downloading.",
+            "properties": {
+              "modelId": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 64,
+                "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+              },
+              "runnerId": {
+                "type": "string",
+                "enum": [
+                  "llama.cpp",
+                  "ollama",
+                  "vllm",
+                  "lmstudio"
+                ]
+              },
+              "params": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "modelId",
+              "runnerId"
+            ],
+            "additionalProperties": false
+          }
+        },
         "additionalProperties": false
       },
       "tags": [

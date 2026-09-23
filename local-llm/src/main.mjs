@@ -75,7 +75,7 @@ const startup = (async () => {
     control = await startControlServer({
         socketPath,
         handlers: {
-            overview: () => controller.overview(),
+            overview: (args) => controller.overview(args),
             status: (args) => controller.status(args),
             run: (args) => controller.run(args),
             stop: () => controller.stop(),

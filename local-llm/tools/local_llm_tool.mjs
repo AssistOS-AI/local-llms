@@ -12,7 +12,7 @@ import { callController } from '../src/controlSocket.mjs';
 import { LocalLlmError, serializeError } from '../src/errors.mjs';
 
 export const TOOL_OPERATIONS = Object.freeze({
-    local_llm_overview: { op: 'overview', args: () => ({}) },
+    local_llm_overview: { op: 'overview', args: (input) => (input.preview ? { preview: input.preview } : {}) },
     local_llm_status: { op: 'status', args: (input) => ({ sinceSeq: input.sinceSeq ?? 0 }) },
     local_llm_run: {
         op: 'run',

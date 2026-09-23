@@ -1,0 +1,13 @@
+{
+  "pluginCategory": "application",
+  "id": "local-llm-settings",
+  "component": "local-llm-settings",
+  "location": [],
+  "label": "Local LLMs",
+  "tooltip": "Run open-weight models on this workspace's GPU.",
+  "presenter": "LocalLlmSettings",
+  "type": "global",
+  "autoPin": false,
+  "dependencies": [],
+  "settings": "local-llm-settings"
+}

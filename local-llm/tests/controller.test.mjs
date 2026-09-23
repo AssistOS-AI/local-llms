@@ -297,3 +297,23 @@ test('completion speed is recorded only while a model is ready and is shown in s
     assert.equal(lastCompletion.apiKey, undefined);
     assert.ok(logs.some((entry) => /completion served: 34 tokens at 58\.2 tokens\/s/.test(entry.line)));
 });
+
+test('overview previews admission for Run form values without saving or downloading', async (t) => {
+    const h = harness(t);
+    const plain = await h.controller.overview();
+    assert.equal(plain.preview, undefined);
+    assert.equal(plain.gatewayModel, 'soul_gateway/local-llms/local-llm/default');
+    const fits = (await h.controller.overview({ preview: { modelId: 'gpt-oss-20b', runnerId: 'llama.cpp', params: { ctxSize: 16384, nCpuMoe: 17 } } })).preview;
+    assert.equal(fits.admission.status, 'ok');
+    assert.equal(fits.params.nCpuMoe, 17);
+    assert.equal(fits.context.totalContext, 16384);
+    const tooBig = (await h.controller.overview({ preview: { modelId: 'gpt-oss-20b', runnerId: 'llama.cpp', params: { ctxSize: 131072, nCpuMoe: 0 } } })).preview;
+    assert.equal(tooBig.admission.status, 'incompatible');
+    const invalid = (await h.controller.overview({ preview: { modelId: 'gpt-oss-20b', runnerId: 'llama.cpp', params: { ctxSize: 'x' } } })).preview;
+    assert.match(invalid.error, /ctxSize/);
+    const vllm = (await h.controller.overview({ preview: { modelId: 'gpt-oss-20b', runnerId: 'vllm' } })).preview;
+    assert.equal(vllm.admission.status, 'incompatible');
+    await assert.rejects(() => h.controller.overview({ preview: { modelId: 'nope-model', runnerId: 'llama.cpp' } }), { code: 'unknown_model' });
+    assert.equal(h.calls.download.length, 0);
+    assert.deepEqual(h.controller.state.params, {});
+});

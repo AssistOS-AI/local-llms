@@ -164,7 +164,34 @@ export function createController({
 
     // ---------------------------------------------------------------- reads
 
-    async function overview() {
+    // Admission for the Run form's current values, before anything is saved
+    // or downloaded. Parameter errors come back as data for the form.
+    async function previewRun({ modelId, runnerId, params } = {}, snap) {
+        const model = findModel(modelId);
+        const definition = getRunner(runnerId);
+        const source = model.sources[runnerId] || (runnerId === 'vllm' ? model.sources['llama.cpp'] : undefined);
+        if (!definition.supported || !source) {
+            return { modelId, runnerId, params: null, context: null,
+                admission: admit({ runner: definition, model, source, params: {}, snapshot: snap }) };
+        }
+        let normalized;
+        try {
+            normalized = effectiveParams(model, runnerId, params && typeof params === 'object' ? params : undefined);
+        } catch (error) {
+            return { modelId, runnerId, error: error.message, field: error.details?.field ?? null };
+        }
+        const disk = await downloadState(model, runnerId);
+        const remaining = disk?.total ? Math.max(0, disk.total - (disk.bytes || 0)) : 0;
+        return {
+            modelId,
+            runnerId,
+            params: normalized,
+            context: definition.describeContext ? definition.describeContext(normalized) : null,
+            admission: admit({ runner: definition, model, source, params: normalized, snapshot: snap, remainingDownloadBytes: remaining }),
+        };
+    }
+
+    async function overview({ preview = null } = {}) {
         const snap = await snapshot();
         const runnerList = Object.values(runners).map((definition) => ({
             id: definition.id,
@@ -217,7 +244,14 @@ export function createController({
                 runners: perRunner,
             });
         }
-        return { hardware: snap, runners: runnerList, models, deployment: publicDeployment() };
+        return {
+            hardware: snap,
+            runners: runnerList,
+            models,
+            deployment: publicDeployment(),
+            gatewayModel: 'soul_gateway/local-llms/local-llm/default',
+            ...(preview ? { preview: await previewRun(preview, snap) } : {}),
+        };
     }
 
     async function status({ sinceSeq = 0 } = {}) {
