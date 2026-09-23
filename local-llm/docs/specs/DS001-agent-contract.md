@@ -61,7 +61,7 @@ Each tool call verifies the invocation grant with `authInfoFromInvocation` from 
 
 ### Chat endpoint
 
-AgentServer runs `src/chatResponder.mjs` for each `POST /v1/chat/completions` routed to the agent. The responder asks the controller for the ready deployment (`chatTarget`), keeps only OpenAI chat fields from the request, replaces `model` with the deployed model, and forwards to the runner on `127.0.0.1` with the runner's per-start API key. With no ready model it answers 503 `not_ready`. Streaming requests are piped through unchanged.
+AgentServer runs `src/chatResponder.mjs` for each `POST /v1/chat/completions` routed to the agent. The responder asks the controller for the ready deployment (`chatTarget`), keeps only OpenAI chat fields from the request, replaces `model` with the deployed model, and forwards to the runner on `127.0.0.1`: llama.cpp with its per-start API key, Ollama without a key (it has none; it listens only on loopback inside the container and the agent-port relay is closed). With no ready model it answers 503 `not_ready`. Streaming requests are piped through unchanged.
 
 The Router lists the agent at `/api/router/openai-agent-discovery` because the manifest declares `endpoints.chatCompletions`. The workspace-local Soul Gateway turns it into the model `local-llms/local-llm/default` (AgentServer's fallback `/v1/models` id), and AchillesAgentLib callers in other agents reach it as `soul_gateway/local-llms/local-llm/default`. That is the only way other agents use the model. The manifest's `capabilities.tags: ["local-llm"]` keeps the model out of the gateway's shared `generic-agent` group.
 
@@ -71,7 +71,7 @@ Soul Gateway refuses a call whose caller is the agent that the target model fron
 
 On SIGTERM, SIGINT or SIGHUP the controller:
 
-1. stops accepting new commands and aborts the active job, which checkpoints a download as `paused` and keeps the `.partial` file and its identity sidecar;
+1. stops accepting new commands, waits up to 5 s for a command already in progress (a Run that reaches its start then refuses with `shutting_down`), and aborts the active job, which checkpoints a download as `paused` and keeps the `.partial` file and its identity sidecar;
 2. stops the runner (SIGTERM, then SIGKILL after the grace period) and reaps it;
 3. closes the control socket and stops AgentServer (SIGTERM, SIGKILL after 15 s);
 4. exits 0, or exits 1 if the whole drain exceeds 30 s.

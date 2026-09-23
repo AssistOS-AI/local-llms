@@ -317,3 +317,37 @@ test('overview previews admission for Run form values without saving or download
     assert.equal(h.calls.download.length, 0);
     assert.deepEqual(h.controller.state.params, {});
 });
+
+test('stop clears a failed deployment', async (t) => {
+    const h = harness(t, { downloads: ['complete'] });
+    await h.controller.run({ ...RUN, requestId: 'request-0001' });
+    await until(() => phase(h) === 'ready');
+    h.runners.started[0].crash(1);
+    await until(() => phase(h) === 'error');
+    await h.controller.stop();
+    assert.equal(phase(h), 'idle');
+    assert.equal(h.controller.state.deployment.error, null);
+});
+
+test('a drain waits for a Run already in the queue, which then refuses to start a job', async (t) => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let snapshots = 0;
+    const h = harness(t, {
+        downloads: ['complete'],
+        snap: async () => {
+            snapshots += 1;
+            if (snapshots === 1) await gate;
+            return snapshot();
+        },
+    });
+    const running = h.controller.run({ ...RUN, requestId: 'request-0001' });
+    await until(() => snapshots === 1);
+    const drained = h.controller.drain();
+    release();
+    await assert.rejects(running, { code: 'shutting_down' });
+    await drained;
+    assert.equal(h.calls.download.length, 0);
+    assert.equal(h.controller.state.deployment, null);
+    await assert.rejects(() => h.controller.run({ ...RUN, requestId: 'request-0002' }), { code: 'shutting_down' });
+});

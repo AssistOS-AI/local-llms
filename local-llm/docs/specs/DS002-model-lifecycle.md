@@ -29,7 +29,7 @@ Nothing is downloaded at enable, at restart, when Settings is opened, or when a 
 
 | Runner | Download |
 | --- | --- |
-| llama.cpp | `src/controller/downloader.mjs` fetches `/<repo>/resolve/<commit>/<file>` into `/data/models/gguf/<repo>/<commit>/<file>.partial`, with an identity sidecar `<file>.partial.json`. It resumes with `Range`, restarts on a 200 reply, discards the partial on an invalid `Content-Range` or a changed identity, re-resolves expired redirects, refuses to start when free space is below the remaining bytes plus 5 %, pauses on `ENOSPC`, and renames the file into place only after the sha256 matches. |
+| llama.cpp | `src/controller/downloader.mjs` fetches `/<repo>/resolve/<commit>/<file>` into `/data/models/gguf/<repo>/<commit>/<file>.partial` (the file's whole relative path, so same-named files in different folders never share a location), with an identity sidecar `<file>.partial.json`. It resumes with `Range`, restarts on a 200 reply, discards the partial on an invalid `Content-Range` or a changed identity, re-resolves expired redirects, refuses to start when free space is below the remaining bytes plus 5 %, pauses on `ENOSPC`, and renames the file into place only after the sha256 matches. |
 | Ollama | The controller starts `ollama serve` with `OLLAMA_MODELS=/data/models/ollama` and streams `/api/pull`. When the catalog pins `manifestDigest`, the stored manifest must hash to it. |
 
 `HF_TOKEN`, when set in the agent profile, is sent as a Bearer header to the Hugging Face base URL and is never logged. Node's `fetch` drops the header when a redirect leaves that origin, so the signed CDN URL never receives it.
@@ -41,7 +41,7 @@ idle ──run──▶ downloading ──▶ verifying ──▶ starting ─�
   ▲              │ cancel / drain                                  │ stop
   │              ▼                                                  ▼
   └──────────  paused  ◀── restart ──                           stopping ──▶ idle
-any phase ── failure ──▶ error (the next run or stop clears it)
+any phase ── failure ──▶ error (the next run or stop clears it; stop also clears paused)
 ```
 
 One deployment exists at a time. A second `run` while one is active is rejected with `busy` unless `replace: true`. A repeated `run` with the same `requestId` is a no-op, so a client retry cannot start a second job. Before the download and again before the runner starts, admission (DS003) is evaluated against the current hardware snapshot.

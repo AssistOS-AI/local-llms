@@ -34,6 +34,8 @@ const ACTIVE_PHASES = new Set(['downloading', 'verifying', 'starting', 'loading'
 const TRANSFER_PHASES = new Set(['downloading', 'verifying']);
 const REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
 const DEFAULT_PORTS = Object.freeze({ 'llama.cpp': 18080, ollama: 18434 });
+const DRAIN_QUEUE_WAIT_MS = 5000;
+const PROBE_TIMEOUT_MS = 10_000;
 
 function paramsKey(modelId, runnerId) {
     return `${modelId}|${runnerId}`;
@@ -321,7 +323,10 @@ export function createController({
             if (signal?.aborted) throw new LocalLlmError('aborted', 'Stopped while starting.');
             if (process && !process.running) throw new LocalLlmError('runner_exited', 'The runner exited while starting.');
             try {
-                const response = await fetchImpl(url, { headers, signal });
+                // Each probe has its own deadline, so a runner that accepts the
+                // connection and never answers cannot outlast readyTimeoutMs.
+                const probeSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(PROBE_TIMEOUT_MS)]) : AbortSignal.timeout(PROBE_TIMEOUT_MS);
+                const response = await fetchImpl(url, { headers, signal: probeSignal });
                 if (accept(response)) return response;
             } catch (error) {
                 if (signal?.aborted) throw new LocalLlmError('aborted', 'Stopped while starting.');
@@ -609,6 +614,9 @@ export function createController({
             state.params[paramsKey(model.id, runnerId)] = normalized;
             const at = now().toISOString();
             // The job holds this immutable copy: later registry edits cannot redirect it.
+            if (draining) {
+                throw new LocalLlmError('shutting_down', 'The agent is restarting; run the model again once it is back.');
+            }
             state.deployment = {
                 id: crypto.randomUUID(),
                 requestId,
@@ -636,6 +644,10 @@ export function createController({
     function stop() {
         return queue.run(async () => {
             await stopEverything('stop');
+            // Stop also clears a failed or paused deployment (a paused partial stays on disk).
+            if (state.deployment && ['error', 'paused'].includes(state.deployment.phase)) {
+                setPhase('idle', { runner: null, error: null, pausedReason: null });
+            }
             return { deployment: publicDeployment() };
         });
     }
@@ -756,7 +768,11 @@ export function createController({
      */
     async function drain() {
         draining = true;
-        queue.close();
+        // Let a command that is already running finish first (a Run refuses to
+        // start a job once draining is set); bounded so it cannot block the drain.
+        const waited = new AbortController();
+        await Promise.race([queue.close(), sleep(DRAIN_QUEUE_WAIT_MS, waited.signal)]);
+        waited.abort();
         if (job) {
             job.cancelReason = 'cancel';
             job.abort.abort();

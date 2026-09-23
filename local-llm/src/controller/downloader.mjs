@@ -241,7 +241,9 @@ export function artifactPaths({ root, artifact }) {
     assertArtifact(artifact);
     const base = path.resolve(root);
     const dir = path.join(base, ...artifact.repo.split('/'), artifact.commit);
-    const file = path.join(dir, path.posix.basename(artifact.file));
+    // The whole relative path, not its basename: two files with the same name
+    // in different folders of one commit must not share a location.
+    const file = path.join(dir, ...artifact.file.split('/'));
     assertInside(base, dir);
     assertInside(dir, file);
     const partial = `${file}.partial`;
@@ -648,7 +650,7 @@ export async function downloadArtifact({
     }
     const have = await reconcilePartial(fsApi, paths, artifact);
     await assertFreeSpace({ fsApi, statfs, dir: paths.dir, remaining: artifact.size - have });
-    await fsApi.promises.mkdir(paths.dir, { recursive: true });
+    await fsApi.promises.mkdir(path.dirname(paths.file), { recursive: true });
     await writeJsonAtomic(fsApi, paths.identity, identityOf(artifact));
     const ctx = {
         artifact,
@@ -703,6 +705,6 @@ export async function removeArtifact({ root, artifact }) {
     for (const target of [paths.file, paths.partial, paths.identity, paths.meta]) {
         freed += await removeFile(target);
     }
-    await removeEmptyParents(path.resolve(root), paths.dir);
+    await removeEmptyParents(path.resolve(root), path.dirname(paths.file));
     return freed;
 }

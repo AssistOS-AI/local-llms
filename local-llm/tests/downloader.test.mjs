@@ -155,7 +155,7 @@ function route(state, req, res) {
         }]);
         return;
     }
-    if (url.pathname === resolvePath) {
+    if (url.pathname === resolvePath || url.pathname === `/${REPO}/resolve/${COMMIT}/sub/${FILE}`) {
         if (state.options.redirect) {
             res.writeHead(302, { Location: `/cdn/${FILE}?sig=${state.hits('resolve')}` });
             res.end();
@@ -555,10 +555,10 @@ test('artifactPaths keeps every path under the root', () => {
     const paths = artifactPaths({ root: '/data/weights', artifact: { ...ARTIFACT, file: `sub/${FILE}` } });
     assert.deepEqual(paths, {
         dir: `/data/weights/org/model-GGUF/${COMMIT}`,
-        file: `/data/weights/org/model-GGUF/${COMMIT}/${FILE}`,
-        partial: `/data/weights/org/model-GGUF/${COMMIT}/${FILE}.partial`,
-        identity: `/data/weights/org/model-GGUF/${COMMIT}/${FILE}.partial.json`,
-        meta: `/data/weights/org/model-GGUF/${COMMIT}/${FILE}.json`,
+        file: `/data/weights/org/model-GGUF/${COMMIT}/sub/${FILE}`,
+        partial: `/data/weights/org/model-GGUF/${COMMIT}/sub/${FILE}.partial`,
+        identity: `/data/weights/org/model-GGUF/${COMMIT}/sub/${FILE}.partial.json`,
+        meta: `/data/weights/org/model-GGUF/${COMMIT}/sub/${FILE}.json`,
     });
     for (const bad of [{ repo: '../x' }, { repo: 'a/..' }, { file: '../../x.gguf' }, { commit: '../..' }]) {
         assert.throws(
@@ -607,4 +607,27 @@ test('a stop during the resume re-hash aborts before any request', { timeout: TI
     assert.equal(server.requests.length, 0);
     assert.equal(fs.statSync(paths.partial).size, 2 * MIB);
     assert.ok(exists(paths.identity));
+});
+
+test('files with the same name in different folders of one commit get different paths', () => {
+    const base = { type: 'huggingface', repo: 'owner/repo', revision: 'main', commit: 'c'.repeat(40), size: 1, sha256: 'd'.repeat(64) };
+    const root = '/data/models/gguf';
+    const q4 = artifactPaths({ root, artifact: { ...base, file: 'Q4/m.gguf' } });
+    const q8 = artifactPaths({ root, artifact: { ...base, file: 'Q8/m.gguf' } });
+    assert.notEqual(q4.file, q8.file);
+    assert.notEqual(q4.identity, q8.identity);
+    assert.equal(q4.file, `/data/models/gguf/owner/repo/${'c'.repeat(40)}/Q4/m.gguf`);
+    // A single-segment file keeps the layout used so far.
+    assert.equal(artifactPaths({ root, artifact: { ...base, file: 'm.gguf' } }).file, `/data/models/gguf/owner/repo/${'c'.repeat(40)}/m.gguf`);
+});
+
+test('a file in a subfolder downloads into that folder and is removed with it', { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t);
+    const root = tempRoot(t);
+    const artifact = { ...ARTIFACT, file: `sub/${FILE}` };
+    const result = await download(server, root, { artifact });
+    assert.equal(result.status, 'complete');
+    assert.equal(result.path, path.join(root, 'org', 'model-GGUF', COMMIT, 'sub', FILE));
+    await removeArtifact({ root, artifact });
+    assert.equal(fs.existsSync(path.join(root, 'org')), false);
 });

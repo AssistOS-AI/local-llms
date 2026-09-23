@@ -599,7 +599,8 @@ export class LocalLlmSettings {
         const stop = this.element.querySelector('[data-llm-stop]');
         const cancel = this.element.querySelector('[data-llm-cancel]');
         const send = this.element.querySelector('[data-llm-send]');
-        if (stop) stop.disabled = this.busy || !ACTIVE_PHASES.has(phase);
+        // Stop also clears a failed or paused deployment.
+        if (stop) stop.disabled = this.busy || !(ACTIVE_PHASES.has(phase) || ['error', 'paused'].includes(phase));
         if (cancel) cancel.disabled = this.busy || !['downloading', 'verifying', 'pulling'].includes(phase);
         if (send) send.disabled = this.busy || phase !== 'ready';
     }
