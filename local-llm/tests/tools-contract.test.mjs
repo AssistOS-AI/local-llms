@@ -195,3 +195,10 @@ test('the manifest keeps local-llm out of the generic agent tier', () => {
     assert.deepEqual(manifest.capabilities.tags, ['local-llm']);
     assert.match(manifest.about, /GPU/, 'the Marketplace shows `about`');
 });
+
+test('the test prompt tool describes the loopback admin check, not the Soul Gateway path', () => {
+    const tool = read('mcp-config.json').tools.find((entry) => entry.name === 'local_llm_test_prompt');
+    assert.doesNotMatch(tool.description, /Soul Gateway|AchillesAgentLib/i);
+    assert.match(tool.description, /admin/i);
+    assert.match(tool.description, /loopback/i);
+});

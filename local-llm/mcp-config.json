@@ -311,7 +311,7 @@
     {
       "name": "local_llm_test_prompt",
       "title": "Test prompt",
-      "description": "Send one prompt to the running model through AchillesAgentLib and the workspace Soul Gateway, returning the text and tokens per second.",
+      "description": "Admin-only smoke test: send one prompt to the active local runner on loopback inside this agent (the bounded exception in DS001 Question #3) and return the text with the runner's tokens per second.",
       "command": "node",
       "args": [
         "/code/tools/local_llm_tool.mjs"
