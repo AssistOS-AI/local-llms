@@ -143,28 +143,51 @@ test('the chat responder reports runner timings from a response and from the las
     });
 });
 
-test('the test prompt goes through AchillesAgentLib to the gateway model and reports runner speed', async () => {
-    const seen = {};
-    class FakeLLMAgent {
-        constructor(options) { seen.name = options.name; }
-        async complete(options) { seen.options = options; return 'PONG'; }
-    }
-    const at = new Date(Date.now() + 5).toISOString();
-    const call = async (op) => {
-        if (op === 'chatTarget') return { runnerId: 'llama.cpp', modelId: 'gpt-oss-20b', baseUrl: 'http://127.0.0.1:18080', apiKey: 'secret-key' };
-        if (op === 'status') return { lastCompletion: { at, modelId: 'gpt-oss-20b', promptTokens: 9, completionTokens: 2, promptTokensPerSecond: 300, generationTokensPerSecond: 60, source: 'runner timings' } };
+test('the admin test prompt calls only the active loopback runner, with bounds', async () => {
+    const recorded = [];
+    let sent;
+    const call = async (op, args) => {
+        if (op === 'chatTarget') return { runnerId: 'llama.cpp', modelId: 'gpt-oss-20b', model: 'gpt-oss-20b', baseUrl: 'http://127.0.0.1:18080', apiKey: 'secret-key' };
+        if (op === 'recordCompletion') { recorded.push(args); return { recorded: true }; }
         throw new Error(op);
     };
-    const result = await runTestPrompt({ prompt: 'Reply with exactly: PONG', maxTokens: 16, call, loadAgent: async () => FakeLLMAgent });
-    assert.equal(seen.options.model, GATEWAY_MODEL);
-    assert.equal(GATEWAY_MODEL, 'soul_gateway/local-llms/local-llm/default');
-    assert.deepEqual(seen.options.params, { max_tokens: 16 });
+    const fetchImpl = async (url, init) => {
+        sent = { url, init, body: JSON.parse(init.body) };
+        return { ok: true, json: async () => ({
+            choices: [{ message: { content: 'PONG', reasoning_content: 'think' }, finish_reason: 'stop' }],
+            timings: { prompt_n: 9, prompt_per_second: 300, predicted_n: 2, predicted_per_second: 60 },
+        }) };
+    };
+    const result = await runTestPrompt({ prompt: 'Reply with exactly: PONG', maxTokens: 16, call, fetchImpl });
+    assert.equal(sent.url, 'http://127.0.0.1:18080/v1/chat/completions');
+    assert.equal(sent.init.headers.authorization, 'Bearer secret-key');
+    assert.deepEqual(sent.body, { messages: [{ role: 'user', content: 'Reply with exactly: PONG' }], max_tokens: 16, model: 'gpt-oss-20b' });
+    assert.ok(sent.init.signal instanceof AbortSignal);
     assert.equal(result.text, 'PONG');
     assert.equal(result.generationTokensPerSecond, 60);
     assert.equal(result.statsSource, 'runner timings');
+    assert.equal(result.gatewayModel, GATEWAY_MODEL);
+    assert.equal(GATEWAY_MODEL, 'soul_gateway/local-llms/local-llm/default');
+    assert.equal(recorded[0].generationTokensPerSecond, 60);
     assert.equal(JSON.stringify(result).includes('secret-key'), false);
+
+    // Ollama's /v1 reports counts only: the speed is labelled as a wall-clock estimate.
+    let tick = 0;
+    const ollama = await runTestPrompt({
+        prompt: 'hi', call, clock: () => (tick += 500),
+        fetchImpl: async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: 'x' } }], usage: { prompt_tokens: 3, completion_tokens: 10 } }) }),
+    });
+    assert.equal(ollama.generationTokensPerSecond, 20);
+    assert.equal(ollama.statsSource, 'token count over wall clock');
+
+    const never = async () => assert.fail('no request');
+    await assert.rejects(() => runTestPrompt({ prompt: 'x'.repeat(4001), call, fetchImpl: never }), { code: 'invalid_prompt' });
+    await assert.rejects(() => runTestPrompt({ prompt: 'x', maxTokens: 1025, call, fetchImpl: never }), { code: 'invalid_prompt' });
+    await assert.rejects(() => runTestPrompt({ prompt: 'x', maxTokens: 1.5, call, fetchImpl: never }), { code: 'invalid_prompt' });
+    const remote = async (op) => (op === 'chatTarget' ? { baseUrl: 'http://10.0.0.5:18080', model: 'm' } : null);
+    await assert.rejects(() => runTestPrompt({ prompt: 'x', call: remote, fetchImpl: never }), { code: 'runner_not_local' });
     const notReady = async () => { throw Object.assign(new Error('No local model is ready.'), { code: 'not_ready' }); };
-    await assert.rejects(() => runTestPrompt({ prompt: 'x', call: notReady, loadAgent: async () => assert.fail('not loaded') }), { code: 'not_ready' });
+    await assert.rejects(() => runTestPrompt({ prompt: 'x', call: notReady, fetchImpl: never }), { code: 'not_ready' });
 });
 
 test('the manifest keeps local-llm out of the generic agent tier', () => {

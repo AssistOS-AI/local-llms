@@ -53,7 +53,7 @@ Every tool is declared in `mcp-config.json` with `command: "node"`, `args: ["/co
 | `local_llm_download_cancel` | `cancelDownload`: keeps the partial file |
 | `local_llm_weights_delete` | `deleteWeights` |
 | `local_llm_model_add` / `_update` / `_remove` | registry edits; seed entries are read-only |
-| `local_llm_test_prompt` | a smoke chat through AchillesAgentLib and the local Soul Gateway (below) |
+| `local_llm_test_prompt` | an admin smoke chat against the active runner on loopback; the one inference-routing exception (Question #3) |
 
 ### Authorization
 
@@ -63,7 +63,9 @@ Each tool call verifies the invocation grant with `authInfoFromInvocation` from 
 
 AgentServer runs `src/chatResponder.mjs` for each `POST /v1/chat/completions` routed to the agent. The responder asks the controller for the ready deployment (`chatTarget`), keeps only OpenAI chat fields from the request, replaces `model` with the deployed model, and forwards to the runner on `127.0.0.1` with the runner's per-start API key. With no ready model it answers 503 `not_ready`. Streaming requests are piped through unchanged.
 
-The Router lists the agent at `/api/router/openai-agent-discovery` because the manifest declares `endpoints.chatCompletions`. The workspace-local Soul Gateway turns it into a provider and model, and AchillesAgentLib callers reach it as `soul_gateway/<model>`. `local_llm_test_prompt` uses exactly that path, so request-time inference goes through AchillesAgentLib as the workspace requires.
+The Router lists the agent at `/api/router/openai-agent-discovery` because the manifest declares `endpoints.chatCompletions`. The workspace-local Soul Gateway turns it into the model `local-llms/local-llm/default` (AgentServer's fallback `/v1/models` id), and AchillesAgentLib callers in other agents reach it as `soul_gateway/local-llms/local-llm/default`. That is the only way other agents use the model. The manifest's `capabilities.tags: ["local-llm"]` keeps the model out of the gateway's shared `generic-agent` group.
+
+Soul Gateway refuses a call whose caller is the agent that the target model fronts ("Agent cannot call its own discovered Soul Gateway model"). The guard stays as it is. The admin test prompt therefore uses the exception in Question #3.
 
 ### Drain
 
@@ -86,6 +88,20 @@ Response: The controller must outlive tool calls and must be the process that re
 
 Response: `llama-server` b11125 reads the key from `--api-key`, `LLAMA_API_KEY` or `--api-key-file`. The controller passes it as an argument and redacts it from the runner log. The key changes on every start, and only processes inside the container, which all run as the same user, can read another process's arguments or environment, so an environment variable or a key file would not narrow who can read it.
 
+### Question #3: How does the admin test prompt reach the model?
+
+Response: Through a narrow exception to the workspace rule that request-time inference goes through AchillesAgentLib. It was approved on 2026-09-23 through the user's delegated monitor, after Soul Gateway's self-call guard was observed to refuse the planned path (AchillesAgentLib from inside local-llm to `soul_gateway/local-llms/local-llm/default`). The exception covers `local_llm_test_prompt` only (`src/testPrompt.mjs`), with these bounds:
+
+| Bound | How it is enforced |
+| --- | --- |
+| Admin only | The tool is tagged `admin` and checks for the `admin` role without `guest` before contacting the controller. |
+| Only the active local runner | The target comes from the controller's `chatTarget`: the ready deployment's runner on `127.0.0.1` and its per-start key. The input selects no URL, model or key, and a non-loopback target is refused. |
+| Bounded input and output | `prompt` 1–4,000 characters and `maxTokens` 1–1,024, in the tool schema and again in code; the returned text is capped at 16,000 characters. |
+| Timeout | The runner call is aborted after 240 s, inside the tool's 300 s limit. |
+| Same request shape | The request goes through the chat responder's field allowlist (`buildRunnerRequest`). |
+
+The exception adds no network exposure: the runner stays on loopback behind `routerAccess.agentPorts: false`. Soul Gateway's self-call guard is unchanged, and other agents keep using the model only through AchillesAgentLib and Soul Gateway.
+
 ## Conclusion
 
-The agent exposes admin-only tools backed by one serialized controller, publishes no ports, serves chat only through the Router and Soul Gateway, and drains within Ploinky's restart window.
+The agent exposes admin-only tools backed by one serialized controller, publishes no ports, serves other agents only through the Router and Soul Gateway, makes one bounded admin-only loopback exception for its test prompt, and drains within Ploinky's restart window.
