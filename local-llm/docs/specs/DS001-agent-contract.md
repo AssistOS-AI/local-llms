@@ -33,7 +33,7 @@ The manifest declares no `containerSecurity`, no published ports and no `llmRunt
 
 ```
 main.mjs (controller, PID 1 under AgentEntrypoint.sh)
-  ├─ control socket /tmp/local-llm/controller.sock (mode 0600)
+  ├─ control socket /dev/shm/local-llm/controller.sock (0700 directory, 0600 socket)
   ├─ AgentServer.mjs (MCP on 7000; spawns one short-lived process per tool call)
   └─ runner: llama-server or ollama serve, bound to 127.0.0.1 only
 ```

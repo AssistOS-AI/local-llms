@@ -9,13 +9,14 @@ import path from 'node:path';
 
 import { LocalLlmError, serializeError } from './errors.mjs';
 
-export const DEFAULT_SOCKET = '/tmp/local-llm/controller.sock';
+// /dev/shm, not /tmp: in nested rootless Podman the container's /tmp is
+// fuse-overlayfs, which records a new socket node as root-owned 0755, so the
+// controller's own user could not connect to it. /dev/shm is a private tmpfs.
+export const DEFAULT_SOCKET = '/dev/shm/local-llm/controller.sock';
 const MAX_REQUEST_BYTES = 256 * 1024;
 
-// The directory is the access boundary: it must be a real directory owned by
-// this user with mode 0700. Nested rootless Podman refuses chmod on a socket
-// node in the container's /tmp (EPERM), so the socket is created under umask
-// 177 and its own chmod is best effort.
+// The socket must live in a real directory owned by this user with mode 0700,
+// and the socket itself must come out owned by this user with mode 0600.
 function preparePrivateDirectory(directory) {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     fs.chmodSync(directory, 0o700);
@@ -73,10 +74,14 @@ export async function startControlServer({ socketPath = DEFAULT_SOCKET, handlers
     } finally {
         process.umask(previousUmask);
     }
-    try {
-        fs.chmodSync(socketPath, 0o600);
-    } catch (error) {
-        if (!['EPERM', 'ENOTSUP', 'EOPNOTSUPP'].includes(error.code)) throw error;
+    // Fail at startup, not on the first tool call, on a filesystem that does
+    // not keep the owner or mode of a new socket node.
+    const stats = fs.lstatSync(socketPath);
+    const ownerMatches = typeof process.getuid !== 'function' || stats.uid === process.getuid();
+    if (!stats.isSocket() || !ownerMatches || (stats.mode & 0o077) !== 0) {
+        await new Promise((resolve) => server.close(() => resolve()));
+        throw new Error(`Refusing control socket ${socketPath}: it came out as uid ${stats.uid} mode `
+            + `${(stats.mode & 0o777).toString(8)}; use a directory on a filesystem that keeps socket ownership.`);
     }
     return Object.freeze({
         socketPath,
