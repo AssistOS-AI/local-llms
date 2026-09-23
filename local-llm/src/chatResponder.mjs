@@ -70,8 +70,9 @@ async function reportStats(call, stats) {
 }
 
 // Limits for Router-authorized callers: one choice per request, at most
-// MAX_COMPLETION_TOKENS generated tokens (larger values are clamped), and a
-// runner call that ends inside the endpoint's 600 s command limit.
+// MAX_COMPLETION_TOKENS generated tokens (larger values are clamped, and a
+// request that sets no limit gets it as `max_tokens`), and a runner call that
+// ends inside the endpoint's 600 s command limit.
 export const MAX_COMPLETION_TOKENS = 8192;
 export const RUNNER_TIMEOUT_MS = 570_000;
 const TOKEN_LIMIT_FIELDS = ['max_tokens', 'max_completion_tokens'];
@@ -95,6 +96,7 @@ export function buildRunnerRequest(request, target) {
     for (const field of TOKEN_LIMIT_FIELDS) {
         if (Number.isInteger(body[field]) && body[field] > MAX_COMPLETION_TOKENS) body[field] = MAX_COMPLETION_TOKENS;
     }
+    if (!TOKEN_LIMIT_FIELDS.some((field) => Number.isInteger(body[field]))) body.max_tokens = MAX_COMPLETION_TOKENS;
     body.model = target.model;
     return body;
 }

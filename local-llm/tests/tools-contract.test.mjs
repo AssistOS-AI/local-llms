@@ -96,7 +96,8 @@ test('the chat responder forwards to the ready runner with its key, and answers 
     assert.equal(forwarded.init.headers.authorization, `Bearer ${'k'.repeat(43)}`);
     assert.deepEqual(JSON.parse(forwarded.init.body), { model: 'gpt-oss-20b', messages: [{ role: 'user', content: 'hi' }], max_tokens: 5 });
     assert.equal(JSON.parse(written).choices[0].message.content, 'hello');
-    assert.deepEqual(buildRunnerRequest({ messages: [], stream: true }, { model: 'gpt-oss:20b' }), { messages: [], stream: true, model: 'gpt-oss:20b' });
+    assert.deepEqual(buildRunnerRequest({ messages: [], stream: true }, { model: 'gpt-oss:20b' }),
+        { messages: [], stream: true, max_tokens: 8192, model: 'gpt-oss:20b' });
 });
 
 test('the chat responder reports runner timings from a response and from the last stream chunk', async () => {
@@ -224,4 +225,21 @@ test('the chat responder caps completions, allows one choice and bounds the runn
     const timedOut = await respond({ request: { messages: [] } }, { call, fetchImpl: hanging, out: { write() {} }, timeoutMs: 50 });
     assert.ok(seenSignal instanceof AbortSignal);
     assert.deepEqual({ status: timedOut.status, code: timedOut.code }, { status: 504, code: 'runner_timeout' });
+});
+
+test('a chat request without a token limit gets the documented default cap', async () => {
+    const target = { baseUrl: 'http://127.0.0.1:18080', apiKey: 'k', model: 'gpt-oss-20b' };
+    assert.equal(buildRunnerRequest({ messages: [] }, target).max_tokens, 8192);
+    // A caller that sets either limit keeps only its own field.
+    const onlyNew = buildRunnerRequest({ messages: [], max_completion_tokens: 64 }, target);
+    assert.equal(onlyNew.max_completion_tokens, 64);
+    assert.equal('max_tokens' in onlyNew, false);
+    // The runner receives the default.
+    let sent = null;
+    const fetchImpl = async (url, init) => {
+        sent = JSON.parse(init.body);
+        return new Response(JSON.stringify({ choices: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    await respond({ request: { messages: [] } }, { call: async () => target, fetchImpl, out: { write() {} } });
+    assert.equal(sent.max_tokens, 8192);
 });
