@@ -12,8 +12,22 @@ import { LocalLlmError, serializeError } from './errors.mjs';
 export const DEFAULT_SOCKET = '/tmp/local-llm/controller.sock';
 const MAX_REQUEST_BYTES = 256 * 1024;
 
+// The directory is the access boundary: it must be a real directory owned by
+// this user with mode 0700. Nested rootless Podman refuses chmod on a socket
+// node in the container's /tmp (EPERM), so the socket is created under umask
+// 177 and its own chmod is best effort.
+function preparePrivateDirectory(directory) {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(directory, 0o700);
+    const stats = fs.lstatSync(directory);
+    const ownerMatches = typeof process.getuid !== 'function' || stats.uid === process.getuid();
+    if (!stats.isDirectory() || !ownerMatches || (stats.mode & 0o077) !== 0) {
+        throw new Error(`Refusing control socket directory ${directory}: it must be a 0700 directory owned by this user.`);
+    }
+}
+
 export async function startControlServer({ socketPath = DEFAULT_SOCKET, handlers }) {
-    fs.mkdirSync(path.dirname(socketPath), { recursive: true, mode: 0o700 });
+    preparePrivateDirectory(path.dirname(socketPath));
     fs.rmSync(socketPath, { force: true });
     const connections = new Set();
     const server = net.createServer((socket) => {
@@ -50,11 +64,20 @@ export async function startControlServer({ socketPath = DEFAULT_SOCKET, handlers
         });
         socket.on('error', () => {});
     });
-    await new Promise((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(socketPath, resolve);
-    });
-    fs.chmodSync(socketPath, 0o600);
+    const previousUmask = process.umask(0o177);
+    try {
+        await new Promise((resolve, reject) => {
+            server.once('error', reject);
+            server.listen(socketPath, resolve);
+        });
+    } finally {
+        process.umask(previousUmask);
+    }
+    try {
+        fs.chmodSync(socketPath, 0o600);
+    } catch (error) {
+        if (!['EPERM', 'ENOTSUP', 'EOPNOTSUPP'].includes(error.code)) throw error;
+    }
     return Object.freeze({
         socketPath,
         close() {
