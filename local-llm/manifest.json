@@ -1,5 +1,6 @@
 {
   "name": "local-llm",
+  "about": "Run open-weight LLMs on this workspace's GPU (llama.cpp, Ollama); weights download only on Run",
   "description": "Runs open-source LLMs on this machine's GPU with llama.cpp or Ollama. Admins pick a model and a runner in Settings; weights download only when Run is pressed. Needs a workspace GPU grant: ploinky gpu grant nvidia --agent local-llms/local-llm.",
   "container": "localhost/local-llm:dev",
   "agent": "exec node /code/src/main.mjs",

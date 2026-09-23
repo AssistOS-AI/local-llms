@@ -193,4 +193,5 @@ test('the admin test prompt calls only the active loopback runner, with bounds',
 test('the manifest keeps local-llm out of the generic agent tier', () => {
     const manifest = read('manifest.json');
     assert.deepEqual(manifest.capabilities.tags, ['local-llm']);
+    assert.match(manifest.about, /GPU/, 'the Marketplace shows `about`');
 });
