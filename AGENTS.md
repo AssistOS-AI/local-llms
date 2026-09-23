@@ -4,7 +4,7 @@
 
 This repository provides twelve Ploinky agents that run local large language models as MCP servers inside a shared Docker image (`assistos/local-llms`). One manager agent handles model registration and profile lifecycle; eleven model-serving agents cover translation, relevance scoring, function routing, general chat, planning, and coding.
 
-It also holds `local-llm/`, a separate GPU-backed agent with its own image (`container-image-builds/images/local-llm`), its own Node.js source and tests, and its own specifications (`local-llm/docs/specs/matrix.md`, numbered independently of `docs/specs/`). The rules below about the shared image, shell-only runtime logic and the DS000–DS011 sequence apply to the twelve shared-image agents; `local-llm/` is tested with `node --test local-llm/tests/`.
+It also holds `local-llm/`, a separate GPU-backed agent with its own image (`container-image-builds/images/local-llm`), its own Node.js source and tests, and its own specifications (`local-llm/docs/specs/matrix.md`, numbered independently of `docs/specs/`). The rules below about the shared image, shell-only runtime logic and the DS000–DS011 sequence apply to the twelve shared-image agents; `local-llm/` is tested from the repository root with `node --test 'local-llm/tests/*.test.mjs'` (or `npm --prefix local-llm test`); a bare directory argument does not work on Node 24.
 
 ## Mandatory Reading Order
 

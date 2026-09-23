@@ -9,4 +9,4 @@ The `local-llm` agent keeps its own specification set. Its numbering is local to
 | [DS002](DS002-model-lifecycle.md) | Model Lifecycle | accepted | Catalog, registry, on-demand download, the deployment state machine, and restart behaviour. Records what is reused from repository DS008. |
 | [DS003](DS003-gpu-and-resources.md) | GPU and Resources | accepted | The Box GPU grant, admission, runner isolation, and memory estimates. Records what is reused from repository DS010. |
 
-Tests: `node --test local-llm/tests/` (no Docker, GPU or network required).
+Tests, from the repository root: `node --test 'local-llm/tests/*.test.mjs'` or `npm --prefix local-llm test` (no Docker, GPU or network required). A bare directory argument does not work on Node 24.
