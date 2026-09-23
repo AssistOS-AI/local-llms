@@ -202,3 +202,26 @@ test('the test prompt tool describes the loopback admin check, not the Soul Gate
     assert.match(tool.description, /admin/i);
     assert.match(tool.description, /loopback/i);
 });
+
+test('the chat responder caps completions, allows one choice and bounds the runner call', { timeout: 10_000 }, async () => {
+    const target = { baseUrl: 'http://127.0.0.1:18080', apiKey: 'k', model: 'gpt-oss-20b' };
+    assert.equal(buildRunnerRequest({ messages: [], max_tokens: 100_000 }, target).max_tokens, 8192);
+    assert.equal(buildRunnerRequest({ messages: [], max_completion_tokens: 9000 }, target).max_completion_tokens, 8192);
+    assert.equal(buildRunnerRequest({ messages: [], max_tokens: 256 }, target).max_tokens, 256);
+    const call = async () => target;
+    const never = async () => assert.fail('validated before the runner');
+    for (const request of [{ messages: [], n: 4 }, { messages: [], max_tokens: -5 }, { messages: [], max_tokens: 1.5 }]) {
+        const result = await respond({ request }, { call, fetchImpl: never, out: { write() {} } });
+        assert.equal(result.status, 400, JSON.stringify(request));
+        assert.equal(result.code, 'invalid_request');
+    }
+    // A runner that never answers is cut off at the deadline with a clean 504.
+    let seenSignal = null;
+    const hanging = (url, init) => {
+        seenSignal = init.signal;
+        return new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true }));
+    };
+    const timedOut = await respond({ request: { messages: [] } }, { call, fetchImpl: hanging, out: { write() {} }, timeoutMs: 50 });
+    assert.ok(seenSignal instanceof AbortSignal);
+    assert.deepEqual({ status: timedOut.status, code: timedOut.code }, { status: 504, code: 'runner_timeout' });
+});

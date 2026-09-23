@@ -69,10 +69,31 @@ async function reportStats(call, stats) {
     }
 }
 
+// Limits for Router-authorized callers: one choice per request, at most
+// MAX_COMPLETION_TOKENS generated tokens (larger values are clamped), and a
+// runner call that ends inside the endpoint's 600 s command limit.
+export const MAX_COMPLETION_TOKENS = 8192;
+export const RUNNER_TIMEOUT_MS = 570_000;
+const TOKEN_LIMIT_FIELDS = ['max_tokens', 'max_completion_tokens'];
+
+export function requestLimitProblem(request) {
+    if (request.n !== undefined && request.n !== 1) return 'n must be 1; local models return one choice per request';
+    for (const field of TOKEN_LIMIT_FIELDS) {
+        const value = request[field];
+        if (value !== undefined && value !== null && (!Number.isInteger(value) || value < 1)) {
+            return `${field} must be a positive integer`;
+        }
+    }
+    return null;
+}
+
 export function buildRunnerRequest(request, target) {
     const body = {};
     for (const [key, value] of Object.entries(request || {})) {
         if (FORWARDED_FIELDS.has(key)) body[key] = value;
+    }
+    for (const field of TOKEN_LIMIT_FIELDS) {
+        if (Number.isInteger(body[field]) && body[field] > MAX_COMPLETION_TOKENS) body[field] = MAX_COMPLETION_TOKENS;
     }
     body.model = target.model;
     return body;
@@ -89,11 +110,18 @@ function failure(status, code, message, { streaming = false } = {}) {
     exit(1);
 }
 
-export async function respond(payload, { call = callController, fetchImpl = globalThis.fetch, out = stdout } = {}) {
+export async function respond(payload, {
+    call = callController,
+    fetchImpl = globalThis.fetch,
+    out = stdout,
+    timeoutMs = RUNNER_TIMEOUT_MS,
+} = {}) {
     const request = payload?.request;
     if (!request || !Array.isArray(request.messages)) {
         return { status: 400, code: 'invalid_request', message: 'messages must be an array' };
     }
+    const limitProblem = requestLimitProblem(request);
+    if (limitProblem) return { status: 400, code: 'invalid_request', message: limitProblem };
     let target;
     try {
         target = await call('chatTarget', {}, { timeoutMs: 10_000 });
@@ -103,28 +131,38 @@ export async function respond(payload, { call = callController, fetchImpl = glob
     }
     const headers = { 'content-type': 'application/json' };
     if (target.apiKey) headers.authorization = `Bearer ${target.apiKey}`;
-    const response = await fetchImpl(`${target.baseUrl}/v1/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(buildRunnerRequest(request, target)),
+    const signal = AbortSignal.timeout(timeoutMs);
+    const timedOut = () => ({
+        status: 504, code: 'runner_timeout', message: `The local runner did not finish within ${Math.round(timeoutMs / 1000)} s.`,
     });
-    if (!response.ok) {
-        const text = (await response.text().catch(() => '')).slice(0, 500);
-        return { status: response.status >= 500 ? 502 : response.status, code: 'runner_error', message: `The runner answered HTTP ${response.status}: ${text}` };
-    }
-    if (request.stream === true) {
-        const reader = createStreamStatsReader();
-        for await (const chunk of response.body) {
-            out.write(chunk);
-            reader.push(chunk);
+    try {
+        const response = await fetchImpl(`${target.baseUrl}/v1/chat/completions`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(buildRunnerRequest(request, target)),
+            signal,
+        });
+        if (!response.ok) {
+            const text = (await response.text().catch(() => '')).slice(0, 500);
+            return { status: response.status >= 500 ? 502 : response.status, code: 'runner_error', message: `The runner answered HTTP ${response.status}: ${text}` };
         }
-        await reportStats(call, reader.finish());
+        if (request.stream === true) {
+            const reader = createStreamStatsReader();
+            for await (const chunk of response.body) {
+                out.write(chunk);
+                reader.push(chunk);
+            }
+            await reportStats(call, reader.finish());
+            return null;
+        }
+        const body = await response.json();
+        out.write(JSON.stringify(body));
+        await reportStats(call, completionStats(body));
         return null;
+    } catch (error) {
+        if (signal.aborted) return timedOut();
+        throw error;
     }
-    const body = await response.json();
-    out.write(JSON.stringify(body));
-    await reportStats(call, completionStats(body));
-    return null;
 }
 
 async function main() {
