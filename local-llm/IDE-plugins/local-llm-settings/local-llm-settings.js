@@ -15,6 +15,7 @@ import {
     newRequestId,
     paramsFromForm,
     parseToolResult,
+    pollBackoff,
     progressPercent,
     runnerLabel,
     runnerOptions,
@@ -46,6 +47,9 @@ export class LocalLlmSettings {
         this.runModelId = '';
         this.runFields = [];
         this.pollTimer = null;
+        this.polling = false;
+        this.pollAgain = false;
+        this.pollFailures = 0;
         this.previewTimer = null;
         this.previewSerial = 0;
         this.closed = false;
@@ -559,11 +563,26 @@ export class LocalLlmSettings {
 
     // ------------------------------------------------------------ deployment
 
+    // Status polling is single-flight: one timer and at most one request at a
+    // time, however many actions (Run, Send, Stop, Cancel) ask for a poll.
+    schedulePoll(delay = POLL_INTERVAL_MS) {
+        if (this.closed) return;
+        clearTimeout(this.pollTimer);
+        this.pollTimer = setTimeout(() => {
+            this.pollTimer = null;
+            void this.poll();
+        }, delay);
+    }
+
     startPollingIfActive(force = false) {
         const phase = this.status?.phase || this.overview?.deployment?.phase;
-        if ((force || shouldPoll(phase)) && !this.pollTimer && !this.closed) {
-            this.pollTimer = setTimeout(() => { void this.poll(); }, force ? 0 : POLL_INTERVAL_MS);
+        if (this.closed || !(force || shouldPoll(phase))) return;
+        if (this.polling) {
+            this.pollAgain = true;
+            return;
         }
+        if (force) this.schedulePoll(0);
+        else if (!this.pollTimer) this.schedulePoll(POLL_INTERVAL_MS);
     }
 
     stopPolling() {
@@ -572,22 +591,40 @@ export class LocalLlmSettings {
     }
 
     async poll() {
-        this.pollTimer = null;
         if (this.closed || !this.element.isConnected) return;
+        if (this.polling) {
+            this.pollAgain = true;
+            return;
+        }
+        this.stopPolling();
+        this.polling = true;
         let phase = '';
+        let failed = false;
         try {
             const status = await callLocalLlm('local_llm_status', { sinceSeq: this.nextSeq });
             this.status = status;
             this.logs = mergeLogs(this.logs, status.logs || []);
             this.nextSeq = status.nextSeq ?? this.nextSeq;
             phase = status.phase;
+            this.pollFailures = 0;
             this.renderDeployment();
         } catch (error) {
+            // A transient failure (a Router restart, a timeout) must not end
+            // polling mid-download: retry with a backoff while the modal is open.
+            failed = true;
+            this.pollFailures += 1;
             this.setStatus(error?.message || 'Status is unavailable.', 'error');
-            return;
+        } finally {
+            this.polling = false;
         }
-        if (shouldPoll(phase)) {
-            if (!this.closed) this.pollTimer = setTimeout(() => { void this.poll(); }, POLL_INTERVAL_MS);
+        if (this.closed || !this.element.isConnected) return;
+        if (this.pollAgain) {
+            this.pollAgain = false;
+            this.schedulePoll(0);
+        } else if (failed) {
+            this.schedulePoll(pollBackoff(this.pollFailures));
+        } else if (shouldPoll(phase)) {
+            this.schedulePoll(POLL_INTERVAL_MS);
         } else if (!this.busy) {
             // Download states and admission change when a job settles.
             await this.loadOverview().catch(() => {});

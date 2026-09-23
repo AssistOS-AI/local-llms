@@ -68,6 +68,11 @@ export function runnerLabel(runnerId) {
     return RUNNER_LABELS[runnerId] || String(runnerId || '');
 }
 
+/** Delay before the next status poll after `failures` consecutive failures. */
+export function pollBackoff(failures) {
+    return Math.min(POLL_INTERVAL_MS * 2 ** Math.max(0, failures), 30_000);
+}
+
 /** Poll only while something is happening; settled phases wait for a user action. */
 export function shouldPoll(phase) {
     return Boolean(phase) && !SETTLED_PHASES.has(phase);

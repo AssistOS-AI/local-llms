@@ -194,3 +194,81 @@ test('confirmation text cannot break out of the modal attribute', () => {
     assert.equal(confirms.length, 3);
     assert.ok(confirms.every((call) => call.endsWith('confirmMessage(')));
 });
+
+// Fake timers and a fake local-llm client for the presenter's polling.
+function pollingHarness(t, callTool) {
+    const saved = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, window: globalThis.window };
+    const pending = new Map();
+    let nextId = 1;
+    globalThis.setTimeout = (fn, ms) => { const id = nextId++; pending.set(id, { fn, ms }); return id; };
+    globalThis.clearTimeout = (id) => { pending.delete(id); };
+    globalThis.window = { webSkel: { appServices: { getClient: () => ({ callTool }) } } };
+    t.after(() => Object.assign(globalThis, saved));
+    const settle = async () => { for (let i = 0; i < 6; i += 1) await new Promise((resolve) => saved.setTimeout(resolve, 0)); };
+    const fireAll = async () => {
+        const due = [...pending.values()];
+        pending.clear();
+        for (const timer of due) timer.fn();
+        await settle();
+    };
+    const presenter = new presenterModule.LocalLlmSettings({ isConnected: true, querySelector: () => null, querySelectorAll: () => [] }, () => {});
+    return { presenter, pending, fireAll, settle };
+}
+
+const statusText = (phase) => ({ content: [{ type: 'text', text: JSON.stringify({
+    phase, deployment: { phase, modelId: 'm', runnerId: 'llama.cpp' }, logs: [], nextSeq: 0,
+}) }] });
+
+test('each Send, Stop or Cancel keeps a single polling chain', async (t) => {
+    let statusCalls = 0;
+    const h = pollingHarness(t, async (tool) => {
+        if (tool === 'local_llm_status') { statusCalls += 1; return statusText('ready'); }
+        if (tool === 'local_llm_test_prompt') return { content: [{ type: 'text', text: JSON.stringify({ text: 'PONG', elapsedMs: 5 }) }] };
+        return { content: [{ type: 'text', text: '{}' }] };
+    });
+    const p = h.presenter;
+    p.status = { phase: 'ready' };
+    p.promptForm = { reportValidity: () => true, elements: { prompt: { value: 'hi' }, maxTokens: { value: '16' } } };
+    p.promptResult = { innerHTML: '' };
+    p.startPollingIfActive();
+    await h.fireAll();
+    assert.equal(h.pending.size, 1);
+    for (let send = 1; send <= 3; send += 1) {
+        await p.submitPrompt({ preventDefault() {} });
+        await h.settle();
+        assert.equal(h.pending.size, 1, `after Send #${send}`);
+    }
+    await p.stopDeployment();
+    await h.settle();
+    await p.cancelDownload();
+    await h.settle();
+    assert.equal(h.pending.size, 1, 'after Stop and Cancel');
+    const before = statusCalls;
+    await h.fireAll();
+    assert.equal(statusCalls - before, 1, 'one status call per tick');
+    p.closed = true;
+    await h.fireAll();
+    assert.equal(h.pending.size, 0);
+});
+
+test('a failed status call backs off and keeps polling while the modal is open', async (t) => {
+    let calls = 0;
+    const h = pollingHarness(t, async () => {
+        calls += 1;
+        if (calls === 2) throw new Error('transient router 502');
+        return statusText('downloading');
+    });
+    const p = h.presenter;
+    p.status = { phase: 'downloading' };
+    p.startPollingIfActive();
+    await h.fireAll();
+    assert.equal(calls, 1);
+    await h.fireAll();
+    assert.equal(calls, 2);
+    assert.equal(h.pending.size, 1, 'still polling after the failure');
+    assert.ok([...h.pending.values()][0].ms > 1500, 'with a backoff');
+    await h.fireAll();
+    assert.equal(calls, 3);
+    assert.equal(h.pending.size, 1);
+    assert.equal([...h.pending.values()][0].ms, 1500, 'back to the normal interval after a success');
+});
