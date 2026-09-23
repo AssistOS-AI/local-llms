@@ -87,6 +87,7 @@ function harness(t, {
     if (initialState) stateStore.save(initialState);
     const runners = fakeRunnerFactory({ quietAfterFirst });
     const calls = { download: [], remove: [] };
+    let inspectImpl = async () => ({ state: 'absent', bytes: 0 });
     const controller = createController({
         dataDir,
         env: { PATH: '/usr/bin' },
@@ -103,7 +104,7 @@ function harness(t, {
             if (planned === 'complete') entry.resolve({ status: 'complete', path: '/data/models/x.gguf', bytesTransferred: 0 });
             return entry.promise;
         },
-        inspect: async () => ({ state: 'absent', bytes: 0 }),
+        inspect: (options) => inspectImpl(options),
         remove: async (options) => { calls.remove.push(options); return 123; },
         startRunner: runners.startRunner,
         fetchImpl,
@@ -112,7 +113,7 @@ function harness(t, {
         stopGraceMs: 50,
         ...(resolveHf ? { resolveHf } : {}),
     });
-    return { controller, runners, calls, dataDir, stateStore };
+    return { controller, runners, calls, dataDir, stateStore, setInspect: (next) => { inspectImpl = next; } };
 }
 
 async function until(predicate, timeoutMs = 2000) {
@@ -448,4 +449,33 @@ test('an Ollama pull records the blob digests it touches', async (t) => {
     await h.controller.run({ modelId: 'gpt-oss-20b', runnerId: 'ollama', requestId: 'request-0001' });
     await until(() => phase(h) === 'error');
     assert.deepEqual(h.controller.state.ollamaPulls, { 'gpt-oss:20b': [digest] });
+});
+
+test('updating a user model keeps its pin, and a re-pin that would orphan downloaded weights is refused', async (t) => {
+    const commits = ['a'.repeat(40), 'b'.repeat(40)];
+    let resolves = 0;
+    const h = harness(t, {
+        resolveHf: async ({ revision }) => {
+            resolves += 1;
+            return { commit: revision === 'v2' ? commits[1] : commits[0], size: 4, sha256: 'c'.repeat(64) };
+        },
+    });
+    const source = { type: 'huggingface', repo: 'Qwen/Qwen3-0.6B-GGUF', file: 'Qwen3-0.6B-Q8_0.gguf', revision: 'main' };
+    await h.controller.addModel({ id: 'user-qwen', displayName: 'Q', sources: { 'llama.cpp': source } });
+    assert.equal(resolves, 1);
+    // A metadata edit keeps the pinned commit instead of resolving main again.
+    await h.controller.updateModel({ id: 'user-qwen', displayName: 'Q2', sources: { 'llama.cpp': source } });
+    assert.equal(resolves, 1);
+    assert.equal(h.controller.state.registry[0].sources['llama.cpp'].commit, commits[0]);
+    assert.equal(h.controller.state.registry[0].displayName, 'Q2');
+    // With the pinned weights on disk, a changed source would orphan them.
+    h.setInspect(async ({ artifact }) => (artifact.commit === commits[0] ? { state: 'complete', bytes: 4 } : { state: 'absent', bytes: 0 }));
+    await assert.rejects(
+        () => h.controller.updateModel({ id: 'user-qwen', sources: { 'llama.cpp': { ...source, revision: 'v2' } } }),
+        { code: 'weights_present' },
+    );
+    assert.equal(h.controller.state.registry[0].sources['llama.cpp'].commit, commits[0]);
+    h.setInspect(async () => ({ state: 'absent', bytes: 0 }));
+    await h.controller.updateModel({ id: 'user-qwen', sources: { 'llama.cpp': { ...source, revision: 'v2' } } });
+    assert.equal(h.controller.state.registry[0].sources['llama.cpp'].commit, commits[1]);
 });

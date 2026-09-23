@@ -777,13 +777,39 @@ export function createController({
         });
     }
 
+    // An update keeps a source's pinned commit while its repository, file and
+    // revision are unchanged; it never silently re-resolves a branch.
+    function carryPins(candidate, existing) {
+        const sources = { ...candidate.sources };
+        for (const [runnerId, source] of Object.entries(sources)) {
+            const previous = existing.sources[runnerId];
+            if (source.type !== 'huggingface' || source.commit || previous?.type !== 'huggingface' || !previous.commit) continue;
+            if (source.repo === previous.repo && source.file === previous.file && source.revision === previous.revision) {
+                sources[runnerId] = { ...source, commit: previous.commit, size: previous.size, sha256: previous.sha256 };
+            }
+        }
+        return { ...candidate, sources };
+    }
+
     async function updateModel(entry) {
         const candidate = validateModel(entry);
-        userModelIndex(candidate.id);
-        const pinned = validateModel(await pinSources(candidate), { seed: false });
+        const existing = validateModel(state.registry[userModelIndex(candidate.id)]);
+        const pinned = validateModel(await pinSources(carryPins(candidate, existing)), { seed: false });
         return queue.run(async () => {
             const index = userModelIndex(pinned.id);
-            assertModelNotInUse(validateModel(state.registry[index]));
+            const current = validateModel(state.registry[index]);
+            assertModelNotInUse(current);
+            // A changed or removed source must not leave its downloaded weights
+            // behind without a model to delete them from.
+            for (const [runnerId, source] of Object.entries(current.sources)) {
+                const next = pinned.sources[runnerId];
+                if (next && artifactKey(runnerId, next) === artifactKey(runnerId, source)) continue;
+                const disk = await downloadState(current, runnerId);
+                if (disk && disk.state !== 'absent' && disk.state !== 'unpinned') {
+                    throw new LocalLlmError('weights_present',
+                        `Delete the downloaded ${runnerId} weights first; this change would leave them without a model.`);
+                }
+            }
             state.registry[index] = JSON.parse(JSON.stringify({ ...pinned, seed: undefined }));
             save();
             return { model: pinned };
