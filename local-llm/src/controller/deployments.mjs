@@ -90,6 +90,9 @@ export function createController({
     // Speed of the last completion served by the ready runner, as the chat
     // responder reported it. In memory only: it describes this runner start.
     let lastCompletion = null;
+    // Log sequence number before the current runner started: its report is
+    // read only from lines after it, never from a previous runner's output.
+    let runnerLogStart = 0;
 
     // Every runner lookup goes through the injected table, so tests and the
     // overview see the same definitions the pipelines launch.
@@ -271,7 +274,7 @@ export function createController({
             logs: lines,
             nextSeq: log.seq,
             gpu,
-            runnerReport: parseRunnerReport(log.all()),
+            runnerReport: parseRunnerReport(log.all().filter((line) => line.seq > runnerLogStart)),
             context: deployment && definition?.describeContext ? definition.describeContext(deployment.params) : null,
             lastCompletion,
         };
@@ -349,6 +352,8 @@ export function createController({
     function launchRunner(deployment, launch, apiKey) {
         fs.mkdirSync(path.join(dataDir, 'home'), { recursive: true });
         log.addSecret(apiKey);
+        runnerLogStart = log.seq;
+        lastCompletion = null;
         log.append('controller', `starting ${launch.command} ${launch.args.join(' ')}`);
         const process = startRunner({ command: launch.command, args: launch.args, env: runnerEnv(launch.env), log });
         runner = {

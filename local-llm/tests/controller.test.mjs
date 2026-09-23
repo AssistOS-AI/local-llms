@@ -34,7 +34,7 @@ function deferred() {
     return { promise, resolve, reject };
 }
 
-function fakeRunnerFactory() {
+function fakeRunnerFactory({ quietAfterFirst = false } = {}) {
     const started = [];
     return {
         started,
@@ -61,8 +61,10 @@ function fakeRunnerFactory() {
                     exit.resolve({ code, signal: null, error: null });
                 },
             };
-            log.append('stdout', 'load_tensors: offloaded 25/25 layers to GPU');
-            log.append('stdout', 'load_tensors:        CUDA0 model buffer size =  4073.34 MiB');
+            if (!(quietAfterFirst && started.length > 0)) {
+                log.append('stdout', 'load_tensors: offloaded 25/25 layers to GPU');
+                log.append('stdout', 'load_tensors:        CUDA0 model buffer size =  4073.34 MiB');
+            }
             started.push(handle);
             return handle;
         },
@@ -75,12 +77,13 @@ function harness(t, {
     downloads = [],
     initialState = null,
     extraSeed = [],
+    quietAfterFirst = false,
 } = {}) {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-controller-'));
     t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
     const stateStore = createStateStore({ dataDir });
     if (initialState) stateStore.save(initialState);
-    const runners = fakeRunnerFactory();
+    const runners = fakeRunnerFactory({ quietAfterFirst });
     const calls = { download: [], remove: [] };
     const controller = createController({
         dataDir,
@@ -350,4 +353,20 @@ test('a drain waits for a Run already in the queue, which then refuses to start 
     assert.equal(h.calls.download.length, 0);
     assert.equal(h.controller.state.deployment, null);
     await assert.rejects(() => h.controller.run({ ...RUN, requestId: 'request-0002' }), { code: 'shutting_down' });
+});
+
+test('the runner report and speed describe only the current runner start', async (t) => {
+    const h = harness(t, { downloads: ['complete', 'complete'], quietAfterFirst: true });
+    await h.controller.run({ ...RUN, requestId: 'request-0001' });
+    await until(() => phase(h) === 'ready');
+    h.controller.recordCompletion({ generationTokensPerSecond: 36, completionTokens: 10, source: 'runner timings' });
+    let status = await h.controller.status({ sinceSeq: 0 });
+    assert.deepEqual(status.runnerReport.offloaded, { layers: 25, of: 25 });
+    assert.equal(status.lastCompletion.generationTokensPerSecond, 36);
+    await h.controller.run({ ...RUN, requestId: 'request-0002', replace: true });
+    await until(() => phase(h) === 'ready' && h.runners.started.length === 2);
+    status = await h.controller.status({ sinceSeq: 0 });
+    assert.equal(status.runnerReport.offloaded, null);
+    assert.equal(status.runnerReport.modelMiB, null);
+    assert.equal(status.lastCompletion, null);
 });
