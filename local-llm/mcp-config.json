@@ -1,0 +1,318 @@
+{
+  "tools": [
+    {
+      "name": "local_llm_overview",
+      "title": "Local LLM overview",
+      "description": "Hardware (GPU, VRAM, other GPU users, RAM, disk), runners with status, the model catalog with per-runner sizes, download state and admission, and the active deployment.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_overview"
+      }
+    },
+    {
+      "name": "local_llm_status",
+      "title": "Local LLM status",
+      "description": "Phase, download progress, runner log lines after a sequence number, GPU memory, the runner-reported GPU buffers and the admission estimate.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 30000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sinceSeq": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_status"
+      }
+    },
+    {
+      "name": "local_llm_run",
+      "title": "Run a local model",
+      "description": "Validate and admit the parameters, then download (only if needed) and start the model on the chosen runner. Returns at once; poll local_llm_status. Idempotent per requestId.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,128}$"
+          },
+          "modelId": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+          },
+          "runnerId": {
+            "type": "string",
+            "enum": [
+              "llama.cpp",
+              "ollama",
+              "vllm",
+              "lmstudio"
+            ]
+          },
+          "params": {
+            "type": "object"
+          },
+          "replace": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "requestId",
+          "modelId",
+          "runnerId"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_run"
+      }
+    },
+    {
+      "name": "local_llm_stop",
+      "title": "Stop the local model",
+      "description": "Stop the running model (or an in-progress download) and free the GPU.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_stop"
+      }
+    },
+    {
+      "name": "local_llm_download_cancel",
+      "title": "Cancel the download",
+      "description": "Cancel the download in progress, keeping the partial file so the next Run resumes it.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_download_cancel"
+      }
+    },
+    {
+      "name": "local_llm_weights_delete",
+      "title": "Delete downloaded weights",
+      "description": "Free the disk used by one model and runner. Refused while the weights are in use.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "modelId": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+          },
+          "runnerId": {
+            "type": "string",
+            "enum": [
+              "llama.cpp",
+              "ollama",
+              "vllm",
+              "lmstudio"
+            ]
+          }
+        },
+        "required": [
+          "modelId",
+          "runnerId"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_weights_delete"
+      }
+    },
+    {
+      "name": "local_llm_model_add",
+      "title": "Add a model",
+      "description": "Add a user model: a single-file GGUF on Hugging Face (llama.cpp) and/or an Ollama library tag. Pins the Hugging Face revision; downloads nothing.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_model_add"
+      }
+    },
+    {
+      "name": "local_llm_model_update",
+      "title": "Update a model",
+      "description": "Replace a user model entry. Seed entries are read-only; a model in use cannot be changed.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_model_update"
+      }
+    },
+    {
+      "name": "local_llm_model_remove",
+      "title": "Remove a model",
+      "description": "Remove a user model entry after its weights are deleted. Seed entries are read-only.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "modelId": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+          }
+        },
+        "required": [
+          "modelId"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_model_remove"
+      }
+    },
+    {
+      "name": "local_llm_test_prompt",
+      "title": "Test prompt",
+      "description": "Send one prompt to the running model through AchillesAgentLib and the workspace Soul Gateway, returning the text and tokens per second.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 300000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "maxTokens": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1024
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_test_prompt"
+      }
+    }
+  ]
+}

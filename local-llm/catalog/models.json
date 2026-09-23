@@ -1,0 +1,60 @@
+{
+  "schema": "local-llm.catalog/v1",
+  "models": [
+    {
+      "id": "gpt-oss-20b",
+      "displayName": "gpt-oss-20b",
+      "description": "OpenAI open-weight mixture-of-experts model. On a 6 GB GPU, attention, shared weights and the KV cache run on the GPU while most expert weights stay in system RAM.",
+      "license": "Apache-2.0",
+      "architecture": "moe",
+      "totalParams": "21B",
+      "activeParams": "3.6B",
+      "contextLength": 131072,
+      "requiresJinja": true,
+      "sources": {
+        "llama.cpp": {
+          "type": "huggingface",
+          "repo": "ggml-org/gpt-oss-20b-GGUF",
+          "file": "gpt-oss-20b-MXFP4.gguf",
+          "revision": "ef9b12f2ff56c69cf32153a02784e7a3c88bf524",
+          "commit": "ef9b12f2ff56c69cf32153a02784e7a3c88bf524",
+          "size": 12109566624,
+          "sha256": "27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901",
+          "quantization": "MXFP4"
+        },
+        "ollama": {
+          "type": "ollama",
+          "tag": "gpt-oss:20b",
+          "manifestDigest": "sha256:17052f91a42e97930aa6e28a6c6c06a983e6a58dbb00434885a0cf5313e376f7",
+          "size": 13793441244
+        }
+      },
+      "memory": {
+        "layers": 24,
+        "nonExpertBytes": 1302366000,
+        "expertBytesPerLayer": 424114000,
+        "kvBytesPerToken": 24576,
+        "fixedKvBytes": 18874368
+      },
+      "recommended": {
+        "llama.cpp": {
+          "ctxSize": 16384,
+          "nGpuLayers": 99,
+          "nCpuMoe": 17,
+          "parallel": 1,
+          "batchSize": 256,
+          "ubatchSize": 256,
+          "flashAttn": "auto",
+          "chatTemplateKwargs": { "reasoning_effort": "low" }
+        },
+        "ollama": {
+          "numCtx": 4096
+        }
+      },
+      "validated": {
+        "llama.cpp": "RTX 3060 Laptop (6 GB), 16k context: 4,817 MiB VRAM, 36.8 tok/s generation, 249.7 tok/s prompt",
+        "ollama": "RTX 3060 Laptop (6 GB), 4k context: 67%/33% CPU/GPU, 32.1 tok/s generation"
+      }
+    }
+  ]
+}

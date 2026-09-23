@@ -1,0 +1,55 @@
+{
+  "name": "local-llm",
+  "description": "Runs open-source LLMs on this machine's GPU with llama.cpp or Ollama. Admins pick a model and a runner in Settings; weights download only when Run is pressed. Needs a workspace GPU grant: ploinky gpu grant nvidia --agent local-llms/local-llm.",
+  "container": "localhost/local-llm:dev",
+  "agent": "exec node /code/src/main.mjs",
+  "readiness": {
+    "protocol": "mcp"
+  },
+  "volumes": {
+    ".data/local-llm": "/data"
+  },
+  "llmRuntime": {
+    "runtimePolicy": {
+      "devices": [
+        {
+          "type": "cdi",
+          "value": "ploinky.local/gpu=all"
+        }
+      ]
+    }
+  },
+  "routerAccess": {
+    "agentPorts": false
+  },
+  "ideSettings": [
+    {
+      "key": "local-llm-settings",
+      "label": "Local LLMs",
+      "scope": "workspace",
+      "pluginKey": "local-llm/local-llm-settings",
+      "settingsComponent": "local-llm-settings",
+      "adminOnly": true
+    }
+  ],
+  "endpoints": {
+    "chatCompletions": {
+      "command": "node",
+      "args": [
+        "/code/src/chatResponder.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 600000,
+      "supportsStream": true
+    }
+  },
+  "profiles": {
+    "default": {
+      "env": {
+        "HF_TOKEN": {
+          "required": false
+        }
+      }
+    }
+  }
+}

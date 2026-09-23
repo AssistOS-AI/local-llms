@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "local-llm.catalog/v1",
+  "title": "local-llm model catalog",
+  "description": "Seed catalog entries (read-only, shipped with the agent) and user registry entries share this shape. Seed Hugging Face sources must pin commit, size and sha256; user sources are pinned when added.",
+  "type": "object",
+  "required": ["schema", "models"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "local-llm.catalog/v1" },
+    "models": { "type": "array", "items": { "$ref": "#/$defs/model" } }
+  },
+  "$defs": {
+    "model": {
+      "type": "object",
+      "required": ["id", "sources"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$" },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 400 },
+        "license": { "type": "string", "maxLength": 80 },
+        "architecture": { "enum": ["moe", "dense"] },
+        "totalParams": { "type": "string", "maxLength": 16 },
+        "activeParams": { "type": "string", "maxLength": 16 },
+        "contextLength": { "type": "integer", "minimum": 512 },
+        "requiresJinja": { "type": "boolean" },
+        "sources": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "llama.cpp": { "$ref": "#/$defs/huggingface" },
+            "lmstudio": { "$ref": "#/$defs/huggingface" },
+            "vllm": { "$ref": "#/$defs/huggingface" },
+            "ollama": { "$ref": "#/$defs/ollama" }
+          }
+        },
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "layers": { "type": "integer", "minimum": 1 },
+            "nonExpertBytes": { "type": "integer", "minimum": 0 },
+            "expertBytesPerLayer": { "type": "integer", "minimum": 0 },
+            "kvBytesPerToken": { "type": "integer", "minimum": 1 },
+            "fixedKvBytes": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "recommended": { "type": "object", "description": "Default runner parameters, keyed by runner id." },
+        "validated": { "type": "object", "description": "What was measured on real hardware, keyed by runner id." }
+      }
+    },
+    "huggingface": {
+      "type": "object",
+      "required": ["type", "repo", "file"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "huggingface" },
+        "repo": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$" },
+        "file": { "type": "string", "pattern": "\\.gguf$", "description": "A single-file GGUF in the repository." },
+        "revision": { "type": "string" },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "size": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "quantization": { "type": "string" }
+      }
+    },
+    "ollama": {
+      "type": "object",
+      "required": ["type", "tag"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "ollama" },
+        "tag": { "type": "string", "description": "An Ollama library tag such as gpt-oss:20b." },
+        "manifestDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "size": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}
