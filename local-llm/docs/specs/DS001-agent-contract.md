@@ -57,7 +57,7 @@ Every tool is declared in `mcp-config.json` with `command: "node"`, `args: ["/co
 
 ### Authorization
 
-Each tool call verifies the invocation grant with `authInfoFromInvocation` from `/Agent/lib/invocation-auth.mjs`. The caller must hold the `admin` role and must not be a guest. Anything else, including a missing grant, fails with `admin_required` before the controller is contacted. The `admin` tag also hides the tools from non-admin `tools/list` answers.
+AgentServer verifies the Router-signed invocation grant of every tool call (`requireVerifiedInvocation`) before the tool process starts. The tool then reads the caller's identity from that verified grant with `authInfoFromInvocation` from `/Agent/lib/invocation-auth.mjs`, which only normalizes it. The caller must hold the `admin` role and must not be a guest. Anything else, including a missing grant, fails with `admin_required` before the controller is contacted. The `admin` tag also hides the tools from non-admin `tools/list` answers.
 
 ### Chat endpoint
 
