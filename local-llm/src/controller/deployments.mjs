@@ -710,6 +710,15 @@ export function createController({
         });
     }
 
+    function ollamaManifestDigests(tag) {
+        try {
+            return readOllamaManifest(ollamaModels, tag)?.blobs.map((blob) => blob.digest) || [];
+        } catch (error) {
+            if (error?.code === 'invalid_manifest') return [];
+            throw error;
+        }
+    }
+
     function deleteWeights({ modelId, runnerId } = {}) {
         return queue.run(async () => {
             const model = findModel(modelId);
@@ -727,8 +736,23 @@ export function createController({
                 const claimedByOthers = Object.entries(pulls)
                     .filter(([tag]) => tag !== source.tag)
                     .flatMap(([, digests]) => digests);
+                // Another tag's running pull may share blobs with this one.
+                const activeTag = job !== null && state.deployment?.artifact?.type === 'ollama'
+                    ? state.deployment.artifact.tag
+                    : null;
+                if (activeTag && activeTag !== source.tag) {
+                    const touched = new Set([...(pulls[source.tag] || []), ...ollamaManifestDigests(source.tag)]);
+                    if ((pulls[activeTag] || []).some((digest) => touched.has(digest))) {
+                        throw new LocalLlmError('in_use', `The running ${activeTag} download uses some of these files; `
+                            + 'wait for it to finish or cancel it first.');
+                    }
+                }
                 freed = deleteOllamaModel(ollamaModels, source.tag)
-                    + deleteOllamaPartials(ollamaModels, { digests: pulls[source.tag] || [], claimedByOthers });
+                    + deleteOllamaPartials(ollamaModels, {
+                        digests: pulls[source.tag] || [],
+                        claimedByOthers,
+                        keepOrphans: activeTag !== null,
+                    });
                 if (pulls[source.tag]) {
                     delete pulls[source.tag];
                     save();

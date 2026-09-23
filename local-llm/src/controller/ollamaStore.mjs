@@ -155,15 +155,24 @@ export function partialPullBytes(modelsDir, digests = [], { fsApi = fs } = {}) {
 
 /**
  * Delete one tag's partial pull files, and orphans: partials that no manifest
- * references and no other tag's recorded pull claims.
+ * references and no other tag's recorded pull claims. A partial that another
+ * tag also claims is kept, since that tag's pull resumes from it. Orphans are
+ * kept too when `keepOrphans` is set (another pull is running and may not
+ * have reported its digests yet).
  */
-export function deleteOllamaPartials(modelsDir, { digests = [], claimedByOthers = [], fsApi = fs } = {}) {
+export function deleteOllamaPartials(modelsDir, {
+    digests = [],
+    claimedByOthers = [],
+    keepOrphans = false,
+    fsApi = fs,
+} = {}) {
     const own = new Set(digests);
     const others = new Set(claimedByOthers);
     const referenced = referencedDigests(modelsDir, fsApi, null);
     let freed = 0;
     for (const [digest, files] of partialPullFiles(modelsDir, { fsApi })) {
-        const orphan = !others.has(digest) && !referenced.has(digest);
+        if (others.has(digest)) continue;
+        const orphan = !keepOrphans && !referenced.has(digest);
         if (!own.has(digest) && !orphan) continue;
         for (const file of files) {
             try {

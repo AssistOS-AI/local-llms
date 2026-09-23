@@ -432,6 +432,86 @@ test('deleting a tag\'s Ollama weights frees its paused partial and orphans, and
     assert.deepEqual(Object.keys(h.controller.state.ollamaPulls), ['granite4:tiny-h']);
 });
 
+test('a partial that another tag also claims survives deleting one tag\'s Ollama weights', async (t) => {
+    const shared = `sha256:${'d'.repeat(64)}`;
+    const h = harness(t, { initialState: {
+        version: 1, deployment: null, params: {}, requests: {}, registry: [],
+        ollamaPulls: { 'gpt-oss:20b': [shared, `sha256:${'e'.repeat(64)}`], 'granite4:tiny-h': [shared] },
+    } });
+    const sharedFile = writePartial(h, PARTIAL_D, 2048);
+    const own = writePartial(h, PARTIAL_E, 4096);
+    const deleted = await h.controller.deleteWeights({ modelId: 'gpt-oss-20b', runnerId: 'ollama' });
+    assert.equal(deleted.freedBytes, 4096);
+    assert.equal(fs.existsSync(own), false);
+    assert.equal(fs.existsSync(sharedFile), true);
+});
+
+test('deleting Ollama weights is refused while another tag\'s running pull uses one of its blobs', async (t) => {
+    const shared = `sha256:${'d'.repeat(64)}`;
+    const user = { id: 'user-olla', displayName: 'Q', sources: { ollama: { type: 'ollama', tag: 'qwen3:0.6b' } } };
+    const encoder = new TextEncoder();
+    const h = harness(t, {
+        initialState: {
+            version: 1, deployment: null, params: {}, requests: {}, registry: [user],
+            ollamaPulls: { 'gpt-oss:20b': [shared] },
+        },
+        fetchImpl: async (url, options = {}) => {
+            if (!String(url).endsWith('/api/pull')) return { ok: true, status: 200, json: async () => ({}) };
+            const body = {
+                async *[Symbol.asyncIterator]() {
+                    yield encoder.encode(`${JSON.stringify({ status: 'pulling', digest: shared, total: 4096, completed: 1024 })}\n`);
+                    await new Promise((resolve, reject) => {
+                        options.signal?.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+                    });
+                },
+            };
+            return { ok: true, status: 200, body };
+        },
+    });
+    const sharedFile = writePartial(h, PARTIAL_D, 1024);
+    await h.controller.run({ modelId: 'user-olla', runnerId: 'ollama', requestId: 'request-0001' });
+    await until(() => h.controller.state.ollamaPulls?.['qwen3:0.6b']?.includes(shared));
+    await assert.rejects(
+        () => h.controller.deleteWeights({ modelId: 'gpt-oss-20b', runnerId: 'ollama' }),
+        (error) => error.code === 'in_use' && /qwen3:0\.6b/.test(error.message),
+    );
+    assert.equal(fs.existsSync(sharedFile), true);
+    await h.controller.stop();
+});
+
+test('while another tag pulls, deleting Ollama weights keeps unclaimed partials', async (t) => {
+    const user = { id: 'user-olla', displayName: 'Q', sources: { ollama: { type: 'ollama', tag: 'qwen3:0.6b' } } };
+    const encoder = new TextEncoder();
+    const h = harness(t, {
+        initialState: {
+            version: 1, deployment: null, params: {}, requests: {}, registry: [user],
+            ollamaPulls: { 'gpt-oss:20b': [`sha256:${'e'.repeat(64)}`] },
+        },
+        fetchImpl: async (url, options = {}) => {
+            if (!String(url).endsWith('/api/pull')) return { ok: true, status: 200, json: async () => ({}) };
+            const body = {
+                async *[Symbol.asyncIterator]() {
+                    yield encoder.encode(`${JSON.stringify({ status: 'pulling manifest' })}\n`);
+                    await new Promise((resolve, reject) => {
+                        options.signal?.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+                    });
+                },
+            };
+            return { ok: true, status: 200, body };
+        },
+    });
+    const own = writePartial(h, PARTIAL_E, 4096);
+    // Not yet reported by the running pull, so it could be that pull's file.
+    const unclaimed = writePartial(h, `sha256-${'f'.repeat(64)}-partial`, 1024);
+    await h.controller.run({ modelId: 'user-olla', runnerId: 'ollama', requestId: 'request-0001' });
+    await until(() => phase(h) === 'downloading');
+    const deleted = await h.controller.deleteWeights({ modelId: 'gpt-oss-20b', runnerId: 'ollama' });
+    assert.equal(deleted.freedBytes, 4096);
+    assert.equal(fs.existsSync(own), false);
+    assert.equal(fs.existsSync(unclaimed), true);
+    await h.controller.stop();
+});
+
 test('an Ollama pull records the blob digests it touches', async (t) => {
     const digest = `sha256:${'a'.repeat(64)}`;
     const events = [

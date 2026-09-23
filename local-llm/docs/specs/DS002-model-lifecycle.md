@@ -46,7 +46,7 @@ any phase ── failure ──▶ error (the next run or stop clears it; stop a
 
 One deployment exists at a time. A second `run` while one is active is rejected with `busy` unless `replace: true`. A repeated `run` with the same `requestId` is a no-op, so a client retry cannot start a second job. Before the download and again before the runner starts, admission (DS003) is evaluated against the current hardware snapshot.
 
-The job takes an immutable copy of the model source when it starts. A registry edit during a download cannot change which file is fetched. Deleting the weights of, updating, or removing a model in use is rejected with `in_use`.
+The job takes an immutable copy of the model source when it starts. A registry edit during a download cannot change which file is fetched. Deleting the weights of, updating, or removing a model in use is rejected with `in_use`. Ollama tags can share blobs. Deleting one tag's weights never removes a partial blob that another tag's recorded pull claims, and it is rejected with `in_use` while another tag's running pull has reported a blob this deletion would touch. While any other Ollama pull runs, partials that no tag claims are kept, because that pull may not have reported them yet.
 
 ### Restart
 
