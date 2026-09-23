@@ -77,7 +77,7 @@ export class LocalLlmSettings {
         this.runForm?.addEventListener('submit', (event) => this.submitRun(event));
         this.promptForm?.addEventListener('submit', (event) => this.submitPrompt(event));
         this.sourceKind?.addEventListener('change', () => this.updateSourceFields());
-        this.runnerSelect?.addEventListener('change', () => this.renderRunFields());
+        this.runnerSelect?.addEventListener('change', () => { void this.renderRunFields(); });
         this.runForm?.addEventListener('input', (event) => {
             if (event.target?.closest?.('[data-run-params]')) this.schedulePreview();
         });
@@ -391,7 +391,7 @@ export class LocalLlmSettings {
             || options[0];
         await this.setSelectOptions(this.runnerSelect, options, preferred?.value || '');
         this.runForm.hidden = false;
-        this.renderRunFields();
+        await this.renderRunFields();
         this.runForm.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
     }
 
@@ -402,7 +402,7 @@ export class LocalLlmSettings {
         clearTimeout(this.previewTimer);
     }
 
-    renderRunFields() {
+    async renderRunFields() {
         const model = this.findModel(this.runModelId);
         const runnerId = this.runnerSelect?.value || '';
         const runner = (this.overview?.runners || []).find((entry) => entry.id === runnerId);
@@ -424,6 +424,10 @@ export class LocalLlmSettings {
         this.runFields = runnable ? fieldsFromSchema(runner.paramSchema, entry?.params || {}) : [];
         container.innerHTML = this.runFields.map((field) => this.renderField(field)).join('');
         this.renderEstimate({ context: entry?.context, admission: entry?.admission });
+        // Selects inserted here get their presenter asynchronously; read them only once ready.
+        await Promise.all([...container.querySelectorAll('custom-select')]
+            .map((select) => select.presenterReadyPromise)
+            .filter(Boolean));
         if (runnable) this.schedulePreview();
     }
 
@@ -605,12 +609,13 @@ export class LocalLlmSettings {
         if (!this.deploymentCard) return;
         const status = this.status || {};
         const deployment = status.deployment;
-        if (!deployment) {
-            this.deploymentCard.innerHTML = '<div class="settings-empty-state">No model is running. Choose Run on the Models tab.</div>';
+        const phase = status.phase || deployment?.phase || 'idle';
+        if (!deployment || phase === 'idle') {
+            const last = deployment ? ` The last run was ${escapeHtml(deployment.modelId)} on ${escapeHtml(runnerLabel(deployment.runnerId))}.` : '';
+            this.deploymentCard.innerHTML = `<div class="settings-empty-state">No model is running. Choose Run on the Models tab.${last}</div>`;
             this.renderLogs();
             return;
         }
-        const phase = status.phase || deployment.phase;
         const badge = phase === 'ready' ? 'success' : phase === 'error' ? 'error' : '';
         const download = deployment.download || null;
         const percent = progressPercent(download);
