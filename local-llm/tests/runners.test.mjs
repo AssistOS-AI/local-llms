@@ -381,3 +381,21 @@ describe('argv safety', () => {
         assert.ok(full.args.every((arg) => !SHELL_META.test(arg)));
     });
 });
+
+it('version probes get a minimal environment without tokens or agent secrets', (t) => {
+    const saved = { HF_TOKEN: process.env.HF_TOKEN, PLOINKY_AGENT_SECRET: process.env.PLOINKY_AGENT_SECRET };
+    process.env.HF_TOKEN = 'hf_secret_token_value';
+    process.env.PLOINKY_AGENT_SECRET = 'agent-secret';
+    t.after(() => {
+        for (const [key, value] of Object.entries(saved)) {
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+        }
+    });
+    for (const runner of [llamaCppRunner, ollamaRunner]) {
+        let seen = null;
+        runner.detect({ spawnSync: (_file, _args, options) => { seen = options.env; return { status: 0, stdout: '', stderr: '' }; } });
+        assert.deepEqual(Object.keys(seen).sort(), ['HOME', 'LANG', 'LD_LIBRARY_PATH', 'PATH'], runner.id);
+        assert.equal(seen.LD_LIBRARY_PATH, '/usr/local/nvidia/lib64');
+    }
+});

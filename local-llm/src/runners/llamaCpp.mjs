@@ -6,6 +6,7 @@ import {
     assertPort,
     codedError,
     deepFreeze,
+    probeEnv,
     probeVersion,
     recommendedFor,
     validateParams
@@ -120,7 +121,7 @@ function detect({ spawnSync = realSpawnSync } = {}) {
         spawnSync,
         executable: EXECUTABLE,
         args: ['--version'],
-        env: { ...process.env, LD_LIBRARY_PATH: NVIDIA_LIB_DIR },
+        env: probeEnv({ LD_LIBRARY_PATH: NVIDIA_LIB_DIR }),
         parse: parseVersion,
         pinnedVersion: llamaCppRunner.pinnedVersion
     });

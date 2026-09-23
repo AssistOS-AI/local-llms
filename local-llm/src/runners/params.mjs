@@ -175,6 +175,17 @@ function snippet(text) {
 }
 
 // Runs `<executable> <args>` without a shell and hands combined stdout+stderr to parse().
+// Version probes get only what the executable needs to start, never the
+// agent's tokens or secrets: the same rule as the runner environment.
+export function probeEnv(extra = {}, source = process.env) {
+    return {
+        PATH: source.PATH || '/usr/local/nvidia/bin:/usr/local/bin:/usr/bin:/bin',
+        HOME: source.HOME || '/tmp',
+        LANG: 'C.UTF-8',
+        ...extra,
+    };
+}
+
 export function probeVersion({ spawnSync, executable, args, env, parse, pinnedVersion }) {
     let result;
     try {
