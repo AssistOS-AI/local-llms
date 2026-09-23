@@ -631,3 +631,18 @@ test('a file in a subfolder downloads into that folder and is removed with it', 
     await removeArtifact({ root, artifact });
     assert.equal(fs.existsSync(path.join(root, 'org')), false);
 });
+
+test('a metadata request that never answers fails after its deadline', { timeout: TIMEOUT }, async (t) => {
+    const silent = http.createServer(() => {});
+    await new Promise((resolve) => silent.listen(0, '127.0.0.1', resolve));
+    t.after(() => {
+        silent.closeAllConnections();
+        return new Promise((resolve) => silent.close(resolve));
+    });
+    const started = Date.now();
+    await assert.rejects(
+        resolveHuggingFaceArtifact({ repo: REPO, file: FILE, baseUrl: `http://127.0.0.1:${silent.address().port}`, timeoutMs: 200 }),
+        (err) => err instanceof DownloadError && err.code === 'RESOLVE_FAILED' && err.details?.reason === 'timeout',
+    );
+    assert.ok(Date.now() - started < 2000);
+});

@@ -115,10 +115,15 @@ async function discardBody(response) {
     }
 }
 
-async function fetchJson(url, { token, fetchImpl }) {
+// Metadata requests run while an admin waits for Add or Update; each one has
+// its own deadline, which also covers reading the body.
+export const METADATA_TIMEOUT_MS = 15_000;
+
+async function fetchJson(url, { token, fetchImpl, timeoutMs = METADATA_TIMEOUT_MS }) {
+    const signal = AbortSignal.timeout(timeoutMs);
     let response;
     try {
-        response = await fetchImpl(url, { headers: { Accept: 'application/json', ...authHeaders(token) } });
+        response = await fetchImpl(url, { headers: { Accept: 'application/json', ...authHeaders(token) }, signal });
     } catch (err) {
         // The fetch error is not attached as a cause: only a sanitized code.
         throw new DownloadError('RESOLVE_FAILED', 'Hugging Face metadata request failed', {
@@ -135,12 +140,21 @@ async function fetchJson(url, { token, fetchImpl }) {
     }
     try {
         return { json: await response.json(), link: response.headers.get('link') };
-    } catch {
+    } catch (err) {
+        if (signal.aborted) {
+            throw new DownloadError('RESOLVE_FAILED', 'Hugging Face metadata request timed out', {
+                retryable: true,
+                details: { reason: 'timeout' },
+            });
+        }
         throw new DownloadError('RESOLVE_FAILED', 'Hugging Face metadata response is not valid JSON');
     }
 }
 
 function networkReason(err) {
+    if (err?.name === 'TimeoutError') {
+        return 'timeout';
+    }
     const code = err?.cause?.code ?? err?.code;
     if (typeof code === 'string' && /^[A-Z0-9_]{1,40}$/.test(code)) {
         return code;
@@ -148,12 +162,12 @@ function networkReason(err) {
     return err?.name === 'TypeError' ? 'fetch-failed' : 'unknown';
 }
 
-async function resolveCommit({ repo, revision, token, fetchImpl, baseUrl }) {
+async function resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs }) {
     if (COMMIT_RE.test(revision)) {
         return revision;
     }
     const url = `${baseUrl}/api/models/${encodeSegments(repo)}/revision/${encodeURIComponent(revision)}`;
-    const { json } = await fetchJson(url, { token, fetchImpl });
+    const { json } = await fetchJson(url, { token, fetchImpl, timeoutMs });
     const sha = typeof json?.sha === 'string' ? json.sha.toLowerCase() : '';
     if (!COMMIT_RE.test(sha)) {
         throw new DownloadError('RESOLVE_FAILED', 'Hugging Face revision response has no commit sha');
@@ -176,14 +190,14 @@ function nextTreePage(link, baseUrl) {
     }
 }
 
-async function findTreeEntry({ repo, file, commit, token, fetchImpl, baseUrl }) {
+async function findTreeEntry({ repo, file, commit, token, fetchImpl, baseUrl, timeoutMs }) {
     const dirname = path.posix.dirname(file);
     let url = `${baseUrl}/api/models/${encodeSegments(repo)}/tree/${commit}`;
     if (dirname !== '.') {
         url += `/${encodeSegments(dirname)}`;
     }
     for (let page = 0; url && page < MAX_TREE_PAGES; page += 1) {
-        const { json, link } = await fetchJson(url, { token, fetchImpl });
+        const { json, link } = await fetchJson(url, { token, fetchImpl, timeoutMs });
         if (!Array.isArray(json)) {
             throw new DownloadError('RESOLVE_FAILED', 'Hugging Face tree response is not a list');
         }
@@ -212,12 +226,13 @@ export async function resolveHuggingFaceArtifact({
     token = '',
     fetchImpl = globalThis.fetch,
     baseUrl = 'https://huggingface.co',
+    timeoutMs = METADATA_TIMEOUT_MS,
 }) {
     assertRepo(repo);
     assertFile(file);
     assertRevision(revision);
-    const commit = await resolveCommit({ repo, revision, token, fetchImpl, baseUrl });
-    const entry = await findTreeEntry({ repo, file, commit, token, fetchImpl, baseUrl });
+    const commit = await resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs });
+    const entry = await findTreeEntry({ repo, file, commit, token, fetchImpl, baseUrl, timeoutMs });
     const identity = entry ? lfsIdentity(entry) : null;
     if (!identity) {
         throw new DownloadError('NOT_FOUND', 'Model file not found as an LFS object at the pinned commit', {

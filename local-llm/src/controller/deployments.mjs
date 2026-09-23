@@ -714,34 +714,51 @@ export function createController({
         return { ...entry, sources };
     }
 
-    function addModel(entry) {
-        return queue.run(async () => {
-            const draft = validateModel(entry, { seed: false });
-            if (catalog().some((model) => model.id === draft.id)) {
-                throw new LocalLlmError('duplicate_model', `A model with id '${draft.id}' already exists.`);
+    function assertNewModelId(id) {
+        if (catalog().some((model) => model.id === id)) {
+            throw new LocalLlmError('duplicate_model', `A model with id '${id}' already exists.`);
+        }
+    }
+
+    function userModelIndex(id) {
+        const index = state.registry.findIndex((model) => model.id === id);
+        if (index < 0) {
+            throw new LocalLlmError(seedCatalog.some((model) => model.id === id) ? 'read_only' : 'unknown_model',
+                'Only user models can be changed; seed entries are read-only.');
+        }
+        return index;
+    }
+
+    function assertModelNotInUse(model) {
+        for (const [runnerId, source] of Object.entries(model.sources)) {
+            if (inUse(artifactKey(runnerId, source))) {
+                throw new LocalLlmError('in_use', 'This model is in use; stop it or cancel its download first.');
             }
-            // Pinning reads Hugging Face metadata only; no weights are downloaded here.
-            const pinned = validateModel(await pinSources(entry), { seed: false });
+        }
+    }
+
+    // Pinning reads Hugging Face metadata only; no weights are downloaded. It
+    // runs outside the command queue, so a slow metadata request never holds
+    // up Stop, Cancel or Run, and every check is repeated inside the queue.
+    async function addModel(entry) {
+        const draft = validateModel(entry, { seed: false });
+        assertNewModelId(draft.id);
+        const pinned = validateModel(await pinSources(entry), { seed: false });
+        return queue.run(async () => {
+            assertNewModelId(pinned.id);
             state.registry.push(JSON.parse(JSON.stringify({ ...pinned, seed: undefined })));
             save();
             return { model: pinned };
         });
     }
 
-    function updateModel(entry) {
+    async function updateModel(entry) {
+        const candidate = validateModel(entry);
+        userModelIndex(candidate.id);
+        const pinned = validateModel(await pinSources(candidate), { seed: false });
         return queue.run(async () => {
-            const index = state.registry.findIndex((model) => model.id === entry?.id);
-            if (index < 0) {
-                throw new LocalLlmError(seedCatalog.some((model) => model.id === entry?.id) ? 'read_only' : 'unknown_model',
-                    'Only user models can be updated; seed entries are read-only.');
-            }
-            const existing = validateModel(state.registry[index]);
-            for (const [runnerId, source] of Object.entries(existing.sources)) {
-                if (inUse(artifactKey(runnerId, source))) {
-                    throw new LocalLlmError('in_use', 'This model is in use; stop it or cancel its download first.');
-                }
-            }
-            const pinned = validateModel(await pinSources(validateModel(entry)), { seed: false });
+            const index = userModelIndex(pinned.id);
+            assertModelNotInUse(validateModel(state.registry[index]));
             state.registry[index] = JSON.parse(JSON.stringify({ ...pinned, seed: undefined }));
             save();
             return { model: pinned };

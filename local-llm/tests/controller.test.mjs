@@ -78,6 +78,7 @@ function harness(t, {
     initialState = null,
     extraSeed = [],
     quietAfterFirst = false,
+    resolveHf = null,
 } = {}) {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-controller-'));
     t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
@@ -108,6 +109,7 @@ function harness(t, {
         detectRunner: (runner) => ({ installed: runner.supported, version: runner.pinnedVersion, reason: null }),
         pollMs: 2,
         stopGraceMs: 50,
+        ...(resolveHf ? { resolveHf } : {}),
     });
     return { controller, runners, calls, dataDir, stateStore };
 }
@@ -369,4 +371,20 @@ test('the runner report and speed describe only the current runner start', async
     assert.equal(status.runnerReport.offloaded, null);
     assert.equal(status.runnerReport.modelMiB, null);
     assert.equal(status.lastCompletion, null);
+});
+
+test('a hanging Hugging Face lookup for Add model does not hold up Stop', async (t) => {
+    const h = harness(t, { resolveHf: () => new Promise(() => {}) });
+    const adding = h.controller.addModel({
+        id: 'user-qwen',
+        sources: { 'llama.cpp': { type: 'huggingface', repo: 'Qwen/Qwen3-0.6B-GGUF', file: 'Qwen3-0.6B-Q8_0.gguf', revision: 'main' } },
+    });
+    adding.catch(() => {});
+    const stopped = await Promise.race([
+        h.controller.stop().then(() => 'stopped'),
+        new Promise((resolve) => setTimeout(() => resolve('still waiting'), 500)),
+    ]);
+    assert.equal(stopped, 'stopped');
+    // A request that comes back after a drain started is refused, not stored.
+    assert.equal(h.controller.state.registry.length, 0);
 });
