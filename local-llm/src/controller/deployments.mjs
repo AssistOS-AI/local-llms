@@ -49,6 +49,12 @@ function artifactKey(runnerId, artifact) {
         : `gguf:${artifact.repo}@${artifact.commit}/${artifact.file}`;
 }
 
+// A stop, cancel or drain that lands between two awaited steps must not start
+// the next one (a runner launched here would only be killed again).
+function throwIfAborted(signal) {
+    if (signal?.aborted) throw new LocalLlmError('aborted', 'Stopped while starting.');
+}
+
 function sleep(ms, signal) {
     return new Promise((resolve) => {
         const timer = setTimeout(resolve, ms);
@@ -418,6 +424,7 @@ export function createController({
             onProgress: updateProgress,
             signal,
         });
+        throwIfAborted(signal);
         deployment.download = {
             ...(deployment.download || {}),
             bytes: deployment.artifact.size,
@@ -425,6 +432,7 @@ export function createController({
             transferred: result.bytesTransferred,
         };
         await recheckAdmission(deployment, model);
+        throwIfAborted(signal);
         setPhase('starting');
         const definition = getRunner('llama.cpp');
         const apiKey = apiKeyFactory();
@@ -508,7 +516,9 @@ export function createController({
                 + `not the pinned ${deployment.artifact.manifestDigest}; update the model entry to accept it.`);
         }
         deployment.resolved = { manifestDigest: pulled.manifestDigest, blobs: pulled.blobs.map((blob) => blob.digest) };
+        throwIfAborted(signal);
         await recheckAdmission(deployment, model);
+        throwIfAborted(signal);
         setPhase('loading');
         const options = definition.requestOptions(deployment.params);
         const load = await fetchImpl(`${base}/api/generate`, {

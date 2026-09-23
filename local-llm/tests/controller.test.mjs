@@ -479,3 +479,19 @@ test('updating a user model keeps its pin, and a re-pin that would orphan downlo
     await h.controller.updateModel({ id: 'user-qwen', sources: { 'llama.cpp': { ...source, revision: 'v2' } } });
     assert.equal(h.controller.state.registry[0].sources['llama.cpp'].commit, commits[1]);
 });
+
+test('an abort that lands as the download completes starts no runner', async (t) => {
+    let slow = false;
+    const h = harness(t, {
+        snap: async () => {
+            if (slow) await new Promise((resolve) => setTimeout(resolve, 50));
+            return snapshot();
+        },
+    });
+    await h.controller.run({ ...RUN, requestId: 'request-0001' });
+    slow = true;
+    h.calls.download[0].entry.resolve({ status: 'complete', path: '/data/models/gpt.gguf', bytesTransferred: 1 });
+    await h.controller.drain();
+    assert.equal(h.runners.started.length, 0);
+    assert.notEqual(phase(h), 'ready');
+});
