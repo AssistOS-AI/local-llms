@@ -122,8 +122,12 @@ function otherGpuUsers(gpu) {
  */
 export function admit({ runner, model, source, params, snapshot, remainingDownloadBytes = 0 }) {
     if (runner.id === 'vllm') {
-        const reason = source?.type === 'huggingface' && /\.gguf$/i.test(source.file || '')
-            ? `vLLM cannot load ${source.quantization || 'this'} GGUF; not supported in this release.`
+        // vLLM's GGUF loader has no MXFP4 support; for other GGUF files it is
+        // experimental, so the reason does not claim they cannot load.
+        const mxfp4Gguf = source?.type === 'huggingface' && /\.gguf$/i.test(source.file || '')
+            && /mxfp4/i.test(`${source.quantization || ''} ${source.file}`);
+        const reason = mxfp4Gguf
+            ? 'vLLM cannot load MXFP4 GGUF; not supported in this release.'
             : 'vLLM is not supported or tested in this release.';
         return result('incompatible', reason, {});
     }

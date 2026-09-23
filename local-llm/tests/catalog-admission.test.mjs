@@ -89,6 +89,11 @@ test('admission: vLLM and LM Studio are incompatible with a stated reason', () =
     assert.equal(vllm.status, 'incompatible');
     assert.equal(vllm.reason, 'vLLM cannot load MXFP4 GGUF; not supported in this release.');
     assert.equal(admitGpt('lmstudio').status, 'incompatible');
+    // Other GGUF quantizations are not claimed to be unloadable, only unsupported here.
+    const q8 = { type: 'huggingface', repo: 'Qwen/Qwen3-0.6B-GGUF', file: 'Qwen3-0.6B-Q8_0.gguf', quantization: 'Q8_0' };
+    const other = admit({ runner: getRunner('vllm'), model: GPT, source: q8, params: {}, snapshot: snapshot() });
+    assert.equal(other.status, 'incompatible');
+    assert.equal(other.reason, 'vLLM is not supported or tested in this release.');
 });
 
 test('admission: no GPU grant is an actionable incompatibility; big RAM users get a warning', () => {
