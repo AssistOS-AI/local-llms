@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import * as presenterModule from '../IDE-plugins/local-llm-settings/local-llm-settings.js';
 import {
+    confirmMessage,
     fieldsFromSchema,
     mergeLogs,
     modelEntryFromForm,
@@ -184,4 +185,12 @@ test('tool results are parsed, and tool failures surface their message', () => {
     assert.throws(() => parseToolResult({ content: [{ type: 'text', text: '{"ok":false,"error":"busy","message":"Busy."}' }] }), /Busy\./);
     const merged = mergeLogs([{ seq: 1, line: 'a' }, { seq: 2, line: 'b' }], [{ seq: 2, line: 'b' }, { seq: 3, line: 'c' }], 2);
     assert.deepEqual(merged.map((entry) => entry.seq), [2, 3]);
+});
+
+test('confirmation text cannot break out of the modal attribute', () => {
+    assert.equal(confirmMessage('Remove "Evil" <img src=x onerror=alert(1)>?'), "Remove 'Evil' img src=x onerror=alert(1)?");
+    const presenter = readText('local-llm-settings.js');
+    const confirms = presenter.match(/showModal\('confirm-action-modal', \{\s*message: ([a-zA-Z]+)\(/g) || [];
+    assert.equal(confirms.length, 3);
+    assert.ok(confirms.every((call) => call.endsWith('confirmMessage(')));
 });

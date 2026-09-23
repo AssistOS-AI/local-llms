@@ -1,6 +1,7 @@
 import {
     POLL_INTERVAL_MS,
     admissionLabel,
+    confirmMessage,
     contextLabel,
     downloadLabel,
     escapeHtml,
@@ -347,7 +348,7 @@ export class LocalLlmSettings {
         const model = this.findModel(modelId);
         if (!model || model.seed || this.busy) return;
         const confirmed = await assistOS.UI.showModal('confirm-action-modal', {
-            message: `Remove ${model.displayName || model.id} from the list? Downloaded weights are not deleted by this; delete them first if you want the disk space back.`,
+            message: confirmMessage(`Remove ${model.displayName || model.id} from the list? Downloaded weights are not deleted by this; delete them first if you want the disk space back.`),
         }, true);
         if (!confirmed) return;
         const removed = await this.withBusy(`Removing ${model.id}…`, async () => {
@@ -363,7 +364,7 @@ export class LocalLlmSettings {
         const entry = model?.runners?.[runnerId];
         if (!entry || this.busy) return;
         const confirmed = await assistOS.UI.showModal('confirm-action-modal', {
-            message: `Delete the ${runnerLabel(runnerId)} weights of ${model.displayName || model.id} (${formatBytes(entry.download?.bytes ?? entry.size)})? The next Run downloads them again.`,
+            message: confirmMessage(`Delete the ${runnerLabel(runnerId)} weights of ${model.displayName || model.id} (${formatBytes(entry.download?.bytes ?? entry.size)})? The next Run downloads them again.`),
         }, true);
         if (!confirmed) return;
         const deleted = await this.withBusy('Deleting weights…', async () => {
@@ -530,7 +531,7 @@ export class LocalLlmSettings {
         const current = this.status?.deployment || this.overview?.deployment;
         if (current && ACTIVE_PHASES.has(current.phase)) {
             replace = await assistOS.UI.showModal('confirm-action-modal', {
-                message: `${current.modelId} is ${current.phase} on ${runnerLabel(current.runnerId)}. Stop it and run ${model.displayName || model.id} instead?`,
+                message: confirmMessage(`${current.modelId} is ${current.phase} on ${runnerLabel(current.runnerId)}. Stop it and run ${model.displayName || model.id} instead?`),
             }, true);
             if (!replace) return;
         }

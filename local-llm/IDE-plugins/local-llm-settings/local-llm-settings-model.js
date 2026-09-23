@@ -14,6 +14,15 @@ export function escapeHtml(value = '') {
     })[character]);
 }
 
+/**
+ * Text for confirm-action-modal. WebSkel writes modal props into a
+ * data-message="..." attribute through innerHTML, so quotes and angle
+ * brackets from a model name would break out of it.
+ */
+export function confirmMessage(text) {
+    return String(text ?? '').replace(/"/g, "'").replace(/[<>]/g, '');
+}
+
 /** The JSON a local-llm tool wrote, from an MCP result; throws its error. */
 export function parseToolResult(value) {
     if (value?.isError) {
