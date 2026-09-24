@@ -2,7 +2,10 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ParamError, validateParams } from '../src/runners/params.mjs';
 import { RUNNERS, getRunner, runnerSummaries } from '../src/runners/index.mjs';
+import { ikLlamaCppRunner } from '../src/runners/ikLlamaCpp.mjs';
 import { llamaCppRunner } from '../src/runners/llamaCpp.mjs';
+import { parseRunnerReport } from '../src/controller/runnerProcess.mjs';
+import { loadSeedCatalog } from '../src/controller/catalog.mjs';
 import { ollamaRunner } from '../src/runners/ollama.mjs';
 import { vllmRunner, vllmRuntime } from '../src/runners/vllm.mjs';
 
@@ -230,6 +233,88 @@ describe('llama.cpp runner', () => {
     });
 });
 
+describe('ik_llama.cpp runner', () => {
+    const [GPT] = loadSeedCatalog();
+    const PATH = '/data/models/gguf/ggml-org/gpt-oss-20b-GGUF/c/gpt-oss-20b-MXFP4.gguf';
+    const ikLaunch = (params, model = GPT) => ikLlamaCppRunner.buildLaunch({ artifactPath: PATH, params, port: 18081, apiKey: API_KEY, model });
+
+    it('reads the same GGUF as llama.cpp, on its own port, off PATH', () => {
+        assert.equal(ikLlamaCppRunner.id, 'ik_llama.cpp');
+        assert.equal(ikLlamaCppRunner.weightFormat, 'gguf');
+        assert.equal(ikLlamaCppRunner.port, 18081);
+        assert.equal(ikLlamaCppRunner.executable, '/opt/ik_llama.cpp/llama-server');
+        assert.equal(ikLlamaCppRunner.pinnedVersion, '20f7a72');
+        assert.deepEqual(ikLlamaCppRunner.basicParams, ['ctxSize', 'nCpuMoe']);
+        assert.equal(ikLlamaCppRunner.paramSchema, llamaCppRunner.paramSchema);
+    });
+
+    it('launches gpt-oss-20b with the flags ik understands, in the documented order', () => {
+        const launch = ikLaunch({});
+        assert.equal(launch.command, '/opt/ik_llama.cpp/llama-server');
+        assert.deepEqual(launch.env, { LD_LIBRARY_PATH: '/usr/local/nvidia/lib64' });
+        assert.deepEqual(launch.args, [
+            '-m', PATH, '--host', '127.0.0.1', '--port', '18081', '--api-key', API_KEY,
+            '--webui', 'none', '--alias', 'gpt-oss-20b', '--ctx-size', '16384', '--n-gpu-layers', '99',
+            '--n-cpu-moe', '17', '--flash-attn', 'auto', '--cache-type-k', 'f16', '--cache-type-v', 'f16', '-np', '1',
+            '--batch-size', '256', '--ubatch-size', '256', '--chat-template-kwargs', '{"reasoning_effort":"low"}', '--jinja',
+        ]);
+    });
+
+    it('never passes the llama.cpp flags ik rejects, nor run-time repacking', () => {
+        const full = ikLaunch({ ctxSize: 32768, nCpuMoe: 8, threads: 12, parallel: 2, mlock: true, noMmap: true,
+            flashAttn: 'off', cacheTypeK: 'q8_0', cacheTypeV: 'q4_0', batchSize: 4096, ubatchSize: 1024 });
+        for (const rejected of ['--no-webui', '-lv', '--kv-unified', '--load-mode', '-rtr', '--run-time-repack', '-fmoe']) {
+            assert.equal(full.args.includes(rejected), false, rejected);
+        }
+        assert.ok(hasPair(full.args, '-np', '2'));
+        assert.ok(full.args.includes('--mlock') && full.args.includes('--no-mmap'));
+        assert.ok(hasPair(full.args, '--flash-attn', 'off'));
+        assert.ok(full.args.every((arg) => !SHELL_META.test(arg)));
+        // Without the options, neither switch is passed.
+        const plain = ikLaunch({});
+        assert.equal(plain.args.includes('--mlock') || plain.args.includes('--no-mmap'), false);
+        // ik turns --jinja off by default, so it is always passed.
+        assert.ok(ikLaunch({}, { id: 'dense', requiresJinja: false }).args.includes('--jinja'));
+    });
+
+    it('splits the context across parallel slots, as ik has no unified KV cache', () => {
+        assert.deepEqual(ikLlamaCppRunner.describeContext({ ctxSize: 16384, parallel: 2, batchSize: 512, ubatchSize: 512 }),
+            { totalContext: 16384, perRequestContext: 8192, parallel: 2, kvUnified: false });
+        assert.deepEqual(llamaCppRunner.describeContext({ ctxSize: 16384, parallel: 2, batchSize: 512, ubatchSize: 512 }),
+            { totalContext: 16384, perRequestContext: 16384, parallel: 2, kvUnified: true });
+    });
+
+    it('reads its version from the build commit', () => {
+        const stderr = 'version: 1 (20f7a72)\nbuilt with cc (Ubuntu 13.3.0) 13.3.0 for x86_64-linux-gnu\n';
+        assert.deepEqual(ikLlamaCppRunner.detect(fakeSpawn({ status: 0, stdout: '', stderr })),
+            { installed: true, version: '20f7a72', reason: null });
+        const longer = ikLlamaCppRunner.detect(fakeSpawn({ status: 0, stdout: '', stderr: 'version: 4956 (20f7a72ed)\n' }));
+        assert.equal(longer.version, '20f7a72');
+        const other = ikLlamaCppRunner.detect(fakeSpawn({ status: 0, stdout: '', stderr: 'version: 5000 (abcdef1)\n' }));
+        assert.equal(other.installed, true);
+        assert.match(other.reason, /abcdef1 differs from pinned 20f7a72/);
+        const upstream = ikLlamaCppRunner.detect(fakeSpawn({ status: 0, stdout: '', stderr: 'version: 0.5.0 (build 11159, commit 6b790a9)\n' }));
+        assert.equal(upstream.installed, false);
+    });
+
+    it('its log report finds the device, the offload and the CUDA buffers', () => {
+        const lines = [
+            'ggml_cuda_init: found 1 CUDA devices:',
+            '  Device 0: NVIDIA GeForce RTX 3060 Laptop GPU, compute capability 8.6, VMM: yes, VRAM: 6143 MiB',
+            'llm_load_tensors: offloaded 25/25 layers to GPU',
+            'llm_load_tensors:      CUDA0 buffer size =  4073.34 MiB',
+            'llm_load_tensors:        CPU buffer size =  7100.00 MiB',
+            'llama_kv_cache_init:      CUDA0 KV buffer size =   384.00 MiB',
+            'llama_init_from_model:      CUDA0 compute buffer size =   175.00 MiB',
+        ].map((line, index) => ({ seq: index + 1, line }));
+        assert.deepEqual(ikLlamaCppRunner.parseReport(lines), {
+            modelMiB: 4073.34, kvMiB: 384, computeMiB: 175, offloaded: { layers: 25, of: 25 },
+            device: 'CUDA0 (NVIDIA GeForce RTX 3060 Laptop GPU)', totalMiB: 4632,
+        });
+        assert.equal(ikLlamaCppRunner.parseReport, parseRunnerReport);
+    });
+});
+
 describe('Ollama runner', () => {
     const dataDir = '/data/local-llm';
     const launch = (params, port = 11434) => ollamaRunner.buildLaunch({ params, port, dataDir, model: MODEL });
@@ -331,7 +416,7 @@ describe('unsupported runners', () => {
 
 describe('runner registry', () => {
     it('resolves known runners and rejects others', () => {
-        assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ollama', 'vllm']);
+        assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm']);
         assert.equal(getRunner('llama.cpp'), llamaCppRunner);
         assert.equal(getRunner('ollama'), ollamaRunner);
         for (const id of ['toString', 'constructor', 'llamacpp', undefined, null]) {
@@ -341,7 +426,7 @@ describe('runner registry', () => {
 
     it('summarizes runners with JSON-serializable, frozen schemas', () => {
         const summaries = runnerSummaries();
-        assert.deepEqual(summaries.map((s) => s.id), ['llama.cpp', 'ollama', 'vllm']);
+        assert.deepEqual(summaries.map((s) => s.id), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm']);
         for (const summary of summaries) {
             assert.deepEqual(Object.keys(summary).sort(),
                 ['basicParams', 'displayName', 'id', 'moeParams', 'paramSchema', 'pinnedVersion', 'supported', 'weightFormat']);
@@ -383,7 +468,7 @@ it('version probes get a minimal environment without tokens or agent secrets', (
             else process.env[key] = value;
         }
     });
-    for (const runner of [llamaCppRunner, ollamaRunner]) {
+    for (const runner of [llamaCppRunner, ikLlamaCppRunner, ollamaRunner]) {
         let seen = null;
         runner.detect({ spawnSync: (_file, _args, options) => { seen = options.env; return { status: 0, stdout: '', stderr: '' }; } });
         assert.deepEqual(Object.keys(seen).sort(), ['HOME', 'LANG', 'LD_LIBRARY_PATH', 'PATH'], runner.id);

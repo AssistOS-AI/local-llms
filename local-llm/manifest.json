@@ -1,7 +1,7 @@
 {
   "name": "local-llm",
-  "about": "Run open-weight LLMs on this workspace's GPU (llama.cpp, Ollama); weights download only on Run",
-  "description": "Runs open-source LLMs on this machine's GPU with llama.cpp or Ollama. Admins pick a model and a runner in Settings; weights download only when Run is pressed. Its manifest declares GPU access (containerSecurity.gpu); on the host, ploinky gpu revoke --agent local-llms/local-llm takes it away and ploinky gpu grant --agent local-llms/local-llm restores it.",
+  "about": "Run open-weight LLMs on this workspace's GPU (llama.cpp, ik_llama.cpp, Ollama); weights download only on Run",
+  "description": "Runs open-source LLMs on this machine's GPU with llama.cpp, ik_llama.cpp or Ollama. Admins pick a model and a runner in Settings; weights download only when Run is pressed. Its manifest declares GPU access (containerSecurity.gpu); on the host, ploinky gpu revoke --agent local-llms/local-llm takes it away and ploinky gpu grant --agent local-llms/local-llm restores it.",
   "container": "docker.io/assistos/local-llm@sha256:b8a5ba072252645e7d26b3ae46cb2951efa62c4ff8838c82f276c090d9a8c176",
   "agent": "exec node /code/src/main.mjs",
   "readiness": {

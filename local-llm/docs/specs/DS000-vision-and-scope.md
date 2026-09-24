@@ -33,6 +33,7 @@ The repository's other twelve agents share the CPU image `assistos/local-llms`, 
 | Runner | State in this release |
 | --- | --- |
 | llama.cpp `b11125` (CUDA 12.8 build) | Supported. GGUF from Hugging Face, pinned by commit, size and sha256. |
+| ik_llama.cpp, commit `20f7a72` (built into the image with CUDA 12.8 for sm_86 and sm_89) | Supported. A llama.cpp fork with faster hybrid CPU/GPU inference for mixture-of-experts models. It reads the same GGUF files as llama.cpp, so the two share one download. |
 | Ollama `0.34.3` | Supported. Library tags pulled by the Ollama daemon, verified by manifest digest when the catalog pins one. |
 | vLLM | Listed, not supported yet: it reads Hugging Face snapshots, which the catalog does not offer yet (runners plan, Phases R3 and R5). |
 

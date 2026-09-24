@@ -36,7 +36,7 @@ The manifest declares no other `containerSecurity` field, no `llmRuntime` block 
 main.mjs (controller, PID 1 under AgentEntrypoint.sh)
   ├─ control socket /dev/shm/local-llm/controller.sock (0700 directory, 0600 socket)
   ├─ AgentServer.mjs (MCP on 7000; spawns one short-lived process per tool call)
-  └─ runner: llama-server or ollama serve, bound to 127.0.0.1 only, in its own process group
+  └─ runner: llama.cpp's or ik_llama.cpp's llama-server, or ollama serve, bound to 127.0.0.1 only, in its own process group
 ```
 
 `main.mjs` owns all state. Tool processes and the chat responder are stateless clients of the control socket (`src/controlSocket.mjs`, one JSON request and one JSON reply per connection).

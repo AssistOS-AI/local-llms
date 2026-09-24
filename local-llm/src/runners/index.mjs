@@ -1,9 +1,10 @@
 import { codedError } from './params.mjs';
+import { ikLlamaCppRunner } from './ikLlamaCpp.mjs';
 import { llamaCppRunner } from './llamaCpp.mjs';
 import { ollamaRunner } from './ollama.mjs';
 import { vllmRunner } from './vllm.mjs';
 
-// Every runner is an adapter (see llamaCpp.mjs for the full shape): identity,
+// Every runner is an adapter (llamaServer.mjs shows the full shape): identity,
 // the weight format it reads, its loopback port and per-start key, its
 // parameter schema and form metadata, detection, the start-up pipeline, the
 // chat model name, its admission policy and its log-report parser. The
@@ -11,6 +12,7 @@ import { vllmRunner } from './vllm.mjs';
 // LM Studio is deliberately absent (runners plan, R5 = b; DS000).
 export const RUNNERS = Object.freeze({
     'llama.cpp': llamaCppRunner,
+    'ik_llama.cpp': ikLlamaCppRunner,
     ollama: ollamaRunner,
     vllm: vllmRunner
 });

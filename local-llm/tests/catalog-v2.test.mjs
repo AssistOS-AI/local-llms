@@ -35,7 +35,7 @@ test('the seed catalog is schema v2 and keys gpt-oss-20b sources by weight forma
     assert.equal(gpt.sources.gguf.sha256, '27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901');
     assert.equal(gpt.sources.ollama.tag, 'gpt-oss:20b');
     // Parameters and measurements stay per runner.
-    assert.deepEqual(Object.keys(gpt.recommended), ['llama.cpp', 'ollama']);
+    assert.deepEqual(Object.keys(gpt.recommended), ['llama.cpp', 'ik_llama.cpp', 'ollama']);
     const schema = JSON.parse(fs.readFileSync(new URL('../catalog/schema.json', import.meta.url), 'utf8'));
     assert.equal(schema.$id, 'local-llm.catalog/v2');
     assert.deepEqual(Object.keys(schema.$defs.model.properties.sources.properties), ['gguf', 'ollama']);

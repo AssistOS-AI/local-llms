@@ -1,4 +1,4 @@
-// One supervised runner process (llama-server or ollama serve): spawned from
+// One supervised runner process (a llama-server or ollama serve): spawned from
 // an argv array (never a shell), its output kept in a bounded, sequenced log
 // with secrets redacted, the CUDA buffers it reports parsed out, and a stop
 // that escalates from SIGTERM to SIGKILL.
@@ -54,7 +54,8 @@ export function createLogBuffer({ limit = 2000, file = null, fsApi = fs } = {}) 
 }
 
 const BUFFER_PATTERNS = Object.freeze([
-    ['modelMiB', /CUDA0 model buffer size =\s+([\d.]+) MiB/],
+    // llama.cpp says "CUDA0 model buffer size", ik_llama.cpp "CUDA0 buffer size".
+    ['modelMiB', /CUDA0 (?:model )?buffer size =\s+([\d.]+) MiB/],
     ['kvMiB', /CUDA0 KV buffer size =\s+([\d.]+) MiB/],
     ['computeMiB', /CUDA0 compute buffer size =\s+([\d.]+) MiB/],
 ]);
@@ -78,6 +79,9 @@ export function parseRunnerReport(lines) {
         if (offloaded) report.offloaded = { layers: Number(offloaded[1]), of: Number(offloaded[2]) };
         const device = /using device (CUDA\d+) \(([^)]+)\)/.exec(line);
         if (device) report.device = `${device[1]} (${device[2]})`;
+        // ik_llama.cpp names the GPU in its CUDA init lines instead.
+        const listed = /^\s*Device (\d+): ([^,]+), compute capability/.exec(line);
+        if (listed) report.device = `CUDA${listed[1]} (${listed[2]})`;
     }
     const known = ['modelMiB', 'kvMiB', 'computeMiB'].map((key) => report[key]).filter((value) => value !== null);
     report.totalMiB = known.length ? Math.round(known.reduce((total, value) => total + value, 0)) : null;

@@ -47,6 +47,16 @@
           "flashAttn": "auto",
           "chatTemplateKwargs": { "reasoning_effort": "low" }
         },
+        "ik_llama.cpp": {
+          "ctxSize": 16384,
+          "nGpuLayers": 99,
+          "nCpuMoe": 17,
+          "parallel": 1,
+          "batchSize": 256,
+          "ubatchSize": 256,
+          "flashAttn": "auto",
+          "chatTemplateKwargs": { "reasoning_effort": "low" }
+        },
         "ollama": {
           "numCtx": 4096
         }

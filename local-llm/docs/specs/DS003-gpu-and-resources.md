@@ -43,16 +43,16 @@ The declaration asks for that CDI device and nothing else. Ploinky attaches it o
 
 Estimates for llama.cpp come from the model's measured memory profile when the catalog has one (non-expert bytes, expert bytes per layer, KV bytes per token, fixed KV bytes), and from the file size otherwise. The gpt-oss-20b profile was measured on an RTX 3060 Laptop GPU (6 GB); for the default parameters the estimate is 4,851 MiB of GPU memory against 4,817 MiB measured. A 256 MiB GPU margin and a 1 GiB RAM margin are kept free. Admission runs when the overview is built, before a download starts, and again before the runner starts.
 
-`admit()` makes the checks every runner shares (the runner is supported, the model has a source in the runner's format, a GPU is available) and then calls the runner adapter's own policy: `admitLlamaServer` for llama.cpp, `admitOllama` for Ollama. The vLLM placeholder is `incompatible` with the reason its adapter gives. LM Studio is not a runner (DS000).
+`admit()` makes the checks every runner shares (the runner is supported, the model has a source in the runner's format, a GPU is available) and then calls the runner adapter's own policy: `admitLlamaServer` for llama.cpp and ik_llama.cpp (the same memory layout for the same GGUF file), `admitOllama` for Ollama. The vLLM placeholder is `incompatible` with the reason its adapter gives. LM Studio is not a runner (DS000).
 
 ### Runner isolation
 
 | Rule | How |
 | --- | --- |
-| Loopback only | llama.cpp gets `--host 127.0.0.1`; Ollama gets `OLLAMA_HOST=127.0.0.1:<port>` |
-| Fixed ports | Each adapter declares its port; `defaultPorts()` refuses two runners on one port. llama.cpp 18080, Ollama 18434, both inside the agent's network namespace |
+| Loopback only | llama.cpp and ik_llama.cpp get `--host 127.0.0.1`; Ollama gets `OLLAMA_HOST=127.0.0.1:<port>` |
+| Fixed ports | Each adapter declares its port; `defaultPorts()` refuses two runners on one port. llama.cpp 18080, ik_llama.cpp 18081, Ollama 18434, all inside the agent's network namespace |
 | Not reachable through the Router | `routerAccess.agentPorts: false` closes the agent-port relay for this agent |
-| Per-start credentials | llama.cpp gets a fresh random `--api-key` on every start; the chat responder reads it from the controller |
+| Per-start credentials | llama.cpp and ik_llama.cpp get a fresh random `--api-key` on every start; the chat responder reads it from the controller |
 | Minimal environment | Runners get `PATH`, `HOME=/data/home`, `LANG` and their own variables only; no agent secrets |
 | Reaped on stop and drain | Each runner leads its own process group. Stop sends SIGTERM to the group, then SIGKILL after the grace period; when the runner exits, anything left in its group is killed, so helper processes a runner starts never outlive it |
 
