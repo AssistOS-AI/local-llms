@@ -16,12 +16,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
+import { isSnapshotFile } from './catalog.mjs';
+
 const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}\/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
 const FILE_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/;
 const REVISION_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/;
 const COMMIT_RE = /^[a-f0-9]{40}$/;
 const COMMIT_ANY_CASE_RE = /^[A-Fa-f0-9]{40}$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
+const GIT_OID_RE = /^[a-f0-9]{40}$/;
 const MAX_FILE_SEGMENTS = 4;
 const MAX_TREE_PAGES = 50;
 const SPACE_MARGIN = 1.05;
@@ -29,6 +32,9 @@ const RATE_WINDOW_MS = 5000;
 const IDENTITY_KEYS = Object.freeze(['repo', 'file', 'commit', 'size', 'sha256']);
 // A file named by a fixed URL (a runner's lock entry) is identified by that URL.
 const FILE_IDENTITY_KEYS = Object.freeze(['url', 'size', 'sha256']);
+// A file of a Hugging Face snapshot: an LFS file by sha256, a small file kept
+// in git by its git blob oid.
+const SNAPSHOT_IDENTITY_KEYS = Object.freeze(['repo', 'commit', 'file', 'size', 'sha256', 'gitOid']);
 
 export class DownloadError extends Error {
     constructor(code, message = code, { retryable = false, details } = {}) {
@@ -368,8 +374,21 @@ async function assertFreeSpace({ fsApi, statfs, dir, remaining }) {
 }
 
 // Re-hashing a 17 GB partial takes a while, so a Stop is honoured per chunk.
-async function hashExisting(fsApi, partial, have, signal) {
-    const hash = crypto.createHash('sha256');
+// The running digest a download is verified with: sha256, or the git blob
+// oid (sha1 over "blob <size>\0" and the bytes) for a snapshot file kept in git.
+function createDigest(artifact) {
+    if (artifact.sha256 === undefined && GIT_OID_RE.test(String(artifact.gitOid || ''))) {
+        return crypto.createHash('sha1').update(`blob ${artifact.size}\0`);
+    }
+    return crypto.createHash('sha256');
+}
+
+function expectedDigest(artifact) {
+    return artifact.sha256 ?? artifact.gitOid;
+}
+
+async function hashExisting(fsApi, partial, have, signal, artifact) {
+    const hash = createDigest(artifact);
     if (have === 0) {
         return hash;
     }
@@ -450,7 +469,7 @@ async function resetPartial(ctx) {
         throw new LocalWriteError(err);
     }
     ctx.have = 0;
-    ctx.hash = crypto.createHash('sha256');
+    ctx.hash = createDigest(ctx.artifact);
 }
 
 async function appendChunk(ctx, chunk) {
@@ -601,10 +620,10 @@ async function transfer(ctx) {
 
 async function finalize(ctx, paths) {
     const digest = ctx.hash.digest('hex');
-    if (digest !== ctx.artifact.sha256) {
+    if (digest !== expectedDigest(ctx.artifact)) {
         await removePartial(ctx.fsApi, paths);
-        throw new DownloadError('SHA256_MISMATCH', 'Downloaded bytes do not match the pinned sha256', {
-            details: { expected: ctx.artifact.sha256, actual: digest },
+        throw new DownloadError('SHA256_MISMATCH', `Downloaded bytes do not match the pinned ${ctx.artifact.sha256 === undefined ? 'git oid' : 'sha256'}`, {
+            details: { expected: expectedDigest(ctx.artifact), actual: digest },
         });
     }
     // Meta goes first: a crash before the rename leaves a verifiable partial,
@@ -682,6 +701,7 @@ async function downloadInto({
     const have = await reconcilePartial(fsApi, paths, artifact, identityKeys);
     await assertFreeSpace({ fsApi, statfs, dir: paths.dir, remaining: artifact.size - have });
     await fsApi.promises.mkdir(path.dirname(paths.file), { recursive: true });
+    await fsApi.promises.mkdir(path.dirname(paths.partial), { recursive: true });
     await writeJsonAtomic(fsApi, paths.identity, identityOf(artifact, identityKeys));
     const ctx = {
         artifact,
@@ -697,7 +717,7 @@ async function downloadInto({
         sleep,
         have,
         transferred: 0,
-        hash: await hashExisting(fsApi, paths.partial, have, signal),
+        hash: await hashExisting(fsApi, paths.partial, have, signal, artifact),
         handle: await fsApi.promises.open(paths.partial, 'a'),
         progress: createProgress({ total: artifact.size, onProgress, intervalMs: progressIntervalMs }),
     };
@@ -785,4 +805,116 @@ export async function removeArtifact({ root, artifact }) {
     }
     await removeEmptyParents(path.resolve(root), path.dirname(paths.file));
     return freed;
+}
+
+/**
+ * The directories of one Hugging Face snapshot: `dir` holds only the verified
+ * files a runner loads; `stateDir` holds the partial files and identity
+ * records, so a runner never sees them.
+ */
+export function snapshotPaths({ root, repo, commit }) {
+    if (typeof root !== 'string' || !root) {
+        throw invalidSource('Missing weights root');
+    }
+    assertRepo(repo);
+    if (typeof commit !== 'string' || !COMMIT_RE.test(commit)) {
+        throw invalidSource('Invalid snapshot commit');
+    }
+    const base = path.resolve(root);
+    const dir = path.join(base, ...repo.split('/'), commit);
+    const stateDir = path.join(base, '.state', ...repo.split('/'), commit);
+    assertInside(base, dir);
+    assertInside(base, stateDir);
+    return { dir, stateDir };
+}
+
+function assertSnapshotArtifact(artifact) {
+    if (!artifact || typeof artifact !== 'object') {
+        throw invalidSource('Missing artifact');
+    }
+    if (!isSnapshotFile(artifact.file)) {
+        throw invalidSource('Invalid snapshot file name');
+    }
+    if (!Number.isSafeInteger(artifact.size) || artifact.size <= 0) {
+        throw invalidSource('Invalid artifact size');
+    }
+    const hasSha = artifact.sha256 !== undefined;
+    if (hasSha ? !SHA256_RE.test(String(artifact.sha256)) : !GIT_OID_RE.test(String(artifact.gitOid || ''))) {
+        throw invalidSource('A snapshot file needs its sha256 or git oid');
+    }
+}
+
+function snapshotFilePaths({ root, artifact }) {
+    assertSnapshotArtifact(artifact);
+    const { dir, stateDir } = snapshotPaths({ root, repo: artifact.repo, commit: artifact.commit });
+    const file = path.join(dir, artifact.file);
+    const partial = path.join(stateDir, `${artifact.file}.partial`);
+    assertInside(dir, file);
+    assertInside(stateDir, partial);
+    return { dir, file, partial, identity: `${partial}.json`, meta: path.join(stateDir, `${artifact.file}.json`) };
+}
+
+/** One file of a pinned snapshot, resumed, verified and moved into the snapshot directory. */
+export async function downloadSnapshotFile({
+    artifact,
+    root,
+    token = '',
+    fetchImpl = globalThis.fetch,
+    baseUrl = 'https://huggingface.co',
+    ...options
+}) {
+    const paths = snapshotFilePaths({ root, artifact });
+    return downloadInto({ paths, artifact, identityKeys: SNAPSHOT_IDENTITY_KEYS, url: null, token, fetchImpl, baseUrl, ...options });
+}
+
+export async function inspectSnapshotFile({ root, artifact }) {
+    return inspectWith(fs, snapshotFilePaths({ root, artifact }), artifact, SNAPSHOT_IDENTITY_KEYS);
+}
+
+/**
+ * Pin a snapshot: the revision's commit, and every top-level model file at
+ * that commit with its size and digest (LFS sha256, or the git blob oid for a
+ * file kept in git). Reads metadata only.
+ */
+export async function resolveHuggingFaceSnapshot({
+    repo,
+    revision = 'main',
+    token = '',
+    fetchImpl = globalThis.fetch,
+    baseUrl = 'https://huggingface.co',
+    timeoutMs = METADATA_TIMEOUT_MS,
+}) {
+    assertRepo(repo);
+    assertRevision(revision);
+    const commit = await resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs });
+    let url = `${baseUrl}/api/models/${encodeSegments(repo)}/tree/${commit}`;
+    const files = [];
+    for (let page = 0; url && page < MAX_TREE_PAGES; page += 1) {
+        const { json, link } = await fetchJson(url, { token, fetchImpl, timeoutMs });
+        if (!Array.isArray(json)) {
+            throw new DownloadError('RESOLVE_FAILED', 'Hugging Face tree response is not a list');
+        }
+        for (const entry of json) {
+            if (entry?.type !== 'file' || !isSnapshotFile(entry.path)) continue;
+            if (entry.lfs !== undefined && entry.lfs !== null) {
+                // Never fall back to the pointer's git oid for an LFS file.
+                const lfs = lfsIdentity(entry);
+                if (!lfs) throw new DownloadError('RESOLVE_FAILED', `Inconsistent LFS metadata for ${entry.path}`, { details: { repo, commit } });
+                files.push({ path: entry.path, size: lfs.size, sha256: lfs.sha256 });
+                continue;
+            }
+            const oid = typeof entry.oid === 'string' ? entry.oid.toLowerCase() : '';
+            if (GIT_OID_RE.test(oid) && Number.isSafeInteger(entry.size) && entry.size > 0) files.push({ path: entry.path, size: entry.size, gitOid: oid });
+        }
+        url = nextTreePage(link, baseUrl);
+    }
+    if (url) {
+        // A listing cut short would pin an incomplete snapshot.
+        throw new DownloadError('RESOLVE_FAILED', 'The Hugging Face file list is too long', { details: { repo, commit } });
+    }
+    if (!files.length) {
+        throw new DownloadError('NOT_FOUND', 'No model files at the pinned commit', { details: { repo, commit } });
+    }
+    files.sort((left, right) => left.path.localeCompare(right.path));
+    return Object.freeze({ repo, revision, commit, files });
 }

@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { loadSeedCatalog, mergeCatalog, migrateModelEntry, validateModel } from '../src/controller/catalog.mjs';
+import { WEIGHT_FORMATS, loadSeedCatalog, mergeCatalog, migrateModelEntry, validateModel } from '../src/controller/catalog.mjs';
 import { STATE_VERSION, createStateStore } from '../src/controller/stateStore.mjs';
 
 const GGUF = Object.freeze({
@@ -42,7 +42,8 @@ test('the seed catalog is schema v2 and keys gpt-oss-20b sources by weight forma
     assert.match(gpt.validated['llama.cpp'], /b11159, 16k context, 12 threads: 4,798 MiB VRAM, 38\.4 tok\/s generation/);
     const schema = JSON.parse(fs.readFileSync(new URL('../catalog/schema.json', import.meta.url), 'utf8'));
     assert.equal(schema.$id, 'local-llm.catalog/v2');
-    assert.deepEqual(Object.keys(schema.$defs.model.properties.sources.properties), ['gguf', 'ollama']);
+    assert.deepEqual(Object.keys(schema.$defs.model.properties.sources.properties), ['gguf', 'ollama', 'hf', 'exl3']);
+    assert.deepEqual(Object.keys(schema.$defs.model.properties.sources.properties), Object.keys(WEIGHT_FORMATS));
 });
 
 test('a v2 entry is validated per format; runner-keyed sources are refused', () => {

@@ -1,7 +1,9 @@
 // Where each kind of weights lives and how it is pinned, inspected, fetched
 // and deleted. A source's `type` selects its store: `huggingface` is one GGUF
 // file that the controller downloads before the runner starts; `ollama` is a
-// library tag that the Ollama runner pulls itself once it is running.
+// library tag that the Ollama runner pulls itself once it is running;
+// `hf-snapshot` is a directory of files (safetensors for vLLM, EXL3 for
+// TabbyAPI) that the controller downloads file by file.
 //
 // Every store has: `type`; `fetchedBy` ('controller' or 'runner');
 // `key(source)`, the artifact identity used for "in use" checks, so runners
@@ -9,10 +11,17 @@
 // `remove(source)`; `pin(source)` and `carryPin(next, previous)` for Add and
 // Update model; and `fetch(...)` when the controller fetches.
 
+import fs from 'node:fs';
 import path from 'node:path';
 
 import { LocalLlmError } from '../errors.mjs';
-import { artifactPaths } from './downloader.mjs';
+import {
+    artifactPaths,
+    downloadSnapshotFile,
+    inspectSnapshotFile,
+    resolveHuggingFaceSnapshot,
+    snapshotPaths,
+} from './downloader.mjs';
 import { deleteOllamaModel, deleteOllamaPartials, partialPullBytes, readOllamaManifest } from './ollamaStore.mjs';
 
 export function createWeightStores({
@@ -27,9 +36,13 @@ export function createWeightStores({
     save,
     // The artifact of the job that is running now, or null.
     activeArtifact,
+    downloadSnapshot = downloadSnapshotFile,
+    inspectSnapshot = inspectSnapshotFile,
+    resolveSnapshot = resolveHuggingFaceSnapshot,
 }) {
     const ggufRoot = path.join(dataDir, 'models', 'gguf');
     const ollamaModels = path.join(dataDir, 'models', 'ollama');
+    const hfRoot = path.join(dataDir, 'models', 'hf');
 
     const huggingface = Object.freeze({
         type: 'huggingface',
@@ -153,5 +166,94 @@ export function createWeightStores({
         },
     });
 
-    return Object.freeze({ huggingface, ollama });
+    const snapshotFile = (source, file) => ({
+        repo: source.repo, commit: source.commit, file: file.path, size: file.size,
+        ...(file.sha256 !== undefined ? { sha256: file.sha256 } : { gitOid: file.gitOid }),
+    });
+
+    async function treeBytes(dir) {
+        let total = 0;
+        let entries = [];
+        try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return 0; }
+        for (const entry of entries) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) total += await treeBytes(full);
+            else if (entry.isFile()) total += (await fs.promises.lstat(full)).size;
+        }
+        return total;
+    }
+
+    const hfSnapshot = Object.freeze({
+        type: 'hf-snapshot',
+        fetchedBy: 'controller',
+        key: (source) => `hf:${source.repo}@${source.commit}`,
+        isPinned: (source) => Boolean(source.commit && source.files?.length),
+        // Complete only when every file has verified; a partial snapshot is never ready.
+        async state(source) {
+            if (!source.commit || !source.files) return { state: 'unpinned', bytes: 0, total: null };
+            let bytes = 0;
+            let complete = true;
+            let partial = false;
+            for (const file of source.files) {
+                const inspected = await inspectSnapshot({ root: hfRoot, artifact: snapshotFile(source, file) });
+                bytes += inspected.bytes;
+                if (inspected.state !== 'complete') complete = false;
+                if (inspected.state !== 'absent') partial = true;
+            }
+            return { state: complete ? 'complete' : (partial ? 'partial' : 'absent'), bytes, total: source.size };
+        },
+        async fetch({ artifact: source, signal, onProgress = () => {} }) {
+            let done = 0;
+            let transferred = 0;
+            for (const file of source.files) {
+                const result = await downloadSnapshot({
+                    root: hfRoot,
+                    artifact: snapshotFile(source, file),
+                    token: env.HF_TOKEN || '',
+                    baseUrl: hfBaseUrl,
+                    signal,
+                    onProgress: (progress) => onProgress({
+                        ...progress,
+                        bytes: done + progress.bytes,
+                        total: source.size,
+                        transferred: transferred + (progress.transferred ?? 0),
+                    }),
+                });
+                done += file.size;
+                transferred += result.bytesTransferred;
+                onProgress({ bytes: done, total: source.size, transferred, rate: 0, etaSeconds: null });
+            }
+            const { dir } = snapshotPaths({ root: hfRoot, repo: source.repo, commit: source.commit });
+            return { path: dir, bytes: source.size, bytesTransferred: transferred };
+        },
+        // Delete weights removes the whole snapshot and its bookkeeping.
+        async remove(source) {
+            if (!source.commit) return 0;
+            const { dir, stateDir } = snapshotPaths({ root: hfRoot, repo: source.repo, commit: source.commit });
+            const freed = await treeBytes(dir) + await treeBytes(stateDir);
+            await fs.promises.rm(dir, { recursive: true, force: true });
+            await fs.promises.rm(stateDir, { recursive: true, force: true });
+            return freed;
+        },
+        // Pinning reads Hugging Face metadata only; no weights are downloaded.
+        async pin(source) {
+            if (source.commit && source.files) return source;
+            const resolved = await resolveSnapshot({
+                repo: source.repo,
+                revision: source.revision || 'main',
+                token: env.HF_TOKEN || '',
+                baseUrl: hfBaseUrl,
+            });
+            const files = resolved.files.map((file) => ({ ...file }));
+            return { ...source, commit: resolved.commit, files, size: files.reduce((sum, file) => sum + file.size, 0) };
+        },
+        // An update keeps the pin while repository and revision are unchanged.
+        carryPin(next, previous) {
+            if (next.commit || previous?.type !== 'hf-snapshot' || !previous.commit) return next;
+            if (next.repo !== previous.repo || next.revision !== previous.revision) return next;
+            return { ...next, commit: previous.commit, files: previous.files, size: previous.size };
+        },
+    });
+
+    return Object.freeze({ huggingface, ollama, 'hf-snapshot': hfSnapshot });
 }

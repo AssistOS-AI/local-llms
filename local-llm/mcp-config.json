@@ -208,7 +208,9 @@
             "type": "string",
             "enum": [
               "gguf",
-              "ollama"
+              "ollama",
+              "hf",
+              "exl3"
             ],
             "description": "The weight format to delete; give this or runnerId."
           }
