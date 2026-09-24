@@ -34,12 +34,14 @@ The manifest declares no other `containerSecurity` field, no `llmRuntime` block 
 
 ```
 main.mjs (controller, PID 1 under AgentEntrypoint.sh)
-  ├─ control socket /dev/shm/local-llm/controller.sock (0700 directory, 0600 socket)
+  ├─ control socket: a Linux abstract socket @local-llm-<random>, new on every start, and a per-start token
   ├─ AgentServer.mjs (MCP on 7000; spawns one short-lived process per tool call)
   └─ runner: llama.cpp's or ik_llama.cpp's llama-server, or ollama serve, bound to 127.0.0.1 only, in its own process group
 ```
 
 `main.mjs` owns all state. Tool processes and the chat responder are stateless clients of the control socket (`src/controlSocket.mjs`, one JSON request and one JSON reply per connection).
+
+The control socket has two locks (runners plan, I5). Other agents in the Box share its `/dev/shm` and its uid 1000, so the socket is not a file there. It is an abstract socket, which exists only in this agent's own network namespace. On each start `main.mjs` also creates a random 32-byte token. It hands the token only to AgentServer, through the environment (`LOCAL_LLM_CONTROL_TOKEN`, next to `LOCAL_LLM_SOCKET`), so only the tools and the chat responder receive it. The controller refuses any request without the token (`unauthorized`) before an operation runs. The token is never written to disk or to a log. Runner processes get a minimal environment without it, and a token already in `main.mjs`'s own environment is dropped, never used. The token still holds when an agent runs with host networking. The two locks keep out other agents. They do not keep out processes inside this container. A runner runs as the same user in the same PID namespace, so it could read AgentServer's `/proc/<pid>/environ`. A runner could already reach the old socket, so this adds no exposure.
 
 ### Tools
 

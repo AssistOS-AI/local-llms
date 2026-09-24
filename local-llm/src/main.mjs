@@ -9,12 +9,18 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 
-import { DEFAULT_SOCKET, startControlServer } from './controlSocket.mjs';
+import { newControlChannel, startControlServer } from './controlSocket.mjs';
 import { createController } from './controller/deployments.mjs';
 import { AGENT_SERVER_KILL_MS, DRAIN_DEADLINE_MS } from './drainBudget.mjs';
 
 
-const socketPath = process.env.LOCAL_LLM_SOCKET || DEFAULT_SOCKET;
+// The control channel is new on every start: an abstract socket name (tests
+// may choose it) and a token that only AgentServer receives, through its
+// environment. A token in this process's own environment is never used and
+// is dropped, so nothing this process spawns can inherit one.
+const channel = newControlChannel();
+const socketPath = process.env.LOCAL_LLM_SOCKET || channel.socketPath;
+delete process.env.LOCAL_LLM_CONTROL_TOKEN;
 
 let controller;
 let control;
@@ -74,6 +80,7 @@ const startup = (async () => {
     controller = createController({ dataDir: process.env.LOCAL_LLM_DATA_DIR || '/data' });
     control = await startControlServer({
         socketPath,
+        token: channel.token,
         handlers: {
             overview: (args) => controller.overview(args),
             status: (args) => controller.status(args),
@@ -93,7 +100,7 @@ const startup = (async () => {
     agentServer = spawn(process.execPath, [
         join(process.env.PLOINKY_AGENT_LIB_DIR || '/Agent', 'server', 'AgentServer.mjs'),
     ], {
-        env: { ...process.env, LOCAL_LLM_SOCKET: socketPath },
+        env: { ...process.env, LOCAL_LLM_SOCKET: socketPath, LOCAL_LLM_CONTROL_TOKEN: channel.token },
         stdio: 'inherit',
     });
     agentServerExit = new Promise((resolve) => {

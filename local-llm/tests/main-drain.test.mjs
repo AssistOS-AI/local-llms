@@ -25,9 +25,14 @@ function fixture(t, { crashAgentServer = false } = {}) {
     const agentDir = path.join(root, 'Agent', 'server');
     fs.mkdirSync(agentDir, { recursive: true });
     // A stand-in AgentServer: alive until SIGTERM, then exits 0; or crashes.
+    // For the test only, it records the control channel main handed it.
+    const agentEnv = path.join(root, 'agent-env.json');
     fs.writeFileSync(path.join(agentDir, 'AgentServer.mjs'), crashAgentServer
         ? 'setTimeout(() => process.exit(3), 300);\n'
-        : "process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);\n");
+        : `import fs from 'node:fs';
+fs.writeFileSync(${JSON.stringify(agentEnv)}, JSON.stringify({
+    socketPath: process.env.LOCAL_LLM_SOCKET, token: process.env.LOCAL_LLM_CONTROL_TOKEN }));
+process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);\n`);
     const smi = path.join(root, 'nvidia-smi');
     fs.writeFileSync(smi, '#!/bin/sh\ncase "$1" in --query-gpu=*) echo "Test GPU, 6144, 13, 6000, 595.91.07";; esac\n', { mode: 0o755 });
     const catalog = path.join(root, 'catalog.json');
@@ -41,7 +46,8 @@ function fixture(t, { crashAgentServer = false } = {}) {
             memory: { layers: 4, nonExpertBytes: PAYLOAD.length, expertBytesPerLayer: 0, kvBytesPerToken: 1024 },
         }],
     }));
-    return { root, dataDir: path.join(root, 'data'), agentLib: path.join(root, 'Agent'), smi, catalog, socket: path.join(root, 'run', 'c.sock') };
+    const socket = `@local-llm-test-${crypto.randomBytes(8).toString('hex')}`;
+    return { root, dataDir: path.join(root, 'data'), agentLib: path.join(root, 'Agent'), smi, catalog, socket, agentEnv };
 }
 
 // Serves the artifact slowly (64 KiB every 40 ms) so a download is in flight.
@@ -94,12 +100,39 @@ async function until(predicate, timeoutMs = 10_000) {
     assert.fail('condition not reached');
 }
 
+// The socket and token main handed its AgentServer, once the controller is up.
+async function channel(f) {
+    await until(() => fs.existsSync(f.agentEnv));
+    return JSON.parse(fs.readFileSync(f.agentEnv, 'utf8'));
+}
+
+test('main hands a fresh per-start token and its abstract socket only to AgentServer, and refuses calls without it', async (t) => {
+    const f = fixture(t);
+    const preset = 'p'.repeat(43);
+    const main = startMain(f, { LOCAL_LLM_CONTROL_TOKEN: preset });
+    const opts = await channel(f);
+    assert.equal(opts.socketPath, f.socket);
+    assert.match(opts.token, /^[A-Za-z0-9_-]{43}$/);
+    // A token in main's own environment is ignored, never reused.
+    assert.notEqual(opts.token, preset);
+    const listed = fs.readFileSync('/proc/net/unix', 'utf8').split('\n').map((line) => line.trim().split(/\s+/)[7]);
+    assert.ok(listed.includes(f.socket));
+    assert.equal((await callController('status', {}, opts)).phase, 'idle');
+    for (const token of [undefined, preset]) {
+        await assert.rejects(() => callController('status', {}, { socketPath: opts.socketPath, token }), { code: 'unauthorized' });
+    }
+    main.child.kill('SIGTERM');
+    const result = await main.exited;
+    assert.equal(result.code, 0, result.output);
+    assert.ok(!result.output.includes(opts.token), 'the token never reaches the log');
+    assert.match(result.output, new RegExp(`controller ready on ${f.socket}`));
+});
+
 test('SIGTERM during a download drains and exits 0, keeping the partial and its identity', async (t) => {
     const f = fixture(t);
     const base = await slowServer(t);
     const main = startMain(f, { LOCAL_LLM_HF_BASE_URL: base });
-    await until(() => fs.existsSync(f.socket));
-    const opts = { socketPath: f.socket };
+    let opts = await channel(f);
     await callController('run', { requestId: 'drain-000001', modelId: 'tiny', runnerId: 'llama.cpp' }, opts);
     await until(async () => (await callController('status', {}, opts)).deployment.download.bytes > 256 * 1024);
     const started = Date.now();
@@ -116,8 +149,9 @@ test('SIGTERM during a download drains and exits 0, keeping the partial and its 
     assert.match(state.deployment.pausedReason, /restarted during the download/);
 
     // After the restart nothing resumes by itself; the next Run resumes with Range.
+    fs.rmSync(f.agentEnv);
     const again = startMain(f, { LOCAL_LLM_HF_BASE_URL: base });
-    await until(() => fs.existsSync(f.socket));
+    opts = await channel(f);
     assert.equal((await callController('status', {}, opts)).phase, 'paused');
     await new Promise((resolve) => setTimeout(resolve, 300));
     assert.equal(fs.statSync(path.join(dir, 'tiny.gguf.partial')).size, partial.size);

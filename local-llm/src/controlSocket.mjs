@@ -1,35 +1,56 @@
 // Container-local control channel between the controller and the processes
 // AgentServer spawns (MCP tools, the chat-completions responder): one JSON
-// request per connection on a 0600 Unix socket. Callers are authorized
-// before they get here (Router-signed invocation, admin check in the tool).
+// request per connection. Callers are authorized before they get here
+// (Router-signed invocation, admin check in the tool); the channel itself
+// only makes sure a request comes from one of the controller's own children.
+//
+// Two locks (runners plan, I5 / Phase S1):
+//   - a Linux abstract socket, named per start. It has no file, so it is not
+//     in the Box's shared /dev/shm, and it exists only in this agent's
+//     network namespace, which other agents do not share;
+//   - a per-start token that main.mjs hands only to AgentServer, through its
+//     environment, and so to the tools and the chat responder. It is never
+//     written to disk or to a log, and runner processes never receive it. It
+//     still holds for an agent run with host networking.
+// In the environment an abstract name is written with a leading '@' (as ss
+// prints it), because an environment value cannot hold the leading NUL.
 
-import fs from 'node:fs';
+import crypto from 'node:crypto';
 import net from 'node:net';
-import path from 'node:path';
 
 import { LocalLlmError, serializeError } from './errors.mjs';
 
-// /dev/shm, not /tmp: in nested rootless Podman the container's /tmp is
-// fuse-overlayfs, which records a new socket node as root-owned 0755, so the
-// controller's own user could not connect to it. /dev/shm is a private tmpfs.
-export const DEFAULT_SOCKET = '/dev/shm/local-llm/controller.sock';
 const MAX_REQUEST_BYTES = 256 * 1024;
+const ABSTRACT_NAME_RE = /^@[A-Za-z0-9._-]{1,100}$/;
+const MIN_TOKEN_LENGTH = 32;
 
-// The socket must live in a real directory owned by this user with mode 0700,
-// and the socket itself must come out owned by this user with mode 0600.
-function preparePrivateDirectory(directory) {
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    fs.chmodSync(directory, 0o700);
-    const stats = fs.lstatSync(directory);
-    const ownerMatches = typeof process.getuid !== 'function' || stats.uid === process.getuid();
-    if (!stats.isDirectory() || !ownerMatches || (stats.mode & 0o077) !== 0) {
-        throw new Error(`Refusing control socket directory ${directory}: it must be a 0700 directory owned by this user.`);
-    }
+/** A fresh abstract socket name and token for one controller start. */
+export function newControlChannel() {
+    return {
+        socketPath: `@local-llm-${crypto.randomBytes(8).toString('hex')}`,
+        token: crypto.randomBytes(32).toString('base64url'),
+    };
 }
 
-export async function startControlServer({ socketPath = DEFAULT_SOCKET, handlers }) {
-    preparePrivateDirectory(path.dirname(socketPath));
-    fs.rmSync(socketPath, { force: true });
+function abstractAddress(socketPath) {
+    if (typeof socketPath !== 'string' || !ABSTRACT_NAME_RE.test(socketPath)) {
+        throw new Error('The control channel must be a Linux abstract socket named "@<name>", not a file path.');
+    }
+    return `\0${socketPath.slice(1)}`;
+}
+
+function digest(value) {
+    return crypto.createHash('sha256').update(String(value)).digest();
+}
+
+export async function startControlServer({ socketPath, token, handlers }) {
+    const address = abstractAddress(socketPath);
+    if (typeof token !== 'string' || token.length < MIN_TOKEN_LENGTH) {
+        throw new Error(`The control channel needs a per-start token of at least ${MIN_TOKEN_LENGTH} characters.`);
+    }
+    const expected = digest(token);
+    // Compared as fixed-length digests, so neither the length nor a prefix leaks through timing.
+    const authorized = (value) => typeof value === 'string' && crypto.timingSafeEqual(digest(value), expected);
     const connections = new Set();
     const server = net.createServer((socket) => {
         connections.add(socket);
@@ -53,10 +74,13 @@ export async function startControlServer({ socketPath = DEFAULT_SOCKET, handlers
                 socket.end(`${JSON.stringify({ ok: false, error: { code: 'bad_request', message: 'Invalid JSON.' } })}\n`);
                 return;
             }
-            const handler = Object.hasOwn(handlers, request?.op) ? handlers[request.op] : null;
             let reply;
             try {
-                if (!handler) throw new LocalLlmError('unknown_op', `Unknown operation ${String(request?.op)}.`);
+                if (!authorized(request?.token)) {
+                    throw new LocalLlmError('unauthorized', 'The request did not carry this controller start\'s token.');
+                }
+                const handler = Object.hasOwn(handlers, request.op) ? handlers[request.op] : null;
+                if (!handler) throw new LocalLlmError('unknown_op', `Unknown operation ${String(request.op)}.`);
                 reply = { ok: true, result: await handler(request.args || {}) };
             } catch (error) {
                 reply = { ok: false, error: serializeError(error) };
@@ -65,24 +89,10 @@ export async function startControlServer({ socketPath = DEFAULT_SOCKET, handlers
         });
         socket.on('error', () => {});
     });
-    const previousUmask = process.umask(0o177);
-    try {
-        await new Promise((resolve, reject) => {
-            server.once('error', reject);
-            server.listen(socketPath, resolve);
-        });
-    } finally {
-        process.umask(previousUmask);
-    }
-    // Fail at startup, not on the first tool call, on a filesystem that does
-    // not keep the owner or mode of a new socket node.
-    const stats = fs.lstatSync(socketPath);
-    const ownerMatches = typeof process.getuid !== 'function' || stats.uid === process.getuid();
-    if (!stats.isSocket() || !ownerMatches || (stats.mode & 0o077) !== 0) {
-        await new Promise((resolve) => server.close(() => resolve()));
-        throw new Error(`Refusing control socket ${socketPath}: it came out as uid ${stats.uid} mode `
-            + `${(stats.mode & 0o777).toString(8)}; use a directory on a filesystem that keeps socket ownership.`);
-    }
+    await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(address, resolve);
+    });
     return Object.freeze({
         socketPath,
         close() {
@@ -95,18 +105,26 @@ export async function startControlServer({ socketPath = DEFAULT_SOCKET, handlers
 }
 
 export function callController(op, args = {}, {
-    socketPath = process.env.LOCAL_LLM_SOCKET || DEFAULT_SOCKET,
+    socketPath = process.env.LOCAL_LLM_SOCKET,
+    token = process.env.LOCAL_LLM_CONTROL_TOKEN,
     timeoutMs = 120_000,
 } = {}) {
     return new Promise((resolve, reject) => {
-        const socket = net.createConnection(socketPath);
+        let address;
+        try {
+            address = abstractAddress(socketPath);
+        } catch {
+            reject(new LocalLlmError('controller_unavailable', 'The local-llm controller is not reachable: no control channel in this process\'s environment.'));
+            return;
+        }
+        const socket = net.createConnection(address);
         let buffer = '';
         const timer = setTimeout(() => {
             socket.destroy();
             reject(new LocalLlmError('controller_timeout', `The local-llm controller did not answer ${op} in time.`));
         }, timeoutMs);
         socket.setEncoding('utf8');
-        socket.on('connect', () => socket.write(`${JSON.stringify({ op, args })}\n`));
+        socket.on('connect', () => socket.write(`${JSON.stringify({ op, args, token })}\n`));
         socket.on('data', (chunk) => { buffer += chunk; });
         socket.on('error', (error) => {
             clearTimeout(timer);
