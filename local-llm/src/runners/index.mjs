@@ -2,6 +2,7 @@ import { codedError } from './params.mjs';
 import { ikLlamaCppRunner } from './ikLlamaCpp.mjs';
 import { llamaCppRunner } from './llamaCpp.mjs';
 import { ollamaRunner } from './ollama.mjs';
+import { tabbyApiRunner } from './tabbyApi.mjs';
 import { vllmRunner } from './vllm.mjs';
 
 // Every runner is an adapter (llamaServer.mjs shows the full shape): identity,
@@ -14,7 +15,8 @@ export const RUNNERS = Object.freeze({
     'llama.cpp': llamaCppRunner,
     'ik_llama.cpp': ikLlamaCppRunner,
     ollama: ollamaRunner,
-    vllm: vllmRunner
+    vllm: vllmRunner,
+    tabbyapi: tabbyApiRunner
 });
 
 export function getRunner(id) {

@@ -422,7 +422,7 @@ export function createController({
         runnerLogStart = log.seq;
         lastCompletion = null;
         log.append('controller', `starting ${launch.command} ${launch.args.join(' ')}`);
-        const process = startRunner({ command: launch.command, args: launch.args, env: runnerEnv(launch.env), log });
+        const process = startRunner({ command: launch.command, args: launch.args, env: runnerEnv(launch.env), cwd: launch.cwd || '/', log });
         runner = {
             pid: process.pid,
             port,

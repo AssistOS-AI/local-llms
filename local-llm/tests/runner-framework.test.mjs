@@ -176,13 +176,13 @@ test('a runner that dies right after its readiness probes ends in error, never i
 });
 
 test('ports come from the adapters, one per supported runner, all distinct', () => {
-    assert.deepEqual(defaultPorts(), { 'llama.cpp': 18080, 'ik_llama.cpp': 18081, ollama: 18434, vllm: 18082 });
+    assert.deepEqual(defaultPorts(), { 'llama.cpp': 18080, 'ik_llama.cpp': 18081, ollama: 18434, vllm: 18082, tabbyapi: 18083 });
     assert.throws(() => defaultPorts({ a: { id: 'a', supported: true, port: 18080 }, b: { id: 'b', supported: true, port: 18080 } }),
         /port 18080/);
 });
 
-test('the registry has llama.cpp, ik_llama.cpp, Ollama and the vLLM placeholder; LM Studio is gone', () => {
-    assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm']);
+test('the registry has llama.cpp, ik_llama.cpp, Ollama, vLLM and TabbyAPI; LM Studio is gone', () => {
+    assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi']);
     assert.equal(fs.existsSync(new URL('../src/runners/lmStudio.mjs', import.meta.url)), false);
     const summaries = runnerSummaries();
     assert.deepEqual(summaries.find((summary) => summary.id === 'llama.cpp').basicParams, ['ctxSize', 'nCpuMoe']);

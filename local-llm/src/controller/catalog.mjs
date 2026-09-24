@@ -202,13 +202,15 @@ export const WEIGHT_FORMATS = Object.freeze({
 function validateMemory(value) {
     if (value === undefined || value === null) return undefined;
     if (!plainObject(value)) throw invalid('memory must be an object', 'memory');
-    onlyKeys(value, ['layers', 'nonExpertBytes', 'expertBytesPerLayer', 'kvBytesPerToken', 'fixedKvBytes'], 'memory');
+    onlyKeys(value, ['layers', 'nonExpertBytes', 'expertBytesPerLayer', 'kvBytesPerToken', 'fixedKvBytes', 'embeddingBytes'], 'memory');
     return Object.freeze({
         layers: optionalInteger(value.layers, 'memory.layers', 1, 1024),
         nonExpertBytes: optionalInteger(value.nonExpertBytes, 'memory.nonExpertBytes', 0, 2 ** 50),
         expertBytesPerLayer: optionalInteger(value.expertBytesPerLayer, 'memory.expertBytesPerLayer', 0, 2 ** 45),
         kvBytesPerToken: optionalInteger(value.kvBytesPerToken, 'memory.kvBytesPerToken', 1, 2 ** 30),
         fixedKvBytes: optionalInteger(value.fixedKvBytes, 'memory.fixedKvBytes', 0, 2 ** 40),
+        // The input embedding a runner keeps in system RAM (ExLlamaV3 does).
+        embeddingBytes: optionalInteger(value.embeddingBytes, 'memory.embeddingBytes', 0, 2 ** 40),
     });
 }
 

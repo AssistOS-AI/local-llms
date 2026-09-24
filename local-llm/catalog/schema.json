@@ -45,7 +45,8 @@
             "nonExpertBytes": { "type": "integer", "minimum": 0 },
             "expertBytesPerLayer": { "type": "integer", "minimum": 0 },
             "kvBytesPerToken": { "type": "integer", "minimum": 1 },
-            "fixedKvBytes": { "type": "integer", "minimum": 0 }
+            "fixedKvBytes": { "type": "integer", "minimum": 0 },
+            "embeddingBytes": { "type": "integer", "minimum": 0, "description": "The input embedding a runner keeps in system RAM (ExLlamaV3 does)." }
           }
         },
         "recommended": { "type": "object", "description": "Default runner parameters, keyed by runner id." },

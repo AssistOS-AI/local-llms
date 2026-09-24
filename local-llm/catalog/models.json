@@ -125,6 +125,47 @@
           "maxModelLen": 8192
         }
       }
+    },
+    {
+      "id": "qwen3-8b-exl3",
+      "displayName": "Qwen3 8B EXL3 4.0 bpw",
+      "description": "Qwen3 8B quantized to 4.0 bits per weight in the EXL3 format, as a Hugging Face snapshot for TabbyAPI (ExLlamaV3). On a 6 GB GPU it runs with a short context and a Q4 KV cache.",
+      "license": "Apache-2.0",
+      "architecture": "dense",
+      "totalParams": "8B",
+      "activeParams": "8B",
+      "contextLength": 40960,
+      "sources": {
+        "exl3": {
+          "type": "hf-snapshot",
+          "repo": "turboderp/Qwen3-8B-exl3",
+          "revision": "4.0bpw",
+          "commit": "1fd66d10f8fbdf071a0ff35842a2d1bf0df94b45",
+          "quantization": "EXL3 4.0 bpw",
+          "files": [
+            { "path": "config.json", "size": 1042, "sha256": "62274dbc520878ace6c92e59d5f07264a9e4ba965790b54a14fb2118e766fb1d" },
+            { "path": "generation_config.json", "size": 239, "sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2" },
+            { "path": "merges.txt", "size": 1671853, "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5" },
+            { "path": "model.safetensors", "size": 5190775472, "sha256": "9fd0879e561b07e6ed6d6bced3cfdf78c0c7320cfd8e87c5ed867248c9cdb5bb" },
+            { "path": "quantization_config.json", "size": 292047, "sha256": "0c361ba9369cb47ceda21901779b581bab696150a9c930cbbab9ef73da3c88de" },
+            { "path": "tokenizer.json", "size": 11422654, "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4" },
+            { "path": "tokenizer_config.json", "size": 9675, "sha256": "5a7303fcb1a27ede63134a2cbd61d5282c247ca6d769ce4746d4ffa124aedd63" },
+            { "path": "vocab.json", "size": 2776833, "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910" }
+          ]
+        }
+      },
+      "memory": {
+        "layers": 36,
+        "kvBytesPerToken": 147456,
+        "embeddingBytes": 1244659712
+      },
+      "recommended": {
+        "tabbyapi": {
+          "maxSeqLen": 2048,
+          "cacheMode": "Q4",
+          "chunkSize": 512
+        }
+      }
     }
   ]
 }

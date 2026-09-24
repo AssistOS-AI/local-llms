@@ -247,6 +247,50 @@ export function admitVllm({ model, source, params, gpu, memory, disk, remainingD
     return result('ok', null, estimate, warnings);
 }
 
+// TabbyAPI with ExLlamaV3: all weights on the GPU, a KV cache of cacheSize
+// tokens at cacheMode precision, and an estimated 640 MiB for the CUDA
+// context and the activations of one prompt chunk.
+const TABBY_OVERHEAD_BYTES = 640 * MIB;
+const TABBY_CACHE_FACTOR = Object.freeze({ FP16: 1, Q8: 0.5, Q6: 0.375, Q4: 0.25 });
+
+export function admitTabbyApi({ model, source, params, gpu, memory, disk, remainingDownloadBytes = 0 }) {
+    const size = source.size || 0;
+    const cacheTokens = params.cacheSize ?? params.maxSeqLen;
+    const kvBytes = Math.round((model.memory?.kvBytesPerToken || DEFAULT_KV_BYTES_PER_TOKEN) * cacheTokens
+        * (TABBY_CACHE_FACTOR[params.cacheMode] ?? 1));
+    // ExLlamaV3 keeps the input embedding in system RAM (measured with
+    // Qwen3-8B EXL3: 4,141 MiB on the GPU for a 4,966 MiB snapshot).
+    const embeddingBytes = Math.min(size, model.memory?.embeddingBytes || 0);
+    const gpuWeightsBytes = size - embeddingBytes;
+    const gpuBytes = gpuWeightsBytes + kvBytes + TABBY_OVERHEAD_BYTES;
+    const usable = gpu.totalBytes * VLLM_USABLE_SHARE;
+    const ramBytes = VLLM_RUNNER_RAM_BYTES + embeddingBytes;
+    const estimate = { weightsBytes: size, gpuWeightsBytes, cpuWeightsBytes: embeddingBytes, kvBytes, gpuBytes, ramBytes,
+        basis: 'snapshot size, KV cache for cacheSize at cacheMode, and an estimated overhead' };
+    const warnings = ramWarning(ramBytes, memory);
+    if (gpuBytes > usable) {
+        return result('incompatible', `Needs about ${gib(gpuBytes)} of GPU memory for its weights and a ${cacheTokens}-token `
+            + `${params.cacheMode} cache; about ${gib(usable)} of this GPU is usable. Lower maxSeqLen, use cacheMode Q4, `
+            + 'or pick a smaller model.', estimate, warnings);
+    }
+    if (memory.totalBytes && ramBytes > memory.totalBytes) {
+        return result('incompatible', `Needs about ${gib(ramBytes)} of RAM; this machine has ${gib(memory.totalBytes)}.`, estimate, warnings);
+    }
+    if (gpuBytes > gpu.freeBytes - GPU_MARGIN_BYTES) {
+        return result('insufficient-now', `Needs about ${gib(gpuBytes)} of GPU memory; ${gib(gpu.freeBytes)} is free now`
+            + `${otherGpuUsers(gpu)}.`, estimate, warnings);
+    }
+    if (memory.availableBytes && ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
+        return result('insufficient-now', `Needs about ${gib(ramBytes)} of RAM; ${gib(memory.availableBytes)} is available now.`,
+            estimate, warnings);
+    }
+    if (diskShortage(remainingDownloadBytes, disk)) {
+        return result('insufficient-now', `The download needs ${gib(remainingDownloadBytes * 1.05)} of free disk; `
+            + `${gib(disk.freeBytes)} is free.`, estimate, warnings);
+    }
+    return result('ok', null, estimate, warnings);
+}
+
 /**
  * The checks every runner shares, then the runner's own policy
  * (`runner.admit`), which sizes the estimate for how that runner uses memory.
