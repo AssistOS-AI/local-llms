@@ -18,7 +18,7 @@ This specification defines how `local-llm` presents itself to Ploinky: the manif
 
 | Field | Value | Why |
 | --- | --- | --- |
-| `container` | `docker.io/assistos/local-llm@sha256:b8a5ba072252645e7d26b3ae46cb2951efa62c4ff8838c82f276c090d9a8c176`, pinned by digest; linux/amd64 only | Built and proven by `publish-local-llm-image.yml` from `container-image-builds/images/local-llm` at `78ccdaf` (run 35968307553). A local build tagged `localhost/local-llm:dev` can stand in during development. |
+| `container` | `docker.io/assistos/local-llm@sha256:9b8f6605ff4738fdff3db47952ff26c54e08f77aa24a3dc5583a35d56d07dfd0`, pinned by digest; linux/amd64 only | Built and proven by `publish-local-llm-image.yml` from `container-image-builds/images/local-llm` at `8082831` (run 36033730079): llama.cpp b11159, Ollama 0.34.4, and ik_llama.cpp `20f7a72` built for sm_86 and sm_89. A local build tagged `localhost/local-llm:dev` can stand in during development. |
 | `agent` | `exec node /code/src/main.mjs` | The controller is the container's main process |
 | `readiness` | `{ "protocol": "mcp" }` | Ready when AgentServer answers MCP |
 | `volumes` | `{ ".data/local-llm": "/data" }` | Weights, state and logs survive restarts |
@@ -89,7 +89,7 @@ Response: The controller must outlive tool calls and must be the process that re
 
 ### Question #2: Why is the runner API key passed on the command line?
 
-Response: `llama-server` b11125 reads the key from `--api-key`, `LLAMA_API_KEY` or `--api-key-file`. The controller passes it as an argument and redacts it from the runner log. The key changes on every start, and only processes inside the container, which all run as the same user, can read another process's arguments or environment, so an environment variable or a key file would not narrow who can read it.
+Response: `llama-server` b11159 reads the key from `--api-key`, `LLAMA_API_KEY` or `--api-key-file`. The controller passes it as an argument and redacts it from the runner log. The key changes on every start, and only processes inside the container, which all run as the same user, can read another process's arguments or environment, so an environment variable or a key file would not narrow who can read it.
 
 ### Question #3: How does the admin test prompt reach the model?
 

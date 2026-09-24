@@ -20,7 +20,7 @@ export const llamaCppRunner = createLlamaServerRunner({
     id: 'llama.cpp',
     displayName: 'llama.cpp',
     executable: '/opt/llama.cpp/llama-server',
-    pinnedVersion: 'b11125',
+    pinnedVersion: 'b11159',
     port: 18080,
     dialect: Object.freeze({
         // -lv 4 prints the device, offload and CUDA buffer lines the status reads.

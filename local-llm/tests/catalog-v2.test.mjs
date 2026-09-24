@@ -36,6 +36,10 @@ test('the seed catalog is schema v2 and keys gpt-oss-20b sources by weight forma
     assert.equal(gpt.sources.ollama.tag, 'gpt-oss:20b');
     // Parameters and measurements stay per runner.
     assert.deepEqual(Object.keys(gpt.recommended), ['llama.cpp', 'ik_llama.cpp', 'ollama']);
+    // Measured in the R1 benchmark at the default threads (physical cores minus 2).
+    assert.deepEqual(Object.keys(gpt.validated), ['llama.cpp', 'ik_llama.cpp', 'ollama']);
+    assert.match(gpt.validated['ik_llama.cpp'], /12 threads: 5,340 MiB VRAM, 40\.5 tok\/s generation, 386\.6 tok\/s prompt/);
+    assert.match(gpt.validated['llama.cpp'], /b11159, 16k context, 12 threads: 4,798 MiB VRAM, 38\.4 tok\/s generation/);
     const schema = JSON.parse(fs.readFileSync(new URL('../catalog/schema.json', import.meta.url), 'utf8'));
     assert.equal(schema.$id, 'local-llm.catalog/v2');
     assert.deepEqual(Object.keys(schema.$defs.model.properties.sources.properties), ['gguf', 'ollama']);

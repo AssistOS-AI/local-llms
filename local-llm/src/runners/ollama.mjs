@@ -203,7 +203,7 @@ export const ollamaRunner = Object.freeze({
     id: ID,
     displayName: 'Ollama',
     weightFormat: 'ollama',
-    pinnedVersion: '0.34.3',
+    pinnedVersion: '0.34.4',
     supported: true,
     executable: EXECUTABLE,
     port: 18434,

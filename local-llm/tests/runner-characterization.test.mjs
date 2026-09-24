@@ -177,7 +177,8 @@ test('overview: the llama.cpp and Ollama runner entries and the seed model entri
     const overview = await h.controller.overview();
     const byId = Object.fromEntries(overview.runners.map((runner) => [runner.id, runner]));
     for (const [id, displayName, weightFormat, pinnedVersion] of [
-        ['llama.cpp', 'llama.cpp', 'gguf', 'b11125'], ['ollama', 'Ollama', 'ollama', '0.34.3'],
+        // Intended change (runners plan, R8): the image pins llama.cpp b11159 and Ollama 0.34.4.
+        ['llama.cpp', 'llama.cpp', 'gguf', 'b11159'], ['ollama', 'Ollama', 'ollama', '0.34.4'],
     ]) {
         // The runner framework adds the form metadata (basicParams, moeParams);
         // every field the entry had before is unchanged.

@@ -217,9 +217,9 @@ describe('llama.cpp runner', () => {
     });
 
     it('parses the version from stderr and reports ENOENT', () => {
-        const output = 'version: 0.4.1-dev (build 11125, commit 94256114c)\nbuilt with GNU 13\n';
+        const output = 'version: 0.5.0 (build 11159, commit 6b790a9c2)\nbuilt with GNU 13\n';
         const { spawnSync, calls } = fakeSpawn({ status: 0, stdout: '', stderr: output });
-        assert.deepEqual(llamaCppRunner.detect({ spawnSync }), { installed: true, version: 'b11125', reason: null });
+        assert.deepEqual(llamaCppRunner.detect({ spawnSync }), { installed: true, version: 'b11159', reason: null });
         assert.equal(calls[0].command, '/opt/llama.cpp/llama-server');
         assert.deepEqual(calls[0].args, ['--version']);
         assert.equal(calls[0].options.timeout, 10000);
@@ -233,7 +233,7 @@ describe('llama.cpp runner', () => {
         assert.match(garbage.reason, /Unrecognized/);
         const other = llamaCppRunner.detect(fakeSpawn({ status: 0, stdout: 'version: 1 (build 11200, commit x)' }));
         assert.equal(other.version, 'b11200');
-        assert.match(other.reason, /differs from pinned b11125/);
+        assert.match(other.reason, /differs from pinned b11159/);
     });
 });
 
@@ -376,11 +376,11 @@ describe('Ollama runner', () => {
     });
 
     it('parses the client version and reports ENOENT', () => {
-        const stdout = 'Warning: could not connect to a running Ollama instance\nWarning: client version is 0.34.3\n';
+        const stdout = 'Warning: could not connect to a running Ollama instance\nWarning: client version is 0.34.4\n';
         const found = ollamaRunner.detect(fakeSpawn({ status: 0, stdout, stderr: '' }));
-        assert.deepEqual(found, { installed: true, version: '0.34.3', reason: null });
-        const server = ollamaRunner.detect(fakeSpawn({ status: 0, stdout: 'ollama version is 0.34.3\n' }));
-        assert.equal(server.version, '0.34.3');
+        assert.deepEqual(found, { installed: true, version: '0.34.4', reason: null });
+        const server = ollamaRunner.detect(fakeSpawn({ status: 0, stdout: 'ollama version is 0.34.4\n' }));
+        assert.equal(server.version, '0.34.4');
         const enoent = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
         assert.equal(ollamaRunner.detect(fakeSpawn({ error: enoent })).installed, false);
     });

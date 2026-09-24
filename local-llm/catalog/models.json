@@ -62,7 +62,8 @@
         }
       },
       "validated": {
-        "llama.cpp": "RTX 3060 Laptop (6 GB), 16k context: 4,817 MiB VRAM, 36.8 tok/s generation, 249.7 tok/s prompt",
+        "llama.cpp": "RTX 3060 Laptop (6 GB), b11159, 16k context, 12 threads: 4,798 MiB VRAM, 38.4 tok/s generation, 246.7 tok/s prompt",
+        "ik_llama.cpp": "RTX 3060 Laptop (6 GB), 20f7a72, 16k context, 12 threads: 5,340 MiB VRAM, 40.5 tok/s generation, 386.6 tok/s prompt",
         "ollama": "RTX 3060 Laptop (6 GB), 4k context: 67%/33% CPU/GPU, 32.1 tok/s generation"
       }
     }
