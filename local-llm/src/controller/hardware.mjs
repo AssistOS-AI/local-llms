@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 
-// The Box GPU grant binds the host nvidia-smi here (the override is a test seam).
+// The Box GPU wiring binds the host nvidia-smi here (the override is a test seam).
 export const NVIDIA_SMI = process.env.LOCAL_LLM_NVIDIA_SMI || '/usr/local/nvidia/bin/nvidia-smi';
 const MIB = 1024 * 1024;
 
@@ -24,15 +24,23 @@ function csvRows(text) {
         .map((line) => line.split(',').map((cell) => cell.trim()));
 }
 
-export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI } = {}) {
+export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI, env = process.env } = {}) {
     const query = await run(execFileImpl, nvidiaSmi, [
         '--query-gpu=name,memory.total,memory.used,memory.free,driver_version',
         '--format=csv,noheader,nounits',
     ]);
     if (!query.ok) {
+        // Ploinky starts this agent without the GPU device when the Box has no
+        // GPU for it, and says why (containerSecurity.gpu, Ploinky D14).
+        const attachReason = env.PLOINKY_GPU_STATUS === 'unavailable' && env.PLOINKY_GPU_REASON
+            ? String(env.PLOINKY_GPU_REASON).slice(0, 500)
+            : null;
         const reason = query.error?.code === 'ENOENT'
-            ? 'No GPU is available to this agent: the workspace Box has no GPU grant for it '
-                + '(on the host: ploinky gpu grant --agent local-llms/local-llm).'
+            ? (attachReason
+                ? `No GPU is attached to this agent: ${attachReason}`
+                : 'No GPU is available to this agent. On the host, `ploinky gpu status` shows why: '
+                    + 'revoked: run `ploinky gpu grant --agent local-llms/local-llm`; '
+                    + 'not applied yet: run `ploinky start`; or the host has no usable GPU.')
             : `nvidia-smi failed: ${(query.stderr || query.error?.message || '').trim().slice(0, 300)}`;
         return { available: false, reason };
     }

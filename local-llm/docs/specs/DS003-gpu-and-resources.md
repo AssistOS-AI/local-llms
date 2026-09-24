@@ -3,7 +3,7 @@ id: DS003
 title: GPU and Resources
 status: accepted
 owner: local-llm
-summary: The Box GPU grant, admission, runner isolation, and memory estimates.
+summary: Manifest-declared GPU access and the operator override, admission, runner isolation, and memory estimates.
 ---
 
 # DS003 GPU and Resources
@@ -14,11 +14,11 @@ This specification defines how `local-llm` reaches the GPU, how it decides wheth
 
 ## Core Content
 
-### GPU access through the Box grant
+### GPU access through the manifest, with the operator override
 
-An operator grants the GPU to this agent on one workspace with `ploinky gpu grant --agent local-llms/local-llm` (Ploinky `ploinky-box/gpuGrant.mjs`; `ploinky gpu status` shows the grant). The grant recreates that workspace's Box with the NVIDIA device nodes (`/dev/nvidia0`, `/dev/nvidiactl`, `/dev/nvidia-uvm`), read-only binds of the driver libraries under `/usr/local/nvidia/lib64` and of `nvidia-smi` under `/usr/local/nvidia/bin`, a hookless CDI spec `ploinky.local/gpu=all`, and a grant marker naming the agent.
+The manifest declares `containerSecurity.gpu: true` (Ploinky decision D14), so the agent gets the GPU in any workspace where its repo is installed and the host has a usable NVIDIA GPU, with no host step. When the host prepares the Box (`ploinky start`, `restart`, `update`, `gpu grant`, `gpu revoke`) and the host has a usable NVIDIA GPU, it recreates that workspace's Box with the NVIDIA device nodes (`/dev/nvidia0`, `/dev/nvidiactl`, `/dev/nvidia-uvm`), read-only binds of the driver libraries under `/usr/local/nvidia/lib64` and of `nvidia-smi` under `/usr/local/nvidia/bin`, a hookless CDI spec `ploinky.local/gpu=all`, and a grant marker naming the agent. The operator overrides the manifest on the host: `ploinky gpu revoke --agent local-llms/local-llm` denies it persistently, `ploinky gpu grant --agent local-llms/local-llm` restores it, `ploinky gpu revoke` without `--agent` turns manifest-declared GPU access off for the whole workspace, and `ploinky gpu status` shows each GPU agent with its source (Ploinky `ploinky-box/gpuGrant.mjs`).
 
-The manifest asks for that CDI device and nothing else. Ploinky admits the request only for the named agent while the marker is valid, and checks again before every launch. Without an active grant naming the agent, or with a stale grant, Ploinky refuses to start the agent container and names the grant command; there is no CPU fallback in this release (plan decision D7). If the GPU disappears while the agent runs, the hardware snapshot reports it unavailable and every Run is refused as `incompatible`.
+The declaration asks for that CDI device and nothing else. Ploinky attaches it only while the Box's marker names the agent and is active, and checks again before every launch. Otherwise the agent still starts, without the device, and Ploinky passes `PLOINKY_GPU_STATUS=unavailable` and `PLOINKY_GPU_REASON`, which says what to run on the host: `ploinky gpu grant --agent local-llms/local-llm` after a revoke, `ploinky start` when the repo was installed after the Box was last prepared, or `ploinky gpu status` on a host without a usable GPU. The hardware snapshot reports that reason, so Settings, `local_llm_overview` and `local_llm_status` show it and every Run is refused as `incompatible` with it; there is no CPU fallback in this release (plan decision D7). The agent therefore never fails to start on a machine without a GPU, which matters because Explorer enables it by default. If the GPU disappears while the agent runs, the hardware snapshot reports it unavailable and every Run is refused as `incompatible`.
 
 ### Hardware snapshot
 
@@ -61,7 +61,7 @@ vLLM and LM Studio are always `incompatible` in this release, with a stated reas
 | DS010 rule | local-llm |
 | --- | --- |
 | RAM floor checked at startup from a catalog band | Replaced by per-deployment admission against measured or estimated needs |
-| GPU passthrough is an operator runtime flag; the manifest cannot express it | Replaced by the Box GPU grant and the CDI device request (DS010 Question #1, option 3: manifest field plus operator grant) |
+| GPU passthrough is an operator runtime flag; the manifest cannot express it | Replaced by the manifest declaration `containerSecurity.gpu` with the operator's grant and revoke as override (DS010 Question #1, option 3: manifest field plus operator control) |
 | `nvidia-smi` and `/dev/nvidia0` as GPU signals | Kept as the hardware snapshot source, read from the granted paths |
 | One loaded model at a time to limit contention | Kept: one deployment at a time; Ollama runs with `OLLAMA_MAX_LOADED_MODELS=1` |
 
@@ -73,4 +73,4 @@ Response: The GGUF header gives tensor sizes but not the CUDA compute buffers or
 
 ## Conclusion
 
-The agent reaches the GPU only through an operator's named grant, refuses before downloading when a model cannot fit, keeps runners on loopback behind a per-start key, and never exposes a runner port through the Router.
+The agent reaches the GPU through its manifest declaration, which the operator can revoke, refuses before downloading when a model cannot fit, keeps runners on loopback behind a per-start key, and never exposes a runner port through the Router.

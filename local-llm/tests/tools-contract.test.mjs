@@ -24,12 +24,13 @@ test('every tool is admin-tagged, runs from /code, and names itself', () => {
     }
 });
 
-test('the manifest requests only the granted CDI device and closes the agent-port relay', () => {
+test('the manifest declares GPU access and nothing else, and closes the agent-port relay', () => {
     const manifest = read('manifest.json');
-    assert.deepEqual(manifest.llmRuntime, { runtimePolicy: { devices: [{ type: 'cdi', value: 'ploinky.local/gpu=all' }] } });
-    assert.equal(manifest.llmRuntime.enabled, undefined);
+    // containerSecurity.gpu implies the one CDI device (Ploinky D14), so no
+    // runtimePolicy device entry and no other llmRuntime setting is needed.
+    assert.deepEqual(manifest.containerSecurity, { gpu: true });
+    assert.equal(manifest.llmRuntime, undefined);
     assert.equal(manifest.routerAccess.agentPorts, false);
-    assert.equal(manifest.containerSecurity, undefined);
     assert.deepEqual(manifest.volumes, { '.data/local-llm': '/data' });
     assert.equal(manifest.agent, 'exec node /code/src/main.mjs');
     assert.deepEqual(manifest.readiness, { protocol: 'mcp' });
@@ -242,4 +243,23 @@ test('a chat request without a token limit gets the documented default cap', asy
     };
     await respond({ request: { messages: [] } }, { call: async () => target, fetchImpl, out: { write() {} } });
     assert.equal(sent.max_tokens, 8192);
+});
+
+test('with no GPU in the container, the reason says what to run on the host', async () => {
+    const { readGpu } = await import('../src/controller/hardware.mjs');
+    const missing = (command, args, options, callback) => callback(Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }), '', '');
+    const gpu = await readGpu({ execFileImpl: missing, nvidiaSmi: '/usr/local/nvidia/bin/nvidia-smi', env: {} });
+    assert.equal(gpu.available, false);
+    assert.match(gpu.reason, /`ploinky gpu status` shows why/);
+    assert.match(gpu.reason, /revoked: run `ploinky gpu grant --agent local-llms\/local-llm`/);
+    assert.match(gpu.reason, /not applied yet: run `ploinky start`/);
+    // Ploinky tells a manifest-declared agent why it has no GPU (D14); that
+    // reason is what Settings, local_llm_overview and local_llm_status show.
+    const revoked = 'GPU access for local-llms/local-llm was revoked by the operator; on the host run `ploinky gpu grant --agent local-llms/local-llm`';
+    const told = await readGpu({
+        execFileImpl: missing,
+        nvidiaSmi: '/usr/local/nvidia/bin/nvidia-smi',
+        env: { PLOINKY_GPU_STATUS: 'unavailable', PLOINKY_GPU_REASON: revoked },
+    });
+    assert.equal(told.reason, `No GPU is attached to this agent: ${revoked}`);
 });

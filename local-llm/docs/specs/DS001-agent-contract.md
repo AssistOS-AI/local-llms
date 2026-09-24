@@ -22,12 +22,12 @@ This specification defines how `local-llm` presents itself to Ploinky: the manif
 | `agent` | `exec node /code/src/main.mjs` | The controller is the container's main process |
 | `readiness` | `{ "protocol": "mcp" }` | Ready when AgentServer answers MCP |
 | `volumes` | `{ ".data/local-llm": "/data" }` | Weights, state and logs survive restarts |
-| `llmRuntime.runtimePolicy.devices` | `[{ "type": "cdi", "value": "ploinky.local/gpu=all" }]` | The only device request; admitted only with an active Box GPU grant for this agent (DS003) |
+| `containerSecurity.gpu` | `true` | Declares GPU access (Ploinky D14): Ploinky attaches the single CDI device `ploinky.local/gpu=all` when the Box's GPU wiring names this agent and is active; otherwise the agent starts without it and reports why (DS003) |
 | `routerAccess.agentPorts` | `false` | Closes the Router's agent-port relay, so runner ports are never reachable from a browser session |
 | `ideSettings` | key `local-llm-settings`, scope `workspace`, plugin `local-llm/local-llm-settings`, `adminOnly: true` | Settings → Agents → Local LLMs |
 | `endpoints.chatCompletions` | `node /code/src/chatResponder.mjs`, `supportsStream: true` | The model's only consumer-facing surface |
 
-The manifest declares no `containerSecurity`, no published ports and no `llmRuntime.enabled`.
+The manifest declares no other `containerSecurity` field, no `llmRuntime` block (so no `runtimePolicy` device entry and no `llmRuntime.enabled`), and no published ports.
 
 ### Processes
 
