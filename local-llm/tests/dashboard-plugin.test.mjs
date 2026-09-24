@@ -23,20 +23,31 @@ const readJson = (url) => JSON.parse(readText(url));
 const OVERVIEW_MODELS = [
     {
         id: 'gpt-oss-20b', displayName: 'gpt-oss-20b', architecture: 'moe', seed: true, license: 'Apache-2.0', totalParams: '21B', activeParams: '3.6B',
+        weights: {
+            gguf: { label: 'GGUF file', size: 12e9, download: { state: 'complete', total: 12e9 }, runners: ['llama.cpp', 'fake-gguf'] },
+            ollama: { label: 'Ollama tag', size: 13.8e9, download: { state: 'absent' }, runners: ['ollama'] },
+        },
         runners: {
-            'llama.cpp': { size: 12e9, download: { state: 'complete', total: 12e9 }, admission: { status: 'ok' } },
-            ollama: { size: 13.8e9, download: { state: 'absent' }, admission: { status: 'ok' } },
+            'llama.cpp': { format: 'gguf', size: 12e9, download: { state: 'complete', total: 12e9 }, admission: { status: 'ok' } },
+            'fake-gguf': { format: 'gguf', size: 12e9, download: { state: 'complete', total: 12e9 }, admission: { status: 'ok' } },
+            ollama: { format: 'ollama', size: 13.8e9, download: { state: 'absent' }, admission: { status: 'ok' } },
         },
     },
     {
         id: 'qwen3-0.6b', displayName: 'Qwen3 0.6B <b>', architecture: 'dense', seed: false, license: 'Apache-2.0',
-        runners: { 'llama.cpp': { size: 6.4e8, download: { state: 'complete', total: 6.4e8 }, admission: { status: 'ok' } } },
+        weights: { gguf: { label: 'GGUF file', size: 6.4e8, download: { state: 'complete', total: 6.4e8 }, runners: ['llama.cpp', 'fake-gguf'] } },
+        runners: {
+            'llama.cpp': { format: 'gguf', size: 6.4e8, download: { state: 'complete', total: 6.4e8 }, admission: { status: 'ok' } },
+            'fake-gguf': { format: 'gguf', size: 6.4e8, download: { state: 'complete', total: 6.4e8 }, admission: { status: 'ok' } },
+        },
     },
 ];
+// A third supported runner the dashboard has never heard of.
 const RUNNER_LIST = [
-    { id: 'llama.cpp', supported: true, installed: true },
-    { id: 'ollama', supported: true, installed: true },
-    { id: 'vllm', supported: false, installed: false },
+    { id: 'llama.cpp', displayName: 'llama.cpp', supported: true, installed: true },
+    { id: 'fake-gguf', displayName: 'Fake <GGUF>', supported: true, installed: true },
+    { id: 'ollama', displayName: 'Ollama', supported: true, installed: true },
+    { id: 'vllm', displayName: 'vLLM', supported: false, installed: false },
 ];
 
 test('the toolbar plugin sits next to Soul Gateway, is admin-only and opens the dashboard in component mode', () => {
@@ -98,7 +109,10 @@ test('the dashboard follows Explorer style rules and works in both themes throug
 });
 
 test('the Models table has no buttons; the detail panel holds the one Run and the model actions', () => {
-    const table = modelsTableHtml(OVERVIEW_MODELS, { selectedId: 'qwen3-0.6b', activeModelId: 'gpt-oss-20b' });
+    const table = modelsTableHtml(OVERVIEW_MODELS, { selectedId: 'qwen3-0.6b', activeModelId: 'gpt-oss-20b', runners: RUNNER_LIST });
+    // One column per supported runner, named by the runner itself.
+    assert.deepEqual([...table.matchAll(/<th scope="col">([^<]*)<\/th>/g)].map((match) => match[1]),
+        ['Model', 'Licence', 'llama.cpp', 'Fake &lt;GGUF&gt;', 'Ollama']);
     assert.doesNotMatch(table, /<button/);
     assert.doesNotMatch(table, />\s*Run/);
     assert.match(table, /data-model-id="qwen3-0.6b"[^>]*aria-selected="true"/);
@@ -113,13 +127,21 @@ test('the Models table has no buttons; the detail panel holds the one Run and th
 
     const catalog = detailInfoHtml(OVERVIEW_MODELS[0], { runners: RUNNER_LIST });
     assert.doesNotMatch(catalog, /removeModel/, 'catalog models cannot be removed');
-    assert.match(catalog, /data-local-action="deleteWeights gpt-oss-20b llama\.cpp"/);
+    // Weights are listed once per format, whatever the number of runners reading them.
+    assert.equal((catalog.match(/data-local-action="deleteWeights /g) || []).length, 1);
+    assert.match(catalog, /data-local-action="deleteWeights gpt-oss-20b gguf"/);
+    assert.match(catalog, /GGUF file[\s\S]*used by llama\.cpp, Fake &lt;GGUF&gt;/);
     assert.doesNotMatch(catalog, /deleteWeights gpt-oss-20b ollama/, 'nothing to delete for Ollama');
+    assert.match(catalog, /Fake &lt;GGUF&gt;[\s\S]*Fits this machine/, 'every supported runner shows its fit');
     const added = detailInfoHtml(OVERVIEW_MODELS[1], { runners: RUNNER_LIST });
     assert.match(added, /data-local-action="removeModel qwen3-0\.6b"\s+disabled title="Delete its weights first"/,
         'the server removes a model only without weights on disk');
     assert.match(added, /Delete its weights first to remove it\./);
-    const emptyAdded = { ...OVERVIEW_MODELS[1], runners: { 'llama.cpp': { size: 1, download: { state: 'absent' }, admission: { status: 'ok' } } } };
+    const emptyAdded = {
+        ...OVERVIEW_MODELS[1],
+        weights: { gguf: { label: 'GGUF file', size: 1, download: { state: 'absent' }, runners: ['llama.cpp'] } },
+        runners: { 'llama.cpp': { format: 'gguf', size: 1, download: { state: 'absent' }, admission: { status: 'ok' } } },
+    };
     const removable = detailInfoHtml(emptyAdded, { runners: RUNNER_LIST });
     assert.match(removable, /data-local-action="removeModel qwen3-0\.6b"\s*>Remove/);
     assert.doesNotMatch(removable, /Delete its weights first/);
@@ -130,15 +152,19 @@ test('the Models table has no buttons; the detail panel holds the one Run and th
 
 test('basic run settings are the ones that decide the fit; everything else is under a closed Advanced', () => {
     const llama = fieldsFromSchema(RUNNERS['llama.cpp'].paramSchema, {});
-    const dense = splitRunFields(llama, 'llama.cpp', { architecture: 'dense' });
+    const dense = splitRunFields(llama, RUNNERS['llama.cpp'], { architecture: 'dense' });
     assert.deepEqual(dense.basic.map((field) => field.name), ['ctxSize']);
     assert.equal(dense.basic.length + dense.advanced.length, llama.length);
-    const moe = splitRunFields(llama, 'llama.cpp', { architecture: 'moe' });
+    const moe = splitRunFields(llama, RUNNERS['llama.cpp'], { architecture: 'moe' });
     assert.deepEqual(moe.basic.map((field) => field.name), ['ctxSize', 'nCpuMoe']);
     assert.ok(!moe.advanced.some((field) => ['ctxSize', 'nCpuMoe'].includes(field.name)));
-    const ollama = splitRunFields(fieldsFromSchema(RUNNERS.ollama.paramSchema, {}), 'ollama', { architecture: 'moe' });
+    const ollama = splitRunFields(fieldsFromSchema(RUNNERS.ollama.paramSchema, {}), RUNNERS.ollama, { architecture: 'moe' });
     assert.deepEqual(ollama.basic.map((field) => field.name), ['numCtx']);
-    assert.deepEqual(splitRunFields([], 'vllm', {}), { basic: [], advanced: [] });
+    assert.deepEqual(splitRunFields([], RUNNERS.vllm, {}), { basic: [], advanced: [] });
+    // A runner the dashboard has never heard of names its own basic fields.
+    const custom = splitRunFields(fieldsFromSchema({ properties: { a: { type: 'integer' }, b: { type: 'integer' } } }, {}),
+        { id: 'fake', basicParams: ['b'], moeParams: [] }, { architecture: 'dense' });
+    assert.deepEqual(custom.basic.map((field) => field.name), ['b']);
     const template = readText(new URL('local-llm-dashboard.html', DASHBOARD));
     assert.match(template, /<details class="local-llm-advanced" data-run-advanced>/, 'Advanced starts closed');
 });

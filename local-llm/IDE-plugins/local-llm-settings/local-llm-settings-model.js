@@ -6,7 +6,8 @@
 export const POLL_INTERVAL_MS = 1500;
 export const LOG_LINES_KEPT = 200;
 const SETTLED_PHASES = new Set(['idle', 'error', 'paused']);
-const RUNNER_LABELS = Object.freeze({ 'llama.cpp': 'llama.cpp', ollama: 'Ollama', vllm: 'vLLM', lmstudio: 'LM Studio' });
+// Labels until the agent's overview names its runners (rememberRunners).
+const runnerLabels = new Map([['llama.cpp', 'llama.cpp'], ['ollama', 'Ollama'], ['vllm', 'vLLM']]);
 
 export function escapeHtml(value = '') {
     return String(value ?? '').replace(/[&<>"']/g, (character) => ({
@@ -64,8 +65,15 @@ export function formatDuration(seconds) {
     return `${rest} s`;
 }
 
+/** Keep each runner's display name from the overview, so labels follow the agent. */
+export function rememberRunners(runners = []) {
+    for (const runner of Array.isArray(runners) ? runners : []) {
+        if (typeof runner?.id === 'string' && typeof runner.displayName === 'string') runnerLabels.set(runner.id, runner.displayName);
+    }
+}
+
 export function runnerLabel(runnerId) {
-    return RUNNER_LABELS[runnerId] || String(runnerId || '');
+    return runnerLabels.get(runnerId) || String(runnerId || '');
 }
 
 /** Delay before the next status poll after `failures` consecutive failures. */
@@ -137,6 +145,10 @@ export function runnerOptions(overview, model) {
 function schemaKind(property) {
     const types = Array.isArray(property.type) ? property.type : [property.type];
     const nullable = types.includes('null');
+    const numeric = types.includes('integer') || types.includes('number');
+    // A named value or a number (such as "off", "max" or a 0-1 fraction):
+    // one text field that accepts either, not a select that hides the numbers.
+    if (Array.isArray(property.enum) && numeric) return { kind: 'enumOrNumber', nullable, integer: !types.includes('number') };
     if (Array.isArray(property.enum)) return { kind: 'enum', nullable };
     if (types.includes('boolean')) return { kind: 'boolean', nullable };
     if (types.includes('integer') || types.includes('number')) return { kind: 'number', nullable, integer: types.includes('integer') };
@@ -161,7 +173,9 @@ export function fieldsFromSchema(schema, values = {}) {
             min: property.minimum,
             max: property.maximum,
         };
-        if (kind === 'enum') {
+        if (kind === 'enumOrNumber') {
+            field.options = property.enum.filter((option) => typeof option === 'string').map((option) => ({ value: option, label: option }));
+        } else if (kind === 'enum') {
             field.options = [
                 ...(nullable ? [{ value: '', label: 'Runner default' }] : []),
                 ...property.enum.filter((option) => option !== null).map((option) => ({ value: String(option), label: String(option) })),
@@ -192,7 +206,15 @@ export function paramsFromForm(fields, raw = {}) {
             else if (field.value !== undefined) params[field.name] = field.value;
             continue;
         }
-        if (field.kind === 'number') {
+        if (field.kind === 'enumOrNumber' && field.options.some((option) => option.value === text)) {
+            params[field.name] = text;
+            continue;
+        }
+        if (field.kind === 'enumOrNumber' && !Number.isFinite(Number(text))) {
+            errors.push(`${field.title} must be ${field.options.map((option) => option.value).join(', ')} or a number.`);
+            continue;
+        }
+        if (field.kind === 'number' || field.kind === 'enumOrNumber') {
             const number = Number(text);
             if (!Number.isFinite(number) || (field.integer && !Number.isInteger(number))) {
                 errors.push(`${field.title} must be ${field.integer ? 'a whole number' : 'a number'}.`);
@@ -213,8 +235,8 @@ export function paramsFromForm(fields, raw = {}) {
 }
 
 /**
- * A user registry entry from the Add model form. The MVP accepts one GGUF
- * file from a Hugging Face repository, or one Ollama library tag.
+ * A user registry entry from the Add model form: one GGUF file from a
+ * Hugging Face repository (the gguf format), or one Ollama library tag.
  */
 export function modelEntryFromForm(raw = {}) {
     const id = String(raw.id || '').trim().toLowerCase();
@@ -235,7 +257,7 @@ export function modelEntryFromForm(raw = {}) {
         };
         const quantization = String(raw.quantization || '').trim();
         if (quantization) source.quantization = quantization;
-        entry.sources['llama.cpp'] = source;
+        entry.sources.gguf = source;
     }
     return entry;
 }

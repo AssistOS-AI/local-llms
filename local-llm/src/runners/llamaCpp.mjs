@@ -1,4 +1,7 @@
 import { spawnSync as realSpawnSync } from 'node:child_process';
+
+import { admitLlamaServer } from '../controller/admission.mjs';
+import { parseRunnerReport } from '../controller/runnerProcess.mjs';
 import {
     ParamError,
     assertAbsolutePath,
@@ -194,6 +197,18 @@ function buildLaunch({ artifactPath, params, port, apiKey, model } = {}) {
     return { command: EXECUTABLE, args: args.map(String), env: { LD_LIBRARY_PATH: NVIDIA_LIB_DIR } };
 }
 
+// llama-server answers /health with 503 while the model loads and 200 once it
+// serves; /v1/models then proves that the per-start key is accepted.
+async function start(ctx) {
+    const process = ctx.launch(ctx.runner.buildLaunch({
+        artifactPath: ctx.weights.path, params: ctx.params, port: ctx.port, apiKey: ctx.apiKey, model: ctx.model,
+    }));
+    const base = `http://127.0.0.1:${ctx.port}`;
+    await ctx.waitForHttp(`${base}/health`, { process });
+    await ctx.waitForHttp(`${base}/v1/models`, { headers: { authorization: `Bearer ${ctx.apiKey}` }, process });
+    return {};
+}
+
 export const llamaCppRunner = Object.freeze({
     id: ID,
     displayName: 'llama.cpp',
@@ -201,9 +216,19 @@ export const llamaCppRunner = Object.freeze({
     pinnedVersion: 'b11125',
     supported: true,
     executable: EXECUTABLE,
+    port: 18080,
+    apiKey: true,
     paramSchema,
+    // Shown outside "Advanced" in the Run form; nCpuMoe only for MoE models.
+    basicParams: Object.freeze(['ctxSize', 'nCpuMoe']),
+    moeParams: Object.freeze(['nCpuMoe']),
     normalizeParams,
     describeContext,
     detect,
-    buildLaunch
+    buildLaunch,
+    start,
+    // --alias makes the model id the name llama-server answers to.
+    chatModel: (deployment) => deployment.modelId,
+    admit: admitLlamaServer,
+    parseReport: parseRunnerReport
 });

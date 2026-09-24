@@ -19,7 +19,7 @@ function snapshot({ gpuFree = 6000 * MIB, processes = [], available = 24 * GIB }
 
 function admitGpt(runnerId, params = {}, snap = snapshot()) {
     const runner = getRunner(runnerId);
-    const source = GPT.sources[runnerId] || GPT.sources['llama.cpp'];
+    const source = GPT.sources[runner.weightFormat];
     const normalized = runner.supported ? runner.normalizeParams(params, { model: GPT }) : {};
     return admit({ runner, model: GPT, source, params: normalized, snapshot: snap });
 }
@@ -27,13 +27,13 @@ function admitGpt(runnerId, params = {}, snap = snapshot()) {
 test('the seed catalog validates and pins every Hugging Face source to a commit', () => {
     assert.equal(GPT.id, 'gpt-oss-20b');
     assert.equal(GPT.seed, true);
-    const source = GPT.sources['llama.cpp'];
+    const source = GPT.sources.gguf;
     assert.match(source.commit, /^[0-9a-f]{40}$/);
     assert.equal(source.size, 12109566624);
     assert.equal(source.sha256, '27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901');
     assert.match(GPT.sources.ollama.manifestDigest, /^sha256:17052f91a42e/);
     const { commit: _commit, ...unpinned } = source;
-    assert.throws(() => validateModel({ ...GPT, sources: { 'llama.cpp': unpinned } }, { seed: true }), /commit/);
+    assert.throws(() => validateModel({ ...GPT, sources: { gguf: unpinned } }, { seed: true }), /commit/);
 });
 
 test('user model entries are validated before they are accepted', () => {
@@ -41,7 +41,7 @@ test('user model entries are validated before they are accepted', () => {
     assert.throws(() => validateModel({ id: 'xx', sources: {} }), /sources/);
     assert.throws(() => validateModel({ id: 'Bad Id', sources: { ollama: { type: 'ollama', tag: 'x:1' } } }), /id must be/);
     assert.throws(() => validateModel({
-        id: 'multi', sources: { 'llama.cpp': { type: 'huggingface', repo: 'a/b', file: '../x.gguf' } },
+        id: 'multi', sources: { gguf: { type: 'huggingface', repo: 'a/b', file: '../x.gguf' } },
     }), /single \.gguf/);
     assert.throws(() => validateModel({
         id: 'shell', sources: { ollama: { type: 'ollama', tag: 'x; rm -rf /' } },
@@ -50,9 +50,9 @@ test('user model entries are validated before they are accepted', () => {
     const qwen = validateModel({
         id: 'qwen3.6-35b-a3b',
         architecture: 'moe',
-        sources: { 'llama.cpp': { type: 'huggingface', repo: 'unsloth/Qwen3.6-35B-A3B-GGUF', file: 'Qwen3.6-35B-A3B-UD-Q3_K_M.gguf' } },
+        sources: { gguf: { type: 'huggingface', repo: 'unsloth/Qwen3.6-35B-A3B-GGUF', file: 'Qwen3.6-35B-A3B-UD-Q3_K_M.gguf' } },
     });
-    assert.equal(qwen.sources['llama.cpp'].revision, 'main');
+    assert.equal(qwen.sources.gguf.revision, 'main');
     assert.equal(qwen.seed, false);
     // A user entry cannot shadow a seed id; invalid persisted entries are skipped.
     const merged = mergeCatalog([GPT], [{ ...qwen, seed: undefined }, { id: 'gpt-oss-20b', sources: GPT.sources }, { broken: true }]);
@@ -84,16 +84,11 @@ test('admission: enough hardware but VRAM held by another process is insufficien
     assert.match(result.reason, /1\.5 GiB is free now; other GPU users: ollama/);
 });
 
-test('admission: vLLM and LM Studio are incompatible with a stated reason', () => {
-    const vllm = admitGpt('vllm');
-    assert.equal(vllm.status, 'incompatible');
-    assert.equal(vllm.reason, 'vLLM cannot load MXFP4 GGUF; not supported in this release.');
-    assert.equal(admitGpt('lmstudio').status, 'incompatible');
-    // Other GGUF quantizations are not claimed to be unloadable, only unsupported here.
-    const q8 = { type: 'huggingface', repo: 'Qwen/Qwen3-0.6B-GGUF', file: 'Qwen3-0.6B-Q8_0.gguf', quantization: 'Q8_0' };
-    const other = admit({ runner: getRunner('vllm'), model: GPT, source: q8, params: {}, snapshot: snapshot() });
-    assert.equal(other.status, 'incompatible');
-    assert.equal(other.reason, 'vLLM is not supported or tested in this release.');
+test('admission: an unsupported runner is incompatible with the reason its adapter gives', () => {
+    const vllm = getRunner('vllm');
+    const result = admit({ runner: vllm, model: GPT, source: undefined, params: {}, snapshot: snapshot() });
+    assert.equal(result.status, 'incompatible');
+    assert.equal(result.reason, 'Not supported or tested in this release; installable in a later release.');
 });
 
 test('admission: no GPU grant is an actionable incompatibility; big RAM users get a warning', () => {
@@ -103,16 +98,16 @@ test('admission: no GPU grant is an actionable incompatibility; big RAM users ge
     const qwen = validateModel({
         id: 'qwen3.6-35b-a3b',
         architecture: 'moe',
-        sources: { 'llama.cpp': { type: 'huggingface', repo: 'unsloth/Qwen3.6-35B-A3B-GGUF', file: 'q.gguf',
+        sources: { gguf: { type: 'huggingface', repo: 'unsloth/Qwen3.6-35B-A3B-GGUF', file: 'q.gguf',
             commit: 'c'.repeat(40), size: 16_600_000_000, sha256: 'd'.repeat(64) } },
     });
     const runner = getRunner('llama.cpp');
     const params = runner.normalizeParams({ ctxSize: 8192, nCpuMoe: 48 }, { model: qwen });
-    const result = admit({ runner, model: qwen, source: qwen.sources['llama.cpp'], params, snapshot: snapshot({ available: 20 * GIB }) });
+    const result = admit({ runner, model: qwen, source: qwen.sources.gguf, params, snapshot: snapshot({ available: 20 * GIB }) });
     assert.equal(result.status, 'ok');
     assert.equal(result.estimate.basis, 'file size heuristic (no memory profile for this model)');
     assert.match(result.warnings[0], /Uses about 1[45]\.\d GiB of system RAM; 20\.0 GiB is available now/);
-    const tight = admit({ runner, model: qwen, source: qwen.sources['llama.cpp'], params, snapshot: snapshot({ available: 12 * GIB }) });
+    const tight = admit({ runner, model: qwen, source: qwen.sources.gguf, params, snapshot: snapshot({ available: 12 * GIB }) });
     assert.equal(tight.status, 'insufficient-now');
 });
 

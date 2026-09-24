@@ -28,8 +28,7 @@
                 "enum": [
                   "llama.cpp",
                   "ollama",
-                  "vllm",
-                  "lmstudio"
+                  "vllm"
                 ]
               },
               "params": {
@@ -107,8 +106,7 @@
             "enum": [
               "llama.cpp",
               "ollama",
-              "vllm",
-              "lmstudio"
+              "vllm"
             ]
           },
           "params": {
@@ -179,7 +177,7 @@
     {
       "name": "local_llm_weights_delete",
       "title": "Delete downloaded weights",
-      "description": "Free the disk used by one model and runner. Refused while the weights are in use.",
+      "description": "Free the disk used by one model's weights of one format (gguf or ollama), or of the format a runner reads; every runner of that format loses them. Refused while the weights are in use.",
       "command": "node",
       "args": [
         "/code/tools/local_llm_tool.mjs"
@@ -200,14 +198,20 @@
             "enum": [
               "llama.cpp",
               "ollama",
-              "vllm",
-              "lmstudio"
+              "vllm"
             ]
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "gguf",
+              "ollama"
+            ],
+            "description": "The weight format to delete; give this or runnerId."
           }
         },
         "required": [
-          "modelId",
-          "runnerId"
+          "modelId"
         ],
         "additionalProperties": false
       },
@@ -221,7 +225,7 @@
     {
       "name": "local_llm_model_add",
       "title": "Add a model",
-      "description": "Add a user model: a single-file GGUF on Hugging Face (llama.cpp) and/or an Ollama library tag. Pins the Hugging Face revision; downloads nothing.",
+      "description": "Add a user model. Its sources are keyed by weight format: gguf, a single-file GGUF on Hugging Face (read by llama.cpp); ollama, an Ollama library tag. Pins the Hugging Face revision; downloads nothing.",
       "command": "node",
       "args": [
         "/code/tools/local_llm_tool.mjs"

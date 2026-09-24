@@ -32,11 +32,11 @@ function fixture(t, { crashAgentServer = false } = {}) {
     fs.writeFileSync(smi, '#!/bin/sh\ncase "$1" in --query-gpu=*) echo "Test GPU, 6144, 13, 6000, 595.91.07";; esac\n', { mode: 0o755 });
     const catalog = path.join(root, 'catalog.json');
     fs.writeFileSync(catalog, JSON.stringify({
-        schema: 'local-llm.catalog/v1',
+        schema: 'local-llm.catalog/v2',
         models: [{
             id: 'tiny',
             architecture: 'dense',
-            sources: { 'llama.cpp': { type: 'huggingface', repo: 'test/tiny', file: 'tiny.gguf', revision: COMMIT,
+            sources: { gguf: { type: 'huggingface', repo: 'test/tiny', file: 'tiny.gguf', revision: COMMIT,
                 commit: COMMIT, size: PAYLOAD.length, sha256: SHA256 } },
             memory: { layers: 4, nonExpertBytes: PAYLOAD.length, expertBytesPerLayer: 0, kvBytesPerToken: 1024 },
         }],

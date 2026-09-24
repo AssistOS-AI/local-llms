@@ -5,7 +5,6 @@ import { RUNNERS, getRunner, runnerSummaries } from '../src/runners/index.mjs';
 import { llamaCppRunner } from '../src/runners/llamaCpp.mjs';
 import { ollamaRunner } from '../src/runners/ollama.mjs';
 import { vllmRunner, vllmRuntime } from '../src/runners/vllm.mjs';
-import { lmStudioRunner } from '../src/runners/lmStudio.mjs';
 
 const API_KEY = 'k'.repeat(24) + '_-AZaz09k';
 const MODEL = Object.freeze({ id: 'qwen3-8b-q4' });
@@ -302,7 +301,7 @@ describe('unsupported runners', () => {
         throw new Error('must not spawn');
     };
 
-    for (const runner of [vllmRunner, lmStudioRunner]) {
+    for (const runner of [vllmRunner]) {
         it(`${runner.id} reports unsupported without spawning`, () => {
             assert.equal(runner.supported, false);
             assert.equal(runner.pinnedVersion, null);
@@ -328,19 +327,11 @@ describe('unsupported runners', () => {
         assert.equal(vllmRunner.normalizeParams({ cpuOffloadParams: 'experts.*,lm_head' }).cpuOffloadParams,
             'experts.*,lm_head');
     });
-
-    it('validates LM Studio gpu union', () => {
-        assert.equal(lmStudioRunner.normalizeParams({}).gpu, 'max');
-        assert.equal(lmStudioRunner.normalizeParams({ gpu: 0.5 }).gpu, 0.5);
-        assert.equal(lmStudioRunner.normalizeParams({ gpu: 'off' }).gpu, 'off');
-        assertParamError(() => lmStudioRunner.normalizeParams({ gpu: 'half' }), 'gpu');
-        assertParamError(() => lmStudioRunner.normalizeParams({ gpu: 2 }), 'gpu');
-    });
 });
 
 describe('runner registry', () => {
     it('resolves known runners and rejects others', () => {
-        assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ollama', 'vllm', 'lmstudio']);
+        assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ollama', 'vllm']);
         assert.equal(getRunner('llama.cpp'), llamaCppRunner);
         assert.equal(getRunner('ollama'), ollamaRunner);
         for (const id of ['toString', 'constructor', 'llamacpp', undefined, null]) {
@@ -350,10 +341,10 @@ describe('runner registry', () => {
 
     it('summarizes runners with JSON-serializable, frozen schemas', () => {
         const summaries = runnerSummaries();
-        assert.deepEqual(summaries.map((s) => s.id), ['llama.cpp', 'ollama', 'vllm', 'lmstudio']);
+        assert.deepEqual(summaries.map((s) => s.id), ['llama.cpp', 'ollama', 'vllm']);
         for (const summary of summaries) {
             assert.deepEqual(Object.keys(summary).sort(),
-                ['displayName', 'id', 'paramSchema', 'pinnedVersion', 'supported', 'weightFormat']);
+                ['basicParams', 'displayName', 'id', 'moeParams', 'paramSchema', 'pinnedVersion', 'supported', 'weightFormat']);
             assert.deepEqual(JSON.parse(JSON.stringify(summary.paramSchema)), summary.paramSchema);
             assert.ok(Object.isFrozen(summary.paramSchema.properties));
             for (const prop of Object.values(summary.paramSchema.properties)) {

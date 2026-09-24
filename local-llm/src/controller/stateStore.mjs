@@ -7,6 +7,11 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { migrateModelEntry } from './catalog.mjs';
+
+// Registry entries are migrated one by one when the file loads (catalog v2),
+// so the file version stays 1: a controller from before catalog v2 then hides
+// migrated entries instead of discarding the whole file.
 export const STATE_VERSION = 1;
 const MAX_REQUEST_RECORDS = 200;
 
@@ -39,11 +44,10 @@ function writeAtomically(fsApi, target, text) {
 
 function normalizeState(value) {
     const state = emptyState();
-    if (!value || typeof value !== 'object' || value.version !== STATE_VERSION) return state;
     if (value.deployment && typeof value.deployment === 'object') state.deployment = value.deployment;
     if (value.params && typeof value.params === 'object' && !Array.isArray(value.params)) state.params = value.params;
     if (value.requests && typeof value.requests === 'object' && !Array.isArray(value.requests)) state.requests = value.requests;
-    if (Array.isArray(value.registry)) state.registry = value.registry;
+    if (Array.isArray(value.registry)) state.registry = value.registry.map(migrateModelEntry);
     if (value.ollamaPulls && typeof value.ollamaPulls === 'object' && !Array.isArray(value.ollamaPulls)) {
         state.ollamaPulls = value.ollamaPulls;
     }
@@ -54,14 +58,21 @@ export function createStateStore({ dataDir, fsApi = fs } = {}) {
     const file = path.join(dataDir, 'state', 'controller.json');
 
     function load() {
+        let value;
         try {
-            return normalizeState(JSON.parse(fsApi.readFileSync(file, 'utf8')));
+            value = JSON.parse(fsApi.readFileSync(file, 'utf8'));
         } catch (error) {
             if (error?.code === 'ENOENT') return emptyState();
             // A corrupt file is kept for inspection and replaced by a clean state.
             try { fsApi.renameSync(file, `${file}.corrupt-${Date.now()}`); } catch {}
             return emptyState();
         }
+        if (!value || typeof value !== 'object' || value.version !== STATE_VERSION) {
+            // Another version's file is kept aside rather than overwritten by the next save.
+            try { fsApi.renameSync(file, `${file}.unsupported-${Date.now()}`); } catch {}
+            return emptyState();
+        }
+        return normalizeState(value);
     }
 
     function save(state) {

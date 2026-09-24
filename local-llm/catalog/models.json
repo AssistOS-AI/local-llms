@@ -1,5 +1,5 @@
 {
-  "schema": "local-llm.catalog/v1",
+  "schema": "local-llm.catalog/v2",
   "models": [
     {
       "id": "gpt-oss-20b",
@@ -12,7 +12,7 @@
       "contextLength": 131072,
       "requiresJinja": true,
       "sources": {
-        "llama.cpp": {
+        "gguf": {
           "type": "huggingface",
           "repo": "ggml-org/gpt-oss-20b-GGUF",
           "file": "gpt-oss-20b-MXFP4.gguf",

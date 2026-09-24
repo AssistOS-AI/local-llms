@@ -1,0 +1,111 @@
+// Catalog schema v2: model sources are keyed by weight format (gguf, ollama),
+// not by runner, so runners that read the same format share one download.
+// Registries persisted by the v1 controller are migrated when state loads.
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+
+import { loadSeedCatalog, mergeCatalog, migrateModelEntry, validateModel } from '../src/controller/catalog.mjs';
+import { STATE_VERSION, createStateStore } from '../src/controller/stateStore.mjs';
+
+const GGUF = Object.freeze({
+    type: 'huggingface', repo: 'Qwen/Qwen3-0.6B-GGUF', file: 'Qwen3-0.6B-Q8_0.gguf', revision: 'main',
+    commit: 'a'.repeat(40), size: 639446688, sha256: 'b'.repeat(64),
+});
+const OLLAMA = Object.freeze({ type: 'ollama', tag: 'qwen3:0.6b' });
+
+function tempStore(t, content) {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-catalog-v2-'));
+    t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+    const store = createStateStore({ dataDir });
+    if (content !== undefined) {
+        fs.mkdirSync(path.dirname(store.file), { recursive: true });
+        fs.writeFileSync(store.file, JSON.stringify(content));
+    }
+    return store;
+}
+
+test('the seed catalog is schema v2 and keys gpt-oss-20b sources by weight format', () => {
+    const document = JSON.parse(fs.readFileSync(new URL('../catalog/models.json', import.meta.url), 'utf8'));
+    assert.equal(document.schema, 'local-llm.catalog/v2');
+    const [gpt] = loadSeedCatalog();
+    assert.deepEqual(Object.keys(gpt.sources), ['gguf', 'ollama']);
+    assert.equal(gpt.sources.gguf.sha256, '27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901');
+    assert.equal(gpt.sources.ollama.tag, 'gpt-oss:20b');
+    // Parameters and measurements stay per runner.
+    assert.deepEqual(Object.keys(gpt.recommended), ['llama.cpp', 'ollama']);
+    const schema = JSON.parse(fs.readFileSync(new URL('../catalog/schema.json', import.meta.url), 'utf8'));
+    assert.equal(schema.$id, 'local-llm.catalog/v2');
+    assert.deepEqual(Object.keys(schema.$defs.model.properties.sources.properties), ['gguf', 'ollama']);
+});
+
+test('a v2 entry is validated per format; runner-keyed sources are refused', () => {
+    const model = validateModel({ id: 'qwen-small', sources: { gguf: GGUF, ollama: OLLAMA } });
+    assert.deepEqual(Object.keys(model.sources), ['gguf', 'ollama']);
+    assert.throws(() => validateModel({ id: 'qwen-small', sources: { 'llama.cpp': GGUF } }),
+        { code: 'invalid_model', message: /unknown weight format 'llama\.cpp'/ });
+    assert.throws(() => validateModel({ id: 'qwen-small', sources: { gguf: OLLAMA } }), /sources\.gguf\.type must be huggingface/);
+    assert.throws(() => validateModel({ id: 'qwen-small', sources: { ollama: GGUF } }), /sources\.ollama\.type must be ollama/);
+});
+
+test('migrating a v1 entry maps llama.cpp to gguf, drops LM Studio and the vLLM GGUF fallback, and is idempotent', () => {
+    const v1 = {
+        id: 'user-qwen', displayName: 'Qwen', sources: { 'llama.cpp': GGUF, lmstudio: { ...GGUF, file: 'other.gguf' }, ollama: OLLAMA },
+        recommended: { 'llama.cpp': { ctxSize: 8192 }, lmstudio: { contextLength: 4096 } },
+    };
+    const migrated = migrateModelEntry(v1);
+    assert.deepEqual(migrated.sources, { gguf: GGUF, ollama: OLLAMA });
+    // Only the removed runner's parameters are dropped.
+    assert.deepEqual(migrated.recommended, { 'llama.cpp': { ctxSize: 8192 } });
+    assert.deepEqual(migrateModelEntry(migrated), migrated);
+    // An entry whose only GGUF came from LM Studio or vLLM keeps it as the gguf source.
+    assert.deepEqual(migrateModelEntry({ id: 'only-lms', sources: { lmstudio: GGUF } }).sources, { gguf: GGUF });
+    assert.deepEqual(migrateModelEntry({ id: 'only-vllm', sources: { vllm: GGUF } }).sources, { gguf: GGUF });
+    // Entries that are not objects are returned as they are, for validation to skip.
+    assert.equal(migrateModelEntry(null), null);
+    assert.equal(validateModel(migrateModelEntry(v1)).sources.gguf.commit, GGUF.commit);
+});
+
+// The state file keeps version 1: registry entries are migrated one by one,
+// idempotently. A controller from before this change reads the migrated
+// entries as invalid and hides them, but keeps and saves them unchanged, so a
+// downgrade and a later upgrade lose no user model.
+test('a state file written before catalog v2 loads with its registry migrated and everything else unchanged', (t) => {
+    const deployment = {
+        id: 'd-1', requestId: 'request-0001', modelId: 'user-qwen', runnerId: 'llama.cpp', params: { ctxSize: 8192 },
+        artifact: GGUF, phase: 'paused', pausedReason: 'The agent restarted during the download; press Run to resume.',
+    };
+    const v1 = {
+        version: 1,
+        deployment,
+        params: { 'user-qwen|llama.cpp': { ctxSize: 8192 }, 'user-qwen|ollama': { numCtx: 4096 } },
+        requests: { 'request-0001': { deploymentId: 'd-1', at: '2026-09-24T10:00:00.000Z' } },
+        registry: [{ id: 'user-qwen', displayName: 'Qwen', sources: { 'llama.cpp': GGUF, ollama: OLLAMA } }],
+        ollamaPulls: { 'qwen3:0.6b': [`sha256:${'c'.repeat(64)}`] },
+    };
+    const store = tempStore(t, v1);
+    const state = store.load();
+    assert.equal(STATE_VERSION, 1);
+    assert.equal(state.version, 1);
+    assert.deepEqual(state.registry, [{ id: 'user-qwen', displayName: 'Qwen', sources: { gguf: GGUF, ollama: OLLAMA } }]);
+    assert.deepEqual(state.deployment, deployment);
+    assert.deepEqual(state.params, v1.params);
+    assert.deepEqual(state.requests, v1.requests);
+    assert.deepEqual(state.ollamaPulls, v1.ollamaPulls);
+    // The migrated entry is a valid catalog entry, so it is not silently skipped.
+    assert.deepEqual(mergeCatalog([], state.registry).map((model) => model.id), ['user-qwen']);
+    // Saving and loading again changes nothing.
+    store.save(state);
+    assert.deepEqual(store.load(), state);
+});
+
+test('a state file from a newer controller is kept aside, not overwritten silently', (t) => {
+    const store = tempStore(t, { version: 99, registry: [{ id: 'x' }] });
+    const state = store.load();
+    assert.equal(state.version, STATE_VERSION);
+    assert.deepEqual(state.registry, []);
+    const kept = fs.readdirSync(path.dirname(store.file)).filter((name) => name.startsWith('controller.json.unsupported-'));
+    assert.equal(kept.length, 1);
+});

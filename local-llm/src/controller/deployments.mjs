@@ -3,9 +3,14 @@
 // processes owned here and never by a tool process.
 //
 //   idle -> downloading -> verifying -> starting -> ready -> stopping -> idle
-//   (llama.cpp)            plus paused and error
+//   (weights the controller fetches, such as a GGUF file)  plus paused and error
 //   idle -> starting -> downloading -> loading -> ready -> stopping -> idle
-//   (Ollama: the server runs first and pulls through /api/pull)
+//   (weights the runner fetches itself, such as an Ollama tag)
+//
+// Nothing here knows a runner by name. Each runner is an adapter
+// (src/runners/index.mjs) that brings its port, key, start-up pipeline, chat
+// model name and admission policy; each kind of weights has a store
+// (weightStores.mjs) keyed by the source's type.
 
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -13,40 +18,30 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { LocalLlmError } from '../errors.mjs';
-import { RUNNERS } from '../runners/index.mjs';
+import { RUNNERS, defaultPorts, runnerSummary } from '../runners/index.mjs';
 import { admit } from './admission.mjs';
-import { loadSeedCatalog, mergeCatalog, validateModel } from './catalog.mjs';
+import { WEIGHT_FORMATS, loadSeedCatalog, mergeCatalog, validateModel } from './catalog.mjs';
 import { createCommandQueue } from './commandQueue.mjs';
 import {
     DownloadError,
-    artifactPaths,
     downloadArtifact,
     inspectArtifact,
     removeArtifact,
     resolveHuggingFaceArtifact,
 } from './downloader.mjs';
 import { readSnapshot } from './hardware.mjs';
-import { deleteOllamaModel, deleteOllamaPartials, partialPullBytes, readOllamaManifest } from './ollamaStore.mjs';
 import { createLogBuffer, parseRunnerReport, startRunnerProcess } from './runnerProcess.mjs';
 import { createStateStore, reconcileAfterRestart } from './stateStore.mjs';
+import { createWeightStores } from './weightStores.mjs';
 import { DRAIN_QUEUE_WAIT_MS, DRAIN_RUNNER_GRACE_MS } from '../drainBudget.mjs';
 
 const ACTIVE_PHASES = new Set(['downloading', 'verifying', 'starting', 'loading', 'ready', 'stopping']);
 const TRANSFER_PHASES = new Set(['downloading', 'verifying']);
 const REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
-const OLLAMA_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
-const DEFAULT_PORTS = Object.freeze({ 'llama.cpp': 18080, ollama: 18434 });
 const PROBE_TIMEOUT_MS = 10_000;
 
 function paramsKey(modelId, runnerId) {
     return `${modelId}|${runnerId}`;
-}
-
-function artifactKey(runnerId, artifact) {
-    if (!artifact) return null;
-    return artifact.type === 'ollama'
-        ? `ollama:${artifact.tag}`
-        : `gguf:${artifact.repo}@${artifact.commit}/${artifact.file}`;
 }
 
 // A stop, cancel or drain that lands between two awaited steps must not start
@@ -77,7 +72,7 @@ export function createController({
     resolveHf = resolveHuggingFaceArtifact,
     startRunner = startRunnerProcess,
     fetchImpl = globalThis.fetch,
-    ports = DEFAULT_PORTS,
+    ports = defaultPorts(runners),
     apiKeyFactory = () => crypto.randomBytes(32).toString('base64url'),
     readyTimeoutMs = 20 * 60_000,
     stopGraceMs = 10_000,
@@ -85,12 +80,10 @@ export function createController({
     detectRunner = (runner) => runner.detect({ spawnSync }),
     now = () => new Date(),
 } = {}) {
-    const ggufRoot = path.join(dataDir, 'models', 'gguf');
-    const ollamaModels = path.join(dataDir, 'models', 'ollama');
     const log = createLogBuffer({ file: path.join(dataDir, 'logs', 'runner.log') });
     const queue = createCommandQueue();
     const state = reconcileAfterRestart(stateStore.load(), now().toISOString());
-    const detected = {};
+    let detected = {};
     let job = null;
     let runner = null;
     let draining = false;
@@ -100,6 +93,19 @@ export function createController({
     // Log sequence number before the current runner started: its report is
     // read only from lines after it, never from a previous runner's output.
     let runnerLogStart = 0;
+
+    const stores = createWeightStores({
+        dataDir,
+        env,
+        hfBaseUrl,
+        inspect,
+        download,
+        remove,
+        resolveHf,
+        state: () => state,
+        save: () => save(),
+        activeArtifact: () => (job !== null ? state.deployment?.artifact ?? null : null),
+    });
 
     // A drain has a fixed time budget (drainBudget.mjs); a Stop gives the
     // runner the full grace period.
@@ -132,9 +138,30 @@ export function createController({
         return model;
     }
 
+    function storeFor(source) {
+        const store = source && Object.hasOwn(stores, source.type) ? stores[source.type] : null;
+        if (!store) throw new LocalLlmError('invalid_model', `No weight store for source type '${source?.type}'.`);
+        return store;
+    }
+
+    // The artifact identity: runners that read the same file share it.
+    function artifactKey(source) {
+        return source ? storeFor(source).key(source) : null;
+    }
+
+    // The weights a runner reads for a model: the source of its weight format.
+    function sourceFor(model, definition) {
+        return model.sources[definition.weightFormat];
+    }
+
     function runnerInfo(id) {
         if (!detected[id]) detected[id] = detectRunner(runners[id]);
         return detected[id];
+    }
+
+    // After a runner is installed or removed while the agent runs.
+    function redetectRunners() {
+        detected = {};
     }
 
     function setPhase(phase, extra = {}) {
@@ -149,28 +176,12 @@ export function createController({
     function inUse(key) {
         const deployment = state.deployment;
         if (!deployment || !key) return false;
-        return artifactKey(deployment.runnerId, deployment.artifact) === key
+        return artifactKey(deployment.artifact) === key
             && (ACTIVE_PHASES.has(deployment.phase) || job !== null);
     }
 
-    async function downloadState(model, runnerId) {
-        const source = model.sources[runnerId];
-        if (!source) return null;
-        if (source.type === 'huggingface') {
-            if (!source.commit) return { state: 'unpinned', bytes: 0, total: null };
-            const inspected = await inspect({ root: ggufRoot, artifact: source });
-            return { ...inspected, total: source.size };
-        }
-        let manifest;
-        try {
-            manifest = readOllamaManifest(ollamaModels, source.tag);
-        } catch (error) {
-            if (error?.code !== 'invalid_manifest') throw error;
-            manifest = null;
-        }
-        if (manifest?.complete) return { state: 'complete', bytes: manifest.size, total: manifest.size };
-        const partial = partialPullBytes(ollamaModels, state.ollamaPulls?.[source.tag] || []);
-        return { state: partial ? 'partial' : 'absent', bytes: partial, total: source.size ?? null };
+    async function weightsState(source) {
+        return source ? storeFor(source).state(source) : null;
     }
 
     function effectiveParams(model, runnerId, override) {
@@ -193,7 +204,7 @@ export function createController({
     async function previewRun({ modelId, runnerId, params } = {}, snap) {
         const model = findModel(modelId);
         const definition = getRunner(runnerId);
-        const source = model.sources[runnerId] || (runnerId === 'vllm' ? model.sources['llama.cpp'] : undefined);
+        const source = sourceFor(model, definition);
         if (!definition.supported || !source) {
             return { modelId, runnerId, params: null, context: null,
                 admission: admit({ runner: definition, model, source, params: {}, snapshot: snap }) };
@@ -204,7 +215,7 @@ export function createController({
         } catch (error) {
             return { modelId, runnerId, error: error.message, field: error.details?.field ?? null };
         }
-        const disk = await downloadState(model, runnerId);
+        const disk = await weightsState(source);
         const remaining = disk?.total ? Math.max(0, disk.total - (disk.bytes || 0)) : 0;
         return {
             modelId,
@@ -218,29 +229,36 @@ export function createController({
     async function overview({ preview = null } = {}) {
         const snap = await snapshot();
         const runnerList = Object.values(runners).map((definition) => ({
-            id: definition.id,
-            displayName: definition.displayName,
-            weightFormat: definition.weightFormat,
-            pinnedVersion: definition.pinnedVersion,
-            supported: definition.supported,
-            paramSchema: definition.paramSchema,
+            ...runnerSummary(definition),
             ...runnerInfo(definition.id),
         }));
         const models = [];
         for (const model of catalog()) {
+            // One entry per weight format: runners that read it share the download.
+            const weights = {};
+            for (const [format, source] of Object.entries(model.sources)) {
+                weights[format] = {
+                    label: WEIGHT_FORMATS[format]?.label || format,
+                    size: source?.size ?? null,
+                    download: await weightsState(source),
+                    runners: Object.values(runners)
+                        .filter((definition) => definition.supported && definition.weightFormat === format)
+                        .map((definition) => definition.id),
+                };
+            }
             const perRunner = {};
             for (const definition of Object.values(runners)) {
-                const source = model.sources[definition.id]
-                    || (definition.id === 'vllm' ? model.sources['llama.cpp'] : undefined);
-                if (!source && !['vllm', 'lmstudio'].includes(definition.id)) continue;
+                const source = sourceFor(model, definition);
+                if (!source) continue;
                 let params = null;
                 let paramError = null;
                 if (definition.supported) {
                     try { params = effectiveParams(model, definition.id); } catch (error) { paramError = error.message; }
                 }
-                const disk = source && definition.supported ? await downloadState(model, definition.id) : null;
+                const disk = definition.supported ? weights[definition.weightFormat].download : null;
                 const remaining = disk && disk.total ? Math.max(0, disk.total - (disk.bytes || 0)) : 0;
                 perRunner[definition.id] = {
+                    format: definition.weightFormat,
                     size: source?.size ?? null,
                     download: disk,
                     params,
@@ -265,6 +283,7 @@ export function createController({
                 seed: model.seed,
                 sources: model.sources,
                 validated: model.validated,
+                weights,
                 runners: perRunner,
             });
         }
@@ -286,14 +305,15 @@ export function createController({
             const snap = await snapshot();
             gpu = snap.gpu;
         } catch {}
-        const definition = deployment ? runners[deployment.runnerId] : null;
+        const definition = deployment && Object.hasOwn(runners, deployment.runnerId) ? runners[deployment.runnerId] : null;
+        const parseReport = definition?.parseReport || parseRunnerReport;
         return {
             phase: deployment?.phase || 'idle',
             deployment,
             logs: lines,
             nextSeq: log.seq,
             gpu,
-            runnerReport: parseRunnerReport(log.all().filter((line) => line.seq > runnerLogStart)),
+            runnerReport: parseReport(log.all().filter((line) => line.seq > runnerLogStart)),
             context: deployment && definition?.describeContext ? definition.describeContext(deployment.params) : null,
             lastCompletion,
         };
@@ -325,15 +345,14 @@ export function createController({
         if (!deployment || deployment.phase !== 'ready' || !runner?.running) {
             throw new LocalLlmError('not_ready', 'No local model is ready. Run one from Settings > Agents > Local LLMs.');
         }
+        const definition = getRunner(deployment.runnerId);
         return {
             runnerId: deployment.runnerId,
             modelId: deployment.modelId,
             baseUrl: `http://127.0.0.1:${runner.port}`,
             apiKey: runner.apiKey || null,
-            model: deployment.runnerId === 'ollama' ? deployment.artifact.tag : deployment.modelId,
-            requestOptions: deployment.runnerId === 'ollama'
-                ? getRunner('ollama').requestOptions?.(deployment.params) ?? null
-                : null,
+            model: definition.chatModel(deployment),
+            requestOptions: definition.requestOptions?.(deployment.params) ?? null,
         };
     }
 
@@ -368,7 +387,7 @@ export function createController({
         };
     }
 
-    function launchRunner(deployment, launch, apiKey) {
+    function launchRunner(deployment, launch, apiKey, port) {
         fs.mkdirSync(path.join(dataDir, 'home'), { recursive: true });
         log.addSecret(apiKey);
         runnerLogStart = log.seq;
@@ -377,7 +396,7 @@ export function createController({
         const process = startRunner({ command: launch.command, args: launch.args, env: runnerEnv(launch.env), log });
         runner = {
             pid: process.pid,
-            port: ports[deployment.runnerId],
+            port,
             apiKey,
             deploymentId: deployment.id,
             exited: process.exited,
@@ -426,144 +445,75 @@ export function createController({
         }
     }
 
-    async function runLlamaCpp(deployment, model, signal) {
-        setPhase('downloading');
-        const result = await download({
+    // What a runner's start-up pipeline may use. The adapter launches its
+    // process through `launch` (an argv and a minimal environment), waits
+    // with `waitForHttp`, and may report phases and progress for weights it
+    // fetches itself; the controller owns the process and the state.
+    function startContext(deployment, model, signal, weights) {
+        const definition = getRunner(deployment.runnerId);
+        const port = ports[deployment.runnerId];
+        const apiKey = definition.apiKey ? apiKeyFactory() : null;
+        return Object.freeze({
+            runner: definition,
+            model,
+            params: deployment.params,
             artifact: deployment.artifact,
-            root: ggufRoot,
-            token: env.HF_TOKEN || '',
-            baseUrl: hfBaseUrl,
-            onProgress: updateProgress,
+            weights,
+            port,
+            apiKey,
+            dataDir,
             signal,
-        });
-        throwIfAborted(signal);
-        deployment.download = {
-            ...(deployment.download || {}),
-            bytes: deployment.artifact.size,
-            total: deployment.artifact.size,
-            transferred: result.bytesTransferred,
-        };
-        await recheckAdmission(deployment, model);
-        throwIfAborted(signal);
-        setPhase('starting');
-        const definition = getRunner('llama.cpp');
-        const apiKey = apiKeyFactory();
-        const launch = definition.buildLaunch({
-            artifactPath: result.path, params: deployment.params, port: ports['llama.cpp'], apiKey, model,
-        });
-        const process = launchRunner(deployment, launch, apiKey);
-        const base = `http://127.0.0.1:${process.port}`;
-        // /health answers 503 while the model loads and 200 once it serves.
-        await waitForHttp(`${base}/health`, { signal, process });
-        await waitForHttp(`${base}/v1/models`, { headers: { authorization: `Bearer ${apiKey}` }, signal, process });
-        setPhase('ready', { runner: { pid: process.pid, port: process.port, startedAt: now().toISOString() } });
-    }
-
-    // Remember which blobs a tag's pull touched, so its partial files can be
-    // counted and deleted per tag rather than across every Ollama model.
-    function recordPullDigest(tag, digest) {
-        state.ollamaPulls ||= {};
-        const digests = state.ollamaPulls[tag] ||= [];
-        if (digests.includes(digest)) return;
-        digests.push(digest);
-        save();
-    }
-
-    async function streamOllamaPull(base, tag, signal) {
-        const response = await fetchImpl(`${base}/api/pull`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ model: tag, stream: true }),
-            signal,
-        });
-        if (!response.ok) throw new LocalLlmError('pull_failed', `Ollama pull failed with HTTP ${response.status}.`);
-        const layers = new Map();
-        const started = Date.now();
-        let buffer = '';
-        const decoder = new TextDecoder();
-        for await (const chunk of response.body) {
-            buffer += decoder.decode(chunk, { stream: true });
-            let newline;
-            while ((newline = buffer.indexOf('\n')) >= 0) {
-                const line = buffer.slice(0, newline).trim();
-                buffer = buffer.slice(newline + 1);
-                if (!line) continue;
-                const event = JSON.parse(line);
-                if (event.error) throw new LocalLlmError('pull_failed', `Ollama pull failed: ${event.error}`);
-                if (typeof event.digest === 'string' && OLLAMA_DIGEST_RE.test(event.digest)) recordPullDigest(tag, event.digest);
-                if (event.digest && event.total) layers.set(event.digest, { total: event.total, completed: event.completed || 0 });
-                const total = [...layers.values()].reduce((sum, layer) => sum + layer.total, 0);
-                const bytes = [...layers.values()].reduce((sum, layer) => sum + layer.completed, 0);
-                const elapsed = Math.max(1, (Date.now() - started) / 1000);
-                updateProgress({ bytes, total, rate: bytes / elapsed, etaSeconds: null, transferred: bytes });
-                if (event.status === 'success') return;
-            }
-        }
-        throw new LocalLlmError('pull_failed', 'The Ollama pull stream ended before success.');
-    }
-
-    async function runOllama(deployment, model, signal) {
-        setPhase('starting');
-        const definition = getRunner('ollama');
-        const launch = definition.buildLaunch({ params: deployment.params, port: ports.ollama, dataDir, model });
-        const process = launchRunner(deployment, launch, null);
-        const base = `http://127.0.0.1:${process.port}`;
-        await waitForHttp(`${base}/api/version`, { signal, process });
-        const tag = deployment.artifact.tag;
-        const cached = readOllamaManifest(ollamaModels, tag);
-        if (!cached?.complete) {
-            setPhase('downloading');
-            await streamOllamaPull(base, tag, signal);
-        } else {
-            deployment.download = { bytes: cached.size, total: cached.size, rate: 0, etaSeconds: null, transferred: 0 };
-        }
-        const pulled = readOllamaManifest(ollamaModels, tag);
-        if (!pulled?.complete) throw new LocalLlmError('pull_failed', `Ollama reports ${tag} but its files are incomplete.`);
-        if (state.ollamaPulls?.[tag]) {
-            delete state.ollamaPulls[tag];
-            save();
-        }
-        if (deployment.artifact.manifestDigest && pulled.manifestDigest !== deployment.artifact.manifestDigest) {
-            throw new LocalLlmError('identity_changed', `The Ollama tag ${tag} now resolves to ${pulled.manifestDigest}, `
-                + `not the pinned ${deployment.artifact.manifestDigest}; update the model entry to accept it.`);
-        }
-        deployment.resolved = { manifestDigest: pulled.manifestDigest, blobs: pulled.blobs.map((blob) => blob.digest) };
-        throwIfAborted(signal);
-        await recheckAdmission(deployment, model);
-        throwIfAborted(signal);
-        setPhase('loading');
-        const options = definition.requestOptions(deployment.params);
-        const load = await fetchImpl(`${base}/api/generate`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ model: tag, prompt: '', stream: false, ...options }),
-            signal,
-        });
-        if (!load.ok) throw new LocalLlmError('load_failed', `Ollama could not load ${tag} (HTTP ${load.status}).`);
-        await load.json().catch(() => null);
-        const ps = await (await fetchImpl(`${base}/api/ps`, { signal })).json();
-        const loaded = (ps.models || []).find((entry) => entry.name === tag || entry.model === tag);
-        if (!loaded) throw new LocalLlmError('load_failed', `Ollama did not keep ${tag} loaded.`);
-        setPhase('ready', {
-            runner: {
-                pid: process.pid,
-                port: process.port,
-                startedAt: now().toISOString(),
-                ollama: { sizeBytes: loaded.size, sizeVramBytes: loaded.size_vram, contextLength: loaded.context_length },
+            fetch: fetchImpl,
+            store: storeFor(deployment.artifact),
+            launch: (spec) => launchRunner(deployment, spec, apiKey, port),
+            waitForHttp: (url, options = {}) => waitForHttp(url, { ...options, signal }),
+            setPhase: (phase) => setPhase(phase),
+            progress: updateProgress,
+            record: (fields) => {
+                Object.assign(deployment, fields);
+                save();
             },
+            recheckAdmission: () => recheckAdmission(deployment, model),
+            throwIfAborted: () => throwIfAborted(signal),
         });
+    }
+
+    async function runPipeline(deployment, model, signal) {
+        const definition = getRunner(deployment.runnerId);
+        const store = storeFor(deployment.artifact);
+        let weights = null;
+        if (store.fetchedBy === 'controller') {
+            setPhase('downloading');
+            const fetched = await store.fetch({ artifact: deployment.artifact, signal, onProgress: updateProgress });
+            throwIfAborted(signal);
+            deployment.download = {
+                ...(deployment.download || {}),
+                bytes: fetched.bytes,
+                total: fetched.bytes,
+                transferred: fetched.bytesTransferred,
+            };
+            weights = { path: fetched.path };
+            await recheckAdmission(deployment, model);
+            throwIfAborted(signal);
+        }
+        setPhase('starting');
+        const details = await definition.start(startContext(deployment, model, signal, weights));
+        throwIfAborted(signal);
+        if (!runner || runner.deploymentId !== deployment.id) {
+            throw new LocalLlmError('runner_exited', 'The runner is not running after its start-up.');
+        }
+        setPhase('ready', { runner: { pid: runner.pid, port: runner.port, startedAt: now().toISOString(), ...(details || {}) } });
     }
 
     function startJob(deployment, model) {
         const controller = new AbortController();
-        const pipeline = deployment.runnerId === 'ollama' ? runOllama : runLlamaCpp;
         const current = {
             deploymentId: deployment.id,
             abort: controller,
             cancelReason: null,
             promise: null,
         };
-        current.promise = pipeline(deployment, model, controller.signal)
+        current.promise = runPipeline(deployment, model, controller.signal)
             .catch(async (error) => {
                 const live = state.deployment;
                 if (!live || live.id !== deployment.id) return;
@@ -631,13 +581,14 @@ export function createController({
             }
             const model = findModel(modelId);
             const definition = getRunner(runnerId);
+            const source = sourceFor(model, definition);
             if (!definition.supported) {
-                const result = admit({ runner: definition, model, source: model.sources['llama.cpp'], params: {}, snapshot: {} });
+                const result = admit({ runner: definition, model, source, params: {}, snapshot: {} });
                 throw new LocalLlmError('runner_unsupported', result.reason);
             }
-            const source = model.sources[runnerId];
             if (!source) throw new LocalLlmError('no_source', `${model.displayName} has no ${definition.displayName} source.`);
-            if (source.type === 'huggingface' && !source.commit) {
+            const store = storeFor(source);
+            if (!store.isPinned(source)) {
                 throw new LocalLlmError('unpinned', 'The model source is not pinned to a commit; update the model entry.');
             }
             const normalized = effectiveParams(model, runnerId, params);
@@ -649,7 +600,7 @@ export function createController({
                 }
                 await stopEverything('replace');
             }
-            const disk = await downloadState(model, runnerId);
+            const disk = await weightsState(source);
             const remaining = disk?.total ? Math.max(0, disk.total - (disk.bytes || 0)) : 0;
             const admission = admit({
                 runner: definition, model, source, params: normalized, snapshot: await snapshot(),
@@ -671,7 +622,7 @@ export function createController({
                 runnerId,
                 params: normalized,
                 artifact: structuredClone(source),
-                phase: runnerId === 'ollama' ? 'starting' : 'downloading',
+                phase: store.fetchedBy === 'runner' ? 'starting' : 'downloading',
                 admission,
                 download: { bytes: disk?.bytes || 0, total: disk?.total ?? null, rate: 0, etaSeconds: null, transferred: 0 },
                 error: null,
@@ -710,56 +661,30 @@ export function createController({
         });
     }
 
-    function ollamaManifestDigests(tag) {
-        try {
-            return readOllamaManifest(ollamaModels, tag)?.blobs.map((blob) => blob.digest) || [];
-        } catch (error) {
-            if (error?.code === 'invalid_manifest') return [];
-            throw error;
+    // Weights are named by format, or by a runner, which stands for the
+    // format it reads: every runner of that format loses them.
+    function weightsFormat({ runnerId, format }) {
+        if (format !== undefined) {
+            if (typeof format !== 'string' || !Object.hasOwn(WEIGHT_FORMATS, format)) {
+                throw new LocalLlmError('invalid_request', `Unknown weight format: ${String(format)}`);
+            }
+            return format;
         }
+        return getRunner(runnerId).weightFormat;
     }
 
-    function deleteWeights({ modelId, runnerId } = {}) {
+    function deleteWeights({ modelId, runnerId, format } = {}) {
         return queue.run(async () => {
             const model = findModel(modelId);
-            const source = model.sources[runnerId];
-            if (!source) throw new LocalLlmError('no_source', `${model.displayName} has no ${runnerId} source.`);
-            if (inUse(artifactKey(runnerId, source))) {
+            const weightFormat = weightsFormat({ runnerId, format });
+            const source = model.sources[weightFormat];
+            if (!source) throw new LocalLlmError('no_source', `${model.displayName} has no ${weightFormat} weights.`);
+            if (inUse(artifactKey(source))) {
                 throw new LocalLlmError('in_use', 'These weights are in use; stop the model or cancel the download first.');
             }
-            let freed;
-            if (source.type === 'huggingface') {
-                if (!source.commit) return { freedBytes: 0 };
-                freed = await remove({ root: ggufRoot, artifact: source });
-            } else {
-                const pulls = state.ollamaPulls || {};
-                const claimedByOthers = Object.entries(pulls)
-                    .filter(([tag]) => tag !== source.tag)
-                    .flatMap(([, digests]) => digests);
-                // Another tag's running pull may share blobs with this one.
-                const activeTag = job !== null && state.deployment?.artifact?.type === 'ollama'
-                    ? state.deployment.artifact.tag
-                    : null;
-                if (activeTag && activeTag !== source.tag) {
-                    const touched = new Set([...(pulls[source.tag] || []), ...ollamaManifestDigests(source.tag)]);
-                    if ((pulls[activeTag] || []).some((digest) => touched.has(digest))) {
-                        throw new LocalLlmError('in_use', `The running ${activeTag} download uses some of these files; `
-                            + 'wait for it to finish or cancel it first.');
-                    }
-                }
-                freed = deleteOllamaModel(ollamaModels, source.tag)
-                    + deleteOllamaPartials(ollamaModels, {
-                        digests: pulls[source.tag] || [],
-                        claimedByOthers,
-                        keepOrphans: activeTag !== null,
-                    });
-                if (pulls[source.tag]) {
-                    delete pulls[source.tag];
-                    save();
-                }
-            }
+            const freed = await storeFor(source).remove(source);
             const deployment = state.deployment;
-            if (deployment && artifactKey(deployment.runnerId, deployment.artifact) === artifactKey(runnerId, source)
+            if (deployment && artifactKey(deployment.artifact) === artifactKey(source)
                 && ['paused', 'error', 'idle'].includes(deployment.phase)) {
                 deployment.phase = 'idle';
                 deployment.download = { bytes: 0, total: deployment.download?.total ?? null, rate: 0, etaSeconds: null, transferred: 0 };
@@ -771,16 +696,8 @@ export function createController({
 
     async function pinSources(entry) {
         const sources = { ...entry.sources };
-        for (const [runnerId, source] of Object.entries(sources)) {
-            if (source?.type !== 'huggingface' || source.commit) continue;
-            const resolved = await resolveHf({
-                repo: source.repo,
-                file: source.file,
-                revision: source.revision || 'main',
-                token: env.HF_TOKEN || '',
-                baseUrl: hfBaseUrl,
-            });
-            sources[runnerId] = { ...source, commit: resolved.commit, size: resolved.size, sha256: resolved.sha256 };
+        for (const [format, source] of Object.entries(sources)) {
+            sources[format] = await storeFor(source).pin(source);
         }
         return { ...entry, sources };
     }
@@ -801,8 +718,8 @@ export function createController({
     }
 
     function assertModelNotInUse(model) {
-        for (const [runnerId, source] of Object.entries(model.sources)) {
-            if (inUse(artifactKey(runnerId, source))) {
+        for (const source of Object.values(model.sources)) {
+            if (inUse(artifactKey(source))) {
                 throw new LocalLlmError('in_use', 'This model is in use; stop it or cancel its download first.');
             }
         }
@@ -814,7 +731,7 @@ export function createController({
     async function addModel(entry) {
         const draft = validateModel(entry, { seed: false });
         assertNewModelId(draft.id);
-        const pinned = validateModel(await pinSources(entry), { seed: false });
+        const pinned = validateModel(await pinSources(draft), { seed: false });
         return queue.run(async () => {
             assertNewModelId(pinned.id);
             state.registry.push(JSON.parse(JSON.stringify({ ...pinned, seed: undefined })));
@@ -823,16 +740,12 @@ export function createController({
         });
     }
 
-    // An update keeps a source's pinned commit while its repository, file and
-    // revision are unchanged; it never silently re-resolves a branch.
+    // An update keeps a source's pinned identity while it is otherwise
+    // unchanged; it never silently re-resolves a branch.
     function carryPins(candidate, existing) {
         const sources = { ...candidate.sources };
-        for (const [runnerId, source] of Object.entries(sources)) {
-            const previous = existing.sources[runnerId];
-            if (source.type !== 'huggingface' || source.commit || previous?.type !== 'huggingface' || !previous.commit) continue;
-            if (source.repo === previous.repo && source.file === previous.file && source.revision === previous.revision) {
-                sources[runnerId] = { ...source, commit: previous.commit, size: previous.size, sha256: previous.sha256 };
-            }
+        for (const [format, source] of Object.entries(sources)) {
+            sources[format] = storeFor(source).carryPin(source, existing.sources[format]);
         }
         return { ...candidate, sources };
     }
@@ -847,13 +760,13 @@ export function createController({
             assertModelNotInUse(current);
             // A changed or removed source must not leave its downloaded weights
             // behind without a model to delete them from.
-            for (const [runnerId, source] of Object.entries(current.sources)) {
-                const next = pinned.sources[runnerId];
-                if (next && artifactKey(runnerId, next) === artifactKey(runnerId, source)) continue;
-                const disk = await downloadState(current, runnerId);
+            for (const [format, source] of Object.entries(current.sources)) {
+                const next = pinned.sources[format];
+                if (next && artifactKey(next) === artifactKey(source)) continue;
+                const disk = await weightsState(source);
                 if (disk && disk.state !== 'absent' && disk.state !== 'unpinned') {
                     throw new LocalLlmError('weights_present',
-                        `Delete the downloaded ${runnerId} weights first; this change would leave them without a model.`);
+                        `Delete the downloaded ${format} weights first; this change would leave them without a model.`);
                 }
             }
             state.registry[index] = JSON.parse(JSON.stringify({ ...pinned, seed: undefined }));
@@ -870,13 +783,13 @@ export function createController({
                     'Only user models can be removed; seed entries are read-only.');
             }
             const model = validateModel(state.registry[index]);
-            for (const [runnerId, source] of Object.entries(model.sources)) {
-                if (inUse(artifactKey(runnerId, source))) {
+            for (const [format, source] of Object.entries(model.sources)) {
+                if (inUse(artifactKey(source))) {
                     throw new LocalLlmError('in_use', 'This model is in use; stop it or cancel its download first.');
                 }
-                const disk = await downloadState(model, runnerId);
+                const disk = await weightsState(source);
                 if (disk && disk.state !== 'absent' && disk.state !== 'unpinned') {
-                    throw new LocalLlmError('weights_present', `Delete the downloaded ${runnerId} weights first.`);
+                    throw new LocalLlmError('weights_present', `Delete the downloaded ${format} weights first.`);
                 }
             }
             state.registry.splice(index, 1);
@@ -930,8 +843,9 @@ export function createController({
         addModel,
         updateModel,
         removeModel,
+        redetectRunners,
         drain,
         get state() { return state; },
-        artifactPathsFor: (source) => artifactPaths({ root: ggufRoot, artifact: source }),
+        artifactPathsFor: (source) => stores.huggingface.paths(source),
     });
 }

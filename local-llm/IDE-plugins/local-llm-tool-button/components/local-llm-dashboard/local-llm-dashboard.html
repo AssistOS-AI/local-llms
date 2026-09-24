@@ -95,7 +95,7 @@
             <form class="local-llm-add-form" id="localLlmAddForm" data-llm-form="add" hidden>
                 <div>
                     <h3 class="settings-section-title">Add model</h3>
-                    <p class="settings-section-description">One GGUF file from a Hugging Face repository (for llama.cpp) or one Ollama library tag. The source is pinned to a commit when you add it; nothing is downloaded.</p>
+                    <p class="settings-section-description">One GGUF file from a Hugging Face repository (read by every GGUF runner, such as llama.cpp) or one Ollama library tag. The source is pinned to a commit when you add it; nothing is downloaded.</p>
                 </div>
                 <label class="local-llm-field">
                     <span class="form-label">Id</span>
@@ -125,7 +125,7 @@
                                    aria-label="Source"
                                    data-name="sourceKind"
                                    data-selected="huggingface"
-                                   data-options="%5B%7B%22value%22%3A%22huggingface%22%2C%22label%22%3A%22Hugging%20Face%20GGUF%20(llama.cpp)%22%7D%2C%7B%22value%22%3A%22ollama%22%2C%22label%22%3A%22Ollama%20library%20tag%22%7D%5D"></custom-select>
+                                   data-options="%5B%7B%22value%22%3A%22huggingface%22%2C%22label%22%3A%22Hugging%20Face%20GGUF%20file%22%7D%2C%7B%22value%22%3A%22ollama%22%2C%22label%22%3A%22Ollama%20library%20tag%22%7D%5D"></custom-select>
                 </label>
                 <label class="local-llm-field" data-source-field="huggingface">
                     <span class="form-label">Repository</span>

@@ -18,19 +18,23 @@ This specification defines how a model moves from a catalog entry to a running d
 
 | Source | Where | Editable |
 | --- | --- | --- |
-| Seed catalog | `catalog/models.json`, schema `local-llm.catalog/v1` (`catalog/schema.json`) | No; ships with the agent |
+| Seed catalog | `catalog/models.json`, schema `local-llm.catalog/v2` (`catalog/schema.json`) | No; ships with the agent |
 | User registry | `state.registry` in `/data/state/controller.json` | Yes, through `local_llm_model_add`, `_update`, `_remove` |
 
-Every entry is validated by `validateModel` (`src/controller/catalog.mjs`). Ids are 2–64 lowercase characters. A Hugging Face source names one `.gguf` file in an `owner/name` repository. An Ollama source names a library tag. Seed Hugging Face sources must pin `commit`, `size` and `sha256`. User sources may name a branch; `model_add` resolves it to a commit, size and LFS sha256 through the Hugging Face API before the entry is stored. A user entry cannot reuse a seed id, and an invalid stored entry is skipped rather than breaking the catalog.
+Every entry is validated by `validateModel` (`src/controller/catalog.mjs`). Ids are 2–64 lowercase characters. Sources are keyed by weight format, not by runner: `gguf` is a Hugging Face source naming one `.gguf` file in an `owner/name` repository, and `ollama` is an Ollama library tag. Every runner reads exactly one format (its adapter's `weightFormat`), so runners that read the same format share one download and one Delete weights. `recommended` and `validated` stay keyed by runner, because parameters and measurements are per runner. An Ollama source names a library tag. Seed Hugging Face sources must pin `commit`, `size` and `sha256`. User sources may name a branch; `model_add` resolves it to a commit, size and LFS sha256 through the Hugging Face API before the entry is stored. A user entry cannot reuse a seed id, and an invalid stored entry is skipped rather than breaking the catalog.
+
+Registries written before catalog v2 keyed sources by runner id. When the state file loads, `migrateModelEntry` rewrites each entry: `llama.cpp` becomes `gguf` (an entry whose only GGUF was under the removed `lmstudio` key, or the old `vllm` fallback, keeps it as `gguf`), and LM Studio's `recommended` and `validated` entries are dropped. The migration is idempotent and never throws. The state file stays at version 1: a controller from before catalog v2 then reads migrated entries as invalid and hides them, but keeps and saves them, so a downgrade and a later upgrade lose no user model. A state file of any other version is kept aside as `controller.json.unsupported-<time>` instead of being overwritten.
 
 ### Weights on demand
 
 Nothing is downloaded at enable, at restart, when the Local LLMs dashboard is opened, or when a model is added. Weights are fetched only by `local_llm_run`.
 
-| Runner | Download |
+Each source type has a weight store (`src/controller/weightStores.mjs`) that pins, inspects, fetches and deletes it and names its artifact identity; runners that read the same file share that identity, so no runner may delete weights another runner is using.
+
+| Format (source type) | Download |
 | --- | --- |
-| llama.cpp | `src/controller/downloader.mjs` fetches `/<repo>/resolve/<commit>/<file>` into `/data/models/gguf/<repo>/<commit>/<file>.partial` (the file's whole relative path, so same-named files in different folders never share a location), with an identity sidecar `<file>.partial.json`. It resumes with `Range`, restarts on a 200 reply, discards the partial on an invalid `Content-Range` or a changed identity, re-resolves expired redirects, refuses to start when free space is below the remaining bytes plus 5 %, pauses on `ENOSPC`, and renames the file into place only after the sha256 matches. |
-| Ollama | The controller starts `ollama serve` with `OLLAMA_MODELS=/data/models/ollama` and streams `/api/pull`. When the catalog pins `manifestDigest`, the stored manifest must hash to it. |
+| `gguf` (`huggingface`), fetched by the controller before the runner starts | `src/controller/downloader.mjs` fetches `/<repo>/resolve/<commit>/<file>` into `/data/models/gguf/<repo>/<commit>/<file>.partial` (the file's whole relative path, so same-named files in different folders never share a location), with an identity sidecar `<file>.partial.json`. It resumes with `Range`, restarts on a 200 reply, discards the partial on an invalid `Content-Range` or a changed identity, re-resolves expired redirects, refuses to start when free space is below the remaining bytes plus 5 %, pauses on `ENOSPC`, and renames the file into place only after the sha256 matches. |
+| `ollama` (`ollama`), fetched by the runner | The Ollama adapter starts `ollama serve` with `OLLAMA_MODELS=/data/models/ollama` and streams `/api/pull`. When the catalog pins `manifestDigest`, the stored manifest must hash to it. |
 
 `HF_TOKEN`, when set in the agent profile, is sent as a Bearer header to the Hugging Face base URL and is never logged. Node's `fetch` drops the header when a redirect leaves that origin, so the signed CDN URL never receives it.
 

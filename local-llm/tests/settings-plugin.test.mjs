@@ -11,6 +11,8 @@ import {
     newRequestId,
     paramsFromForm,
     parseToolResult,
+    rememberRunners,
+    runnerLabel,
     runnerOptions,
     shouldPoll,
 } from '../IDE-plugins/local-llm-settings/local-llm-settings-model.js';
@@ -153,6 +155,29 @@ test('the parameter form is generated from the runner schema and read back as ty
     assert.equal(paramsFromForm(ollama, { flashAttention: 'false' }).params.flashAttention, false);
 });
 
+test('a field that takes a named value or a number is one text field that accepts either', () => {
+    const schema = { type: 'object', properties: {
+        gpu: { type: ['string', 'number'], enum: ['off', 'max'], minimum: 0, maximum: 1, default: 'max', title: 'GPU offload', description: 'x' },
+    } };
+    const [field] = fieldsFromSchema(schema, {});
+    assert.equal(field.kind, 'enumOrNumber');
+    assert.deepEqual(field.options.map((option) => option.value), ['off', 'max']);
+    assert.equal(field.min, 0);
+    assert.equal(field.max, 1);
+    assert.deepEqual(paramsFromForm([field], { gpu: 'off' }), { params: { gpu: 'off' }, errors: [] });
+    assert.deepEqual(paramsFromForm([field], { gpu: '0.5' }), { params: { gpu: 0.5 }, errors: [] });
+    assert.match(paramsFromForm([field], { gpu: '2' }).errors[0], /between 0 and 1/);
+    assert.match(paramsFromForm([field], { gpu: 'half' }).errors[0], /off, max or a number/);
+});
+
+test('runner labels come from the runners the agent reports', () => {
+    rememberRunners([{ id: 'ik_llama.cpp', displayName: 'ik_llama.cpp' }, { id: 'future', displayName: 'Future <runner>' }]);
+    assert.equal(runnerLabel('future'), 'Future <runner>');
+    assert.equal(runnerLabel('ollama'), 'Ollama');
+    assert.equal(runnerLabel('unknown-id'), 'unknown-id');
+    assert.equal(runnerLabel('lmstudio'), 'lmstudio', 'LM Studio is no longer a known runner');
+});
+
 test('runner options show every runner with its state, and a Run gets a fresh valid request id', () => {
     const overview = {
         runners: [
@@ -188,7 +213,7 @@ test('the Add model form builds a registry entry for a GGUF file or an Ollama ta
         displayName: 'Qwen3.6 35B A3B',
         license: 'Apache-2.0',
         architecture: 'moe',
-        sources: { 'llama.cpp': { type: 'huggingface', repo: 'unsloth/Qwen3.6-35B-A3B-GGUF', file: 'Qwen3.6-35B-A3B-UD-Q3_K_M.gguf', revision: 'main', quantization: 'UD-Q3_K_M' } },
+        sources: { gguf: { type: 'huggingface', repo: 'unsloth/Qwen3.6-35B-A3B-GGUF', file: 'Qwen3.6-35B-A3B-UD-Q3_K_M.gguf', revision: 'main', quantization: 'UD-Q3_K_M' } },
     });
     assert.deepEqual(modelEntryFromForm({ id: 'granite', sourceKind: 'ollama', tag: 'granite4:tiny-h', repo: 'ignored' }).sources, {
         ollama: { type: 'ollama', tag: 'granite4:tiny-h' },

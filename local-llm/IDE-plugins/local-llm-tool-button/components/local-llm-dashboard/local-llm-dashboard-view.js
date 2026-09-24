@@ -13,21 +13,27 @@ import {
     runnerLabel,
 } from '../../../local-llm-settings/local-llm-settings-model.js';
 
-export const TABLE_RUNNERS = Object.freeze(['llama.cpp', 'ollama']);
 export const ACTIVE_PHASES = new Set(['downloading', 'verifying', 'pulling', 'starting', 'loading', 'ready', 'stopping']);
 const DOWNLOAD_PHASES = new Set(['downloading', 'verifying', 'pulling', 'paused']);
 
-// Settings shown outside "Advanced": the ones that decide whether a model fits.
-const BASIC_PARAMS = Object.freeze({
-    'llama.cpp': Object.freeze(['ctxSize', 'nCpuMoe']),
-    ollama: Object.freeze(['numCtx']),
-});
-const MOE_ONLY_PARAMS = new Set(['nCpuMoe']);
+/** The runners that get a column in the Models table: those that can run here. */
+export function tableRunners(runners = []) {
+    return (Array.isArray(runners) ? runners : []).filter((runner) => runner?.supported);
+}
 
-/** Split a runner's form fields into the basic ones and the "Advanced" rest. */
-export function splitRunFields(fields = [], runnerId = '', model = null) {
-    const wanted = (BASIC_PARAMS[runnerId] || [])
-        .filter((name) => !MOE_ONLY_PARAMS.has(name) || model?.architecture === 'moe');
+function labelOf(runnerId, runners = []) {
+    return runners.find((runner) => runner.id === runnerId)?.displayName || runnerLabel(runnerId);
+}
+
+/**
+ * Split a runner's form fields into the basic ones and the "Advanced" rest.
+ * The runner names its basic fields (the ones that decide whether a model
+ * fits); those in `moeParams` show only for a mixture-of-experts model.
+ */
+export function splitRunFields(fields = [], runner = null, model = null) {
+    const moeOnly = new Set(runner?.moeParams || []);
+    const wanted = (runner?.basicParams || [])
+        .filter((name) => !moeOnly.has(name) || model?.architecture === 'moe');
     const basic = [];
     const advanced = [];
     for (const field of fields) (wanted.includes(field.name) ? basic : advanced).push(field);
@@ -156,8 +162,9 @@ function modelSizes(model) {
  * The models table. It has no buttons: a row selects its model, and the
  * detail panel holds the model's actions and its one Run button.
  */
-export function modelsTableHtml(models = [], { selectedId = '', activeModelId = '' } = {}) {
+export function modelsTableHtml(models = [], { selectedId = '', activeModelId = '', runners = [] } = {}) {
     if (!models.length) return '<div class="settings-empty-state">No models in the catalog.</div>';
+    const columns = tableRunners(runners);
     const rows = models.map((model) => {
         const selected = model.id === selectedId;
         return `
@@ -171,7 +178,7 @@ export function modelsTableHtml(models = [], { selectedId = '', activeModelId = 
                     <div class="settings-card-meta">${escapeHtml(modelSizes(model) || model.id)}</div>
                 </td>
                 <td>${escapeHtml(model.license || '—')}</td>
-                ${TABLE_RUNNERS.map((runnerId) => runnerCell(model.runners?.[runnerId])).join('')}
+                ${columns.map((runner) => runnerCell(model.runners?.[runner.id])).join('')}
             </tr>`;
     }).join('');
     return `
@@ -181,8 +188,7 @@ export function modelsTableHtml(models = [], { selectedId = '', activeModelId = 
                     <tr>
                         <th scope="col">Model</th>
                         <th scope="col">Licence</th>
-                        <th scope="col">llama.cpp</th>
-                        <th scope="col">Ollama</th>
+                        ${columns.map((runner) => `<th scope="col">${escapeHtml(labelOf(runner.id, runners))}</th>`).join('')}
                     </tr>
                 </thead>
                 <tbody>${rows}</tbody>
@@ -190,31 +196,42 @@ export function modelsTableHtml(models = [], { selectedId = '', activeModelId = 
         </div>`;
 }
 
-/** Whether any runner's weights of this model are on disk (downloaded or partial). */
+/** Whether any of this model's weights are on disk (downloaded or partial). */
 export function hasWeightsOnDisk(model) {
-    return Object.values(model?.runners || {}).some((entry) => ['complete', 'partial'].includes(entry?.download?.state));
+    const entries = model?.weights ? Object.values(model.weights) : Object.values(model?.runners || {});
+    return entries.some((entry) => ['complete', 'partial'].includes(entry?.download?.state));
 }
 
 /**
- * The selected model's heading and per-runner availability. Delete weights
- * sits next to each downloaded runner; an added model also gets Remove.
+ * The selected model's heading, its weights once per format (runners that
+ * read the same format share one download, so Delete weights sits there),
+ * and each supported runner's fit. An added model also gets Remove.
  */
 export function detailInfoHtml(model, { runners = [], activeModelId = '' } = {}) {
     if (!model) return '';
-    const byId = new Map(runners.map((runner) => [runner.id, runner]));
-    const rows = Object.entries(model.runners || {})
-        .filter(([runnerId]) => TABLE_RUNNERS.includes(runnerId) && byId.get(runnerId)?.supported !== false)
-        .map(([runnerId, entry]) => {
-            const deletable = entry.download && ['complete', 'partial'].includes(entry.download.state);
-            return `
+    const supported = new Set(tableRunners(runners).map((runner) => runner.id));
+    const weights = Object.entries(model.weights || {}).map(([format, entry]) => {
+        const deletable = entry.download && ['complete', 'partial'].includes(entry.download.state);
+        const readers = (entry.runners || []).filter((runnerId) => supported.has(runnerId))
+            .map((runnerId) => labelOf(runnerId, runners));
+        return `
                 <li class="local-llm-runner-item">
                     <div>
-                        <div class="settings-card-title">${escapeHtml(runnerLabel(runnerId))}</div>
-                        <div class="settings-card-meta">${escapeHtml(downloadLabel(entry.download, entry.size))} · ${escapeHtml(admissionLabel(entry.admission))}</div>
+                        <div class="settings-card-title">${escapeHtml(entry.label || format)}</div>
+                        <div class="settings-card-meta">${escapeHtml(downloadLabel(entry.download, entry.size))}${readers.length ? ` · used by ${escapeHtml(readers.join(', '))}` : ''}</div>
                     </div>
-                    ${deletable ? `<button type="button" class="gray-button" data-local-action="deleteWeights ${escapeHtml(model.id)} ${escapeHtml(runnerId)}">Delete weights</button>` : ''}
+                    ${deletable ? `<button type="button" class="gray-button" data-local-action="deleteWeights ${escapeHtml(model.id)} ${escapeHtml(format)}">Delete weights</button>` : ''}
                 </li>`;
-        }).join('');
+    }).join('');
+    const fits = Object.entries(model.runners || {})
+        .filter(([runnerId]) => supported.has(runnerId))
+        .map(([runnerId, entry]) => `
+                <li class="local-llm-runner-item">
+                    <div>
+                        <div class="settings-card-title">${escapeHtml(labelOf(runnerId, runners))}</div>
+                        <div class="settings-card-meta">${escapeHtml(admissionLabel(entry.admission))}</div>
+                    </div>
+                </li>`).join('');
     const facts = [modelSizes(model), model.license, model.id].filter(Boolean).join(' · ');
     // The server removes a model only once none of its weights are on disk.
     const weightsPresent = hasWeightsOnDisk(model);
@@ -232,7 +249,8 @@ export function detailInfoHtml(model, { runners = [], activeModelId = '' } = {})
             </div>
             ${remove}
         </div>
-        <ul class="local-llm-runner-list" aria-label="Runners">${rows || '<li class="settings-card-meta">No runner can run this model.</li>'}</ul>`;
+        <ul class="local-llm-runner-list" aria-label="Weights">${weights}</ul>
+        <ul class="local-llm-runner-list" aria-label="Runners">${fits || '<li class="settings-card-meta">No runner can run this model.</li>'}</ul>`;
 }
 
 /** GPU and RAM estimate meters for the run form. */

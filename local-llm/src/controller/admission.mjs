@@ -25,6 +25,9 @@ function result(status, reason, estimate, warnings = []) {
     return Object.freeze({ status, reason, estimate: Object.freeze({ ...estimate, isEstimate: true }), warnings: Object.freeze(warnings) });
 }
 
+// Custom runner policies build their answers with the same shape.
+export { result as admissionResult };
+
 // Weights split between GPU and CPU for llama.cpp. For a mixture-of-experts
 // model, --n-cpu-moe keeps the expert tensors of that many layers in RAM
 // while attention and shared weights stay on the GPU.
@@ -116,23 +119,75 @@ function otherGpuUsers(gpu) {
     return users.length ? `; other GPU users: ${users.join(', ')}` : '';
 }
 
+// The llama-server policy: weights split between GPU and RAM by nCpuMoe,
+// KV cache and compute buffers on the GPU. Used by llama.cpp and every
+// runner that serves the same GGUF files with the same memory layout.
+export function admitLlamaServer({ model, source, params, gpu, memory, disk, remainingDownloadBytes = 0 }) {
+    const estimate = estimateLlamaCpp({ model, source, params });
+    const warnings = ramWarning(estimate.ramBytes, memory);
+    if (estimate.gpuBytes > gpu.totalBytes * 0.97) {
+        return result('incompatible', `Needs about ${gib(estimate.gpuBytes)} of GPU memory; the GPU has `
+            + `${gib(gpu.totalBytes)}. Keep more expert layers in RAM (nCpuMoe) or reduce ctxSize.`, estimate, warnings);
+    }
+    if (memory.totalBytes && estimate.ramBytes > memory.totalBytes) {
+        return result('incompatible', `Needs about ${gib(estimate.ramBytes)} of RAM; this machine has `
+            + `${gib(memory.totalBytes)}.`, estimate, warnings);
+    }
+    if (estimate.gpuBytes > gpu.freeBytes - GPU_MARGIN_BYTES) {
+        return result('insufficient-now', `Needs about ${gib(estimate.gpuBytes)} of GPU memory; `
+            + `${gib(gpu.freeBytes)} is free now${otherGpuUsers(gpu)}.`, estimate, warnings);
+    }
+    if (memory.availableBytes && estimate.ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
+        return result('insufficient-now', `Needs about ${gib(estimate.ramBytes)} of RAM; `
+            + `${gib(memory.availableBytes)} is available now.`, estimate, warnings);
+    }
+    if (diskShortage(remainingDownloadBytes, disk)) {
+        return result('insufficient-now', `The download needs ${gib(remainingDownloadBytes * 1.05)} of free disk; `
+            + `${gib(disk.freeBytes)} is free.`, estimate, warnings);
+    }
+    return result('ok', null, estimate, warnings);
+}
+
+// The Ollama policy: Ollama places whole layers itself unless numGpu pins them.
+export function admitOllama({ model, source, params, gpu, memory, disk, remainingDownloadBytes = 0 }) {
+    const estimate = estimateOllama({ model, source, params });
+    const gpuShare = estimate.gpuBytes ?? Math.min(estimate.totalBytes, Math.max(0, gpu.freeBytes - GPU_MARGIN_BYTES));
+    const ramBytes = Math.max(0, estimate.totalBytes - gpuShare) + RUNNER_RAM_BYTES;
+    const withRam = { ...estimate, ramBytes };
+    const warnings = ramWarning(ramBytes, memory);
+    if (estimate.gpuBytes !== null && estimate.gpuBytes > gpu.totalBytes * 0.97) {
+        return result('incompatible', `numGpu puts about ${gib(estimate.gpuBytes)} on a GPU with `
+            + `${gib(gpu.totalBytes)}; lower numGpu or leave it unset.`, withRam, warnings);
+    }
+    if (memory.totalBytes && estimate.totalBytes > gpu.totalBytes + memory.totalBytes) {
+        return result('incompatible', `Needs about ${gib(estimate.totalBytes)} of GPU memory and RAM together.`,
+            withRam, warnings);
+    }
+    if (gpu.freeBytes < GIB) {
+        return result('insufficient-now', `Only ${gib(gpu.freeBytes)} of GPU memory is free${otherGpuUsers(gpu)}.`,
+            withRam, warnings);
+    }
+    if (memory.availableBytes && ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
+        return result('insufficient-now', `Needs about ${gib(ramBytes)} of RAM; `
+            + `${gib(memory.availableBytes)} is available now.`, withRam, warnings);
+    }
+    if (diskShortage(remainingDownloadBytes, disk)) {
+        return result('insufficient-now', `The download needs ${gib(remainingDownloadBytes * 1.05)} of free disk; `
+            + `${gib(disk.freeBytes)} is free.`, withRam, warnings);
+    }
+    return result('ok', null, withRam, warnings);
+}
+
 /**
+ * The checks every runner shares, then the runner's own policy
+ * (`runner.admit`), which sizes the estimate for how that runner uses memory.
+ *
  * @param {{ runner, model, source, params, snapshot, remainingDownloadBytes? }} input
  * @returns {{ status: 'ok'|'incompatible'|'insufficient-now', reason, estimate, warnings }}
  */
 export function admit({ runner, model, source, params, snapshot, remainingDownloadBytes = 0 }) {
-    if (runner.id === 'vllm') {
-        // vLLM's GGUF loader has no MXFP4 support; for other GGUF files it is
-        // experimental, so the reason does not claim they cannot load.
-        const mxfp4Gguf = source?.type === 'huggingface' && /\.gguf$/i.test(source.file || '')
-            && /mxfp4/i.test(`${source.quantization || ''} ${source.file}`);
-        const reason = mxfp4Gguf
-            ? 'vLLM cannot load MXFP4 GGUF; not supported in this release.'
-            : 'vLLM is not supported or tested in this release.';
-        return result('incompatible', reason, {});
-    }
-    if (runner.id === 'lmstudio') {
-        return result('incompatible', 'LM Studio is not supported or tested in this release.', {});
+    if (!runner.supported || typeof runner.admit !== 'function') {
+        return result('incompatible', runner.unsupportedReason || `${runner.displayName} is not supported in this release.`, {});
     }
     if (!source) {
         return result('incompatible', `${model.displayName} has no ${runner.displayName} source.`, {});
@@ -141,59 +196,7 @@ export function admit({ runner, model, source, params, snapshot, remainingDownlo
     if (!gpu?.available) {
         return result('incompatible', gpu?.reason || 'No GPU is available to this agent.', {});
     }
-    const memory = snapshot.memory || {};
-    if (runner.id === 'llama.cpp') {
-        const estimate = estimateLlamaCpp({ model, source, params });
-        const warnings = ramWarning(estimate.ramBytes, memory);
-        if (estimate.gpuBytes > gpu.totalBytes * 0.97) {
-            return result('incompatible', `Needs about ${gib(estimate.gpuBytes)} of GPU memory; the GPU has `
-                + `${gib(gpu.totalBytes)}. Keep more expert layers in RAM (nCpuMoe) or reduce ctxSize.`, estimate, warnings);
-        }
-        if (memory.totalBytes && estimate.ramBytes > memory.totalBytes) {
-            return result('incompatible', `Needs about ${gib(estimate.ramBytes)} of RAM; this machine has `
-                + `${gib(memory.totalBytes)}.`, estimate, warnings);
-        }
-        if (estimate.gpuBytes > gpu.freeBytes - GPU_MARGIN_BYTES) {
-            return result('insufficient-now', `Needs about ${gib(estimate.gpuBytes)} of GPU memory; `
-                + `${gib(gpu.freeBytes)} is free now${otherGpuUsers(gpu)}.`, estimate, warnings);
-        }
-        if (memory.availableBytes && estimate.ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
-            return result('insufficient-now', `Needs about ${gib(estimate.ramBytes)} of RAM; `
-                + `${gib(memory.availableBytes)} is available now.`, estimate, warnings);
-        }
-        if (diskShortage(remainingDownloadBytes, snapshot.disk)) {
-            return result('insufficient-now', `The download needs ${gib(remainingDownloadBytes * 1.05)} of free disk; `
-                + `${gib(snapshot.disk.freeBytes)} is free.`, estimate, warnings);
-        }
-        return result('ok', null, estimate, warnings);
-    }
-    if (runner.id === 'ollama') {
-        const estimate = estimateOllama({ model, source, params });
-        const gpuShare = estimate.gpuBytes ?? Math.min(estimate.totalBytes, Math.max(0, gpu.freeBytes - GPU_MARGIN_BYTES));
-        const ramBytes = Math.max(0, estimate.totalBytes - gpuShare) + RUNNER_RAM_BYTES;
-        const withRam = { ...estimate, ramBytes };
-        const warnings = ramWarning(ramBytes, memory);
-        if (estimate.gpuBytes !== null && estimate.gpuBytes > gpu.totalBytes * 0.97) {
-            return result('incompatible', `numGpu puts about ${gib(estimate.gpuBytes)} on a GPU with `
-                + `${gib(gpu.totalBytes)}; lower numGpu or leave it unset.`, withRam, warnings);
-        }
-        if (memory.totalBytes && estimate.totalBytes > gpu.totalBytes + memory.totalBytes) {
-            return result('incompatible', `Needs about ${gib(estimate.totalBytes)} of GPU memory and RAM together.`,
-                withRam, warnings);
-        }
-        if (gpu.freeBytes < GIB) {
-            return result('insufficient-now', `Only ${gib(gpu.freeBytes)} of GPU memory is free${otherGpuUsers(gpu)}.`,
-                withRam, warnings);
-        }
-        if (memory.availableBytes && ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
-            return result('insufficient-now', `Needs about ${gib(ramBytes)} of RAM; `
-                + `${gib(memory.availableBytes)} is available now.`, withRam, warnings);
-        }
-        if (diskShortage(remainingDownloadBytes, snapshot.disk)) {
-            return result('insufficient-now', `The download needs ${gib(remainingDownloadBytes * 1.05)} of free disk; `
-                + `${gib(snapshot.disk.freeBytes)} is free.`, withRam, warnings);
-        }
-        return result('ok', null, withRam, warnings);
-    }
-    return result('incompatible', `${runner.displayName} is not supported in this release.`, {});
+    return runner.admit({
+        model, source, params, gpu, memory: snapshot.memory || {}, disk: snapshot.disk, remainingDownloadBytes,
+    });
 }

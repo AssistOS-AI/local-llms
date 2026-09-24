@@ -113,17 +113,34 @@ function wholeLines(emit) {
     };
 }
 
-export function startRunnerProcess({ command, args, env, cwd = '/', log, spawnImpl = spawn }) {
+export function startRunnerProcess({ command, args, env, cwd = '/', log, spawnImpl = spawn, killImpl = process.kill }) {
     if (!Array.isArray(args) || args.some((value) => typeof value !== 'string')) {
         throw new Error('Runner arguments must be an array of strings');
     }
-    const child = spawnImpl(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    // The runner leads its own process group, so a stop reaches every process
+    // it started (worker processes, a model server's runner child), not just
+    // the one the controller spawned.
+    const child = spawnImpl(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    function signalGroup(signal) {
+        if (!Number.isInteger(child.pid)) return;
+        try {
+            killImpl(-child.pid, signal);
+            return;
+        } catch (error) {
+            if (error?.code === 'ESRCH') return;
+        }
+        try { child.kill(signal); } catch {}
+    }
     const exited = new Promise((resolve) => {
         child.once('error', (error) => {
             log.append('controller', `runner failed to start: ${error.message}`);
             resolve({ code: null, signal: null, error });
         });
-        child.once('exit', (code, signal) => resolve({ code, signal, error: null }));
+        child.once('exit', (code, signal) => {
+            // Anything the runner left behind in its group goes with it.
+            signalGroup('SIGKILL');
+            resolve({ code, signal, error: null });
+        });
     });
     for (const [name, stream] of [['stdout', child.stdout], ['stderr', child.stderr]]) {
         if (!stream) continue;
@@ -136,11 +153,14 @@ export function startRunnerProcess({ command, args, env, cwd = '/', log, spawnIm
 
     async function stop({ graceMs = 10_000 } = {}) {
         if (exitResult) return exitResult;
-        try { child.kill('SIGTERM'); } catch {}
-        const timer = new Promise((resolve) => setTimeout(resolve, graceMs, 'timeout'));
-        if (await Promise.race([exited, timer]) === 'timeout') {
+        signalGroup('SIGTERM');
+        let timeout;
+        const timer = new Promise((resolve) => { timeout = setTimeout(resolve, graceMs, 'timeout'); });
+        const outcome = await Promise.race([exited, timer]);
+        clearTimeout(timeout);
+        if (outcome === 'timeout') {
             log.append('controller', `runner did not exit within ${graceMs} ms; sending SIGKILL`);
-            try { child.kill('SIGKILL'); } catch {}
+            signalGroup('SIGKILL');
         }
         return exited;
     }

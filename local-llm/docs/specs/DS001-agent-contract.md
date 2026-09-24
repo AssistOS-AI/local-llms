@@ -36,7 +36,7 @@ The manifest declares no other `containerSecurity` field, no `llmRuntime` block 
 main.mjs (controller, PID 1 under AgentEntrypoint.sh)
   ├─ control socket /dev/shm/local-llm/controller.sock (0700 directory, 0600 socket)
   ├─ AgentServer.mjs (MCP on 7000; spawns one short-lived process per tool call)
-  └─ runner: llama-server or ollama serve, bound to 127.0.0.1 only
+  └─ runner: llama-server or ollama serve, bound to 127.0.0.1 only, in its own process group
 ```
 
 `main.mjs` owns all state. Tool processes and the chat responder are stateless clients of the control socket (`src/controlSocket.mjs`, one JSON request and one JSON reply per connection).
@@ -73,7 +73,7 @@ Soul Gateway refuses a call whose caller is the agent that the target model fron
 On SIGTERM, SIGINT or SIGHUP the controller:
 
 1. stops accepting new commands, waits up to 1 s for a command already in progress (a Run that reaches its start then refuses with `shutting_down`), and aborts the active job, which checkpoints a download as `paused` and keeps the `.partial` file and its identity sidecar;
-2. stops the runner (SIGTERM, then SIGKILL after 3 s) and reaps it;
+2. stops the runner's process group (SIGTERM, then SIGKILL after 3 s) and reaps it;
 3. closes the control socket and stops AgentServer (SIGTERM; its own shutdown waits up to 20 s for in-flight tool calls, and it is killed after 21 s);
 4. exits 0, or exits 1 if the whole drain exceeds 30 s. The worst case of steps 1–3 is 25 s, 5 s under that deadline and 10 s under Ploinky's 35 s restart window (`src/drainBudget.mjs`).
 

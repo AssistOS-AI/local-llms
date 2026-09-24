@@ -11,6 +11,7 @@ import {
     paramsFromForm,
     parseToolResult,
     pollBackoff,
+    rememberRunners,
     runnerLabel,
     runnerOptions,
     shouldPoll,
@@ -199,6 +200,7 @@ export class LocalLlmDashboard {
 
     async loadOverview() {
         this.overview = await callLocalLlm('local_llm_overview');
+        rememberRunners(this.overview?.runners);
         const deployment = this.overview.deployment || null;
         // A status poll carries logs and runner details; keep them unless the
         // overview reports a different deployment.
@@ -248,6 +250,7 @@ export class LocalLlmDashboard {
         this.setHtml('models', this.modelsRegion, modelsTableHtml(models, {
             selectedId: this.selectedModelId,
             activeModelId: this.activeModelId(),
+            runners: this.overview?.runners || [],
         }));
     }
 
@@ -402,16 +405,18 @@ export class LocalLlmDashboard {
         if (removed) this.setStatus(`${model.id} was removed.`, 'success');
     }
 
-    async deleteWeights(_target, modelId, runnerId) {
+    async deleteWeights(_target, modelId, format) {
         const model = this.findModel(modelId);
-        const entry = model?.runners?.[runnerId];
+        const entry = model?.weights?.[format];
         if (!entry || this.busy) return;
+        const readers = (entry.runners || []).map((runnerId) => runnerLabel(runnerId)).join(', ');
         const confirmed = await assistOS.UI.showModal('confirm-action-modal', {
-            message: confirmMessage(`Delete the ${runnerLabel(runnerId)} weights of ${model.displayName || model.id} (${formatBytes(entry.download?.bytes ?? entry.size)})? The next Run downloads them again.`),
+            message: confirmMessage(`Delete the ${entry.label || format} of ${model.displayName || model.id} (${formatBytes(entry.download?.bytes ?? entry.size)})?`
+                + `${readers ? ` It is used by ${readers}.` : ''} The next Run downloads it again.`),
         }, true);
         if (!confirmed) return;
         const deleted = await this.withBusy('Deleting weights…', async () => {
-            const result = await callLocalLlm('local_llm_weights_delete', { modelId, runnerId });
+            const result = await callLocalLlm('local_llm_weights_delete', { modelId, format });
             await this.loadOverview();
             return result;
         });
@@ -457,7 +462,7 @@ export class LocalLlmDashboard {
         }
         if (submit) submit.disabled = !runnable || this.busy;
         this.runFields = runnable ? fieldsFromSchema(runner.paramSchema, entry?.params || {}) : [];
-        const split = splitRunFields(this.runFields, runnerId, model);
+        const split = splitRunFields(this.runFields, runner, model);
         basic.innerHTML = split.basic.map((field) => this.renderField(field)).join('');
         advanced.innerHTML = split.advanced.map((field) => this.renderField(field)).join('');
         if (this.advanced) this.advanced.hidden = split.advanced.length === 0;
@@ -497,6 +502,19 @@ export class LocalLlmDashboard {
                 </label>`;
         }
         const value = field.value === null || field.value === undefined ? '' : String(field.value);
+        if (field.kind === 'enumOrNumber') {
+            // Free text with the named values offered, since a number is valid too.
+            const listId = `${id}-choices`;
+            const hint = `${field.options.map((option) => option.value).join(', ')} or a number from ${field.min} to ${field.max}`;
+            return `
+                <label class="local-llm-field">
+                    <span class="form-label">${escapeHtml(field.title)}</span>
+                    <input class="form-input" id="${escapeHtml(id)}" name="${escapeHtml(field.name)}" data-param="${escapeHtml(field.name)}" type="text"
+                           list="${escapeHtml(listId)}" value="${escapeHtml(value)}" placeholder="${escapeHtml(hint)}" ${field.nullable ? '' : 'required'}>
+                    <datalist id="${escapeHtml(listId)}">${field.options.map((option) => `<option value="${escapeHtml(option.value)}"></option>`).join('')}</datalist>
+                    ${help}
+                </label>`;
+        }
         const bounds = field.kind === 'number'
             ? `type="number" ${Number.isFinite(field.min) ? `min="${field.min}"` : ''} ${Number.isFinite(field.max) ? `max="${field.max}"` : ''} step="${field.integer ? 1 : 'any'}"`
             : 'type="text"';

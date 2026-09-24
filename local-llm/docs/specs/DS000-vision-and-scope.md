@@ -34,8 +34,13 @@ The repository's other twelve agents share the CPU image `assistos/local-llms`, 
 | --- | --- |
 | llama.cpp `b11125` (CUDA 12.8 build) | Supported. GGUF from Hugging Face, pinned by commit, size and sha256. |
 | Ollama `0.34.3` | Supported. Library tags pulled by the Ollama daemon, verified by manifest digest when the catalog pins one. |
-| vLLM | Listed, not supported: it cannot load the MXFP4 GGUF the seed model ships as. |
-| LM Studio | Listed, not supported: it needs a licence acceptance and an engine download that this release does not perform. |
+| vLLM | Listed, not supported yet: it reads Hugging Face snapshots, which the catalog does not offer yet (runners plan, Phases R3 and R5). |
+
+Every runner is an adapter in `src/runners/`: its identity, the weight format it reads, its loopback port and per-start key, its parameter schema and basic form fields, detection, its start-up pipeline (launch and readiness), the model name for chat requests, its admission policy and its log parser. The controller, the tools and the dashboard have no per-runner branches, so a new runner is an adapter plus data.
+
+### LM Studio is not a runner
+
+LM Studio was listed as a future runner and has been removed (runners plan, decision R5 = b, accepted 2026-09-24). Its headless daemon, llmster, runs the same llama.cpp underneath, in an older build than this agent pins, behind a closed daemon. Its Terms allow use "solely for Your personal and / or internal business purposes" and forbid distributing it or using it "as an application service provider, or a software-as-a-service", so it could not ship in the public image, and a hosted deployment may fall under the SaaS clause. Its MoE offload and KV-cache settings are not available from its CLI or REST API, and its API authentication is configured only in the GUI. The agent needs none of what it adds on top of llama.cpp to serve `/v1/chat/completions`. The research is in `LOCAL_LLM_RUNNERS_RESEARCH.md` in the workspace.
 
 ### Out of scope
 

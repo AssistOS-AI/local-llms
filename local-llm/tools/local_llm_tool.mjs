@@ -28,7 +28,12 @@ export const TOOL_OPERATIONS = Object.freeze({
     local_llm_download_cancel: { op: 'cancelDownload', args: () => ({}) },
     local_llm_weights_delete: {
         op: 'deleteWeights',
-        args: (input) => ({ modelId: input.modelId, runnerId: input.runnerId }),
+        // Weights are named by format or by a runner that reads that format.
+        args: (input) => ({
+            modelId: input.modelId,
+            ...(input.runnerId !== undefined ? { runnerId: input.runnerId } : {}),
+            ...(input.format !== undefined ? { format: input.format } : {}),
+        }),
     },
     local_llm_model_add: { op: 'addModel', args: (input) => ({ model: input.model }) },
     local_llm_model_update: { op: 'updateModel', args: (input) => ({ model: input.model }) },

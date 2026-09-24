@@ -1,11 +1,17 @@
 // Model catalog: the read-only seed shipped with the agent plus the user
 // registry persisted under /data. Every entry is validated here; the same
 // rules apply to seed entries (at load) and to user entries (at add/update).
+//
+// Schema v2 keys a model's sources by weight format, not by runner: every
+// runner declares the format it reads, so runners that read the same GGUF
+// file share one download. `recommended` and `validated` stay per runner.
 
 import fs from 'node:fs';
 import path from 'node:path';
 
 import { LocalLlmError } from '../errors.mjs';
+
+export const CATALOG_SCHEMA = 'local-llm.catalog/v2';
 
 const ID_RE = /^[a-z0-9][a-z0-9._-]{1,63}$/;
 const HF_REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}\/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
@@ -16,10 +22,11 @@ const SHA256_RE = /^[0-9a-f]{64}$/;
 const OLLAMA_TAG_RE = /^[a-z0-9][a-z0-9._-]{0,63}(?:\/[a-z0-9][a-z0-9._-]{0,63})?(?::[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$/;
 const TEXT_MAX = 400;
 
-export const SOURCE_RUNNERS = Object.freeze({
-    huggingface: ['llama.cpp', 'lmstudio'],
-    ollama: ['ollama'],
-});
+// v1 registries keyed sources by runner id. Where several v1 keys held a GGUF
+// file, the first in this order becomes the gguf source.
+const V1_GGUF_KEYS = Object.freeze(['llama.cpp', 'lmstudio', 'vllm']);
+// Runners that no longer exist; their per-runner entries are dropped.
+const REMOVED_RUNNERS = Object.freeze(['lmstudio']);
 
 function invalid(message, field) {
     return new LocalLlmError('invalid_model', message, { field });
@@ -54,8 +61,8 @@ function onlyKeys(value, allowed, field) {
 
 export function validateHuggingFaceSource(value, field, { requirePin = false } = {}) {
     if (!plainObject(value)) throw invalid(`${field} must be an object`, field);
-    onlyKeys(value, ['type', 'repo', 'file', 'revision', 'commit', 'size', 'sha256', 'quantization'], field);
     if (value.type !== 'huggingface') throw invalid(`${field}.type must be huggingface`, `${field}.type`);
+    onlyKeys(value, ['type', 'repo', 'file', 'revision', 'commit', 'size', 'sha256', 'quantization'], field);
     if (typeof value.repo !== 'string' || !HF_REPO_RE.test(value.repo)) {
         throw invalid(`${field}.repo must be a Hugging Face repository id (owner/name)`, `${field}.repo`);
     }
@@ -86,8 +93,8 @@ export function validateHuggingFaceSource(value, field, { requirePin = false } =
 
 export function validateOllamaSource(value, field) {
     if (!plainObject(value)) throw invalid(`${field} must be an object`, field);
-    onlyKeys(value, ['type', 'tag', 'manifestDigest', 'size'], field);
     if (value.type !== 'ollama') throw invalid(`${field}.type must be ollama`, `${field}.type`);
+    onlyKeys(value, ['type', 'tag', 'manifestDigest', 'size'], field);
     if (typeof value.tag !== 'string' || !OLLAMA_TAG_RE.test(value.tag)) {
         throw invalid(`${field}.tag must be an Ollama library tag such as gpt-oss:20b`, `${field}.tag`);
     }
@@ -104,6 +111,15 @@ export function validateOllamaSource(value, field) {
         ...(value.size ? { size: value.size } : {}),
     });
 }
+
+/**
+ * The weight formats a source may be given for, and the source type each
+ * takes. A runner reads exactly one format (its `weightFormat`).
+ */
+export const WEIGHT_FORMATS = Object.freeze({
+    gguf: Object.freeze({ sourceType: 'huggingface', label: 'GGUF file', validate: validateHuggingFaceSource }),
+    ollama: Object.freeze({ sourceType: 'ollama', label: 'Ollama tag', validate: (value, field) => validateOllamaSource(value, field) }),
+});
 
 function validateMemory(value) {
     if (value === undefined || value === null) return undefined;
@@ -134,20 +150,15 @@ export function validateModel(value, { seed = false } = {}) {
         throw invalid('id must be 2-64 lowercase letters, digits, dot, dash or underscore', 'id');
     }
     if (!plainObject(value.sources) || Object.keys(value.sources).length === 0) {
-        throw invalid('sources must name at least one runner source', 'sources');
+        throw invalid('sources must name at least one weight format', 'sources');
     }
     const sources = {};
-    for (const [runnerId, source] of Object.entries(value.sources)) {
-        const field = `sources.${runnerId}`;
-        if (runnerId === 'llama.cpp' || runnerId === 'lmstudio') {
-            sources[runnerId] = validateHuggingFaceSource(source, field, { requirePin: seed });
-        } else if (runnerId === 'ollama') {
-            sources[runnerId] = validateOllamaSource(source, field);
-        } else if (runnerId === 'vllm') {
-            sources[runnerId] = validateHuggingFaceSource(source, field, { requirePin: seed });
-        } else {
-            throw invalid(`sources has an unknown runner '${runnerId}'`, field);
+    for (const [format, source] of Object.entries(value.sources)) {
+        const field = `sources.${format}`;
+        if (!Object.hasOwn(WEIGHT_FORMATS, format)) {
+            throw invalid(`sources has an unknown weight format '${format}'; use one of ${Object.keys(WEIGHT_FORMATS).join(', ')}`, field);
         }
+        sources[format] = WEIGHT_FORMATS[format].validate(source, field, { requirePin: seed });
     }
     const architecture = value.architecture ?? 'dense';
     if (!['moe', 'dense'].includes(architecture)) throw invalid('architecture must be moe or dense', 'architecture');
@@ -175,9 +186,33 @@ export function validateModel(value, { seed = false } = {}) {
     });
 }
 
+/**
+ * Bring a registry entry written by the v1 controller (sources keyed by
+ * runner id) to schema v2 (keyed by weight format). Idempotent, and it never
+ * throws: anything it cannot map is left for validation to refuse, so the
+ * entry is hidden but kept rather than lost.
+ */
+export function migrateModelEntry(entry) {
+    if (!plainObject(entry) || !plainObject(entry.sources)) return entry;
+    const sources = {};
+    for (const [key, source] of Object.entries(entry.sources)) {
+        if (!V1_GGUF_KEYS.includes(key)) sources[key] = source;
+    }
+    if (!sources.gguf) {
+        const legacy = V1_GGUF_KEYS.map((key) => entry.sources[key]).find((source) => source?.type === 'huggingface');
+        if (legacy) sources.gguf = legacy;
+    }
+    const migrated = { ...entry, sources };
+    for (const field of ['recommended', 'validated']) {
+        if (!plainObject(entry[field])) continue;
+        migrated[field] = Object.fromEntries(Object.entries(entry[field]).filter(([runnerId]) => !REMOVED_RUNNERS.includes(runnerId)));
+    }
+    return migrated;
+}
+
 export function loadSeedCatalog(file = path.join(import.meta.dirname, '..', '..', 'catalog', 'models.json')) {
     const document = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (document.schema !== 'local-llm.catalog/v1' || !Array.isArray(document.models)) {
+    if (document.schema !== CATALOG_SCHEMA || !Array.isArray(document.models)) {
         throw new Error(`Unsupported catalog ${file}`);
     }
     const models = document.models.map((entry) => validateModel(entry, { seed: true }));

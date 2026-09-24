@@ -149,6 +149,11 @@ export function recommendedFor(model, runnerId) {
     return recommended[runnerId] || {};
 }
 
+/** A runner's parameters: the input, then the model's recommended values, then the schema defaults. */
+export function normalizeWith(schema, runnerId, params = {}, model = undefined) {
+    return validateParams(schema, params, { defaults: recommendedFor(model, runnerId) });
+}
+
 export function assertPort(port) {
     if (!Number.isInteger(port) || port < 1024 || port > 65535) {
         throw codedError('invalid_launch', 'port must be an integer between 1024 and 65535', { field: 'port' });

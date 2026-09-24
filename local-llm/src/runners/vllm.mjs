@@ -74,14 +74,22 @@ function buildLaunch() {
     throw codedError('runner_unsupported', `Runner ${ID} is not supported: ${UNSUPPORTED_REASON}`, { runner: ID });
 }
 
+// A placeholder until vLLM is installable (runners plan, Phase R5). It reads
+// Hugging Face snapshots, which the catalog does not offer yet, so no model
+// lists it, and the controller refuses to run it with UNSUPPORTED_REASON.
 const vllmRuntime = Object.freeze({
     id: ID,
     displayName: 'vLLM',
     weightFormat: 'hf',
     pinnedVersion: null,
     supported: false,
+    unsupportedReason: UNSUPPORTED_REASON,
     executable: null,
+    port: null,
+    apiKey: true,
     paramSchema,
+    basicParams: Object.freeze(['maxModelLen']),
+    moeParams: Object.freeze([]),
     normalizeParams,
     describeContext,
     detect,

@@ -138,7 +138,7 @@ test('run downloads, verifies admission again, starts the runner and becomes rea
     assert.equal(accepted.deployment.phase, 'downloading');
     assert.equal(accepted.deployment.params.nCpuMoe, 17);
     assert.equal(h.calls.download.length, 1);
-    assert.equal(h.calls.download[0].artifact.sha256, GPT.sources['llama.cpp'].sha256);
+    assert.equal(h.calls.download[0].artifact.sha256, GPT.sources.gguf.sha256);
     h.calls.download[0].entry.resolve({ status: 'complete', path: '/data/models/gpt.gguf', bytesTransferred: 12 });
     await until(() => phase(h) === 'ready');
     const [process] = h.runners.started;
@@ -199,12 +199,13 @@ test('commands are serialized and weights or entries in use cannot change', asyn
         .then(() => order.push('run'));
     const remove = h.controller.deleteWeights({ modelId: 'tiny-user', runnerId: 'llama.cpp' })
         .then(() => order.push('delete-ok'), (error) => order.push(`delete-${error.code}`));
-    const update = h.controller.updateModel({ ...user, displayName: 'Renamed' })
+    // The registry was written before catalog v2 and is migrated on load; updates use v2.
+    const update = h.controller.updateModel({ ...user, sources: { gguf: user.sources['llama.cpp'] }, displayName: 'Renamed' })
         .then(() => order.push('update-ok'), (error) => order.push(`update-${error.code}`));
     await Promise.all([run, remove, update]);
     assert.deepEqual(order, ['run', 'delete-in_use', 'update-in_use']);
     // The job holds its own copy: an edit of the stored entry cannot redirect it.
-    h.controller.state.registry[0].sources['llama.cpp'].file = 'other.gguf';
+    h.controller.state.registry[0].sources.gguf.file = 'other.gguf';
     assert.equal(h.controller.state.deployment.artifact.file, 'tiny.gguf');
     assert.equal(h.calls.download[0].artifact.file, 'tiny.gguf');
     await h.controller.cancelDownload();
@@ -219,7 +220,7 @@ test('after a restart a download is paused without resuming and a ready model is
             initialState: {
                 version: 1,
                 deployment: { id: 'd1', requestId: 'r1', modelId: 'gpt-oss-20b', runnerId: 'llama.cpp', phase: before,
-                    params: {}, artifact: GPT.sources['llama.cpp'], runner: { pid: 1 } },
+                    params: {}, artifact: GPT.sources.gguf, runner: { pid: 1 } },
                 params: {},
                 requests: {},
                 registry: [],
@@ -265,7 +266,7 @@ test('admission refuses before anything is downloaded, and re-checks before laun
     );
     await assert.rejects(
         () => h.controller.run({ modelId: 'gpt-oss-20b', runnerId: 'vllm', requestId: 'request-0002' }),
-        (error) => error.code === 'runner_unsupported' && /vLLM cannot load MXFP4 GGUF; not supported in this release/.test(error.message),
+        (error) => error.code === 'runner_unsupported' && /Not supported or tested in this release/.test(error.message),
     );
     assert.equal(h.calls.download.length, 0);
 
@@ -282,14 +283,18 @@ test('admission refuses before anything is downloaded, and re-checks before laun
 test('overview lists runners, per-runner sizes, download state and admission', async (t) => {
     const h = harness(t);
     const overview = await h.controller.overview();
-    assert.deepEqual(overview.runners.map((runner) => runner.id), ['llama.cpp', 'ollama', 'vllm', 'lmstudio']);
+    assert.deepEqual(overview.runners.map((runner) => runner.id), ['llama.cpp', 'ollama', 'vllm']);
     const gpt = overview.models.find((model) => model.id === 'gpt-oss-20b');
     assert.equal(gpt.runners['llama.cpp'].size, 12109566624);
     assert.equal(gpt.runners.ollama.size, 13793441244);
     assert.equal(gpt.runners['llama.cpp'].admission.status, 'ok');
     assert.equal(gpt.runners['llama.cpp'].admission.estimate.isEstimate, true);
-    assert.equal(gpt.runners.vllm.admission.status, 'incompatible');
-    assert.equal(gpt.runners.lmstudio.admission.status, 'incompatible');
+    // vLLM reads Hugging Face snapshots, which gpt-oss-20b's entry does not offer.
+    assert.equal(gpt.runners.vllm, undefined);
+    // One download per weight format, shared by the runners that read it.
+    assert.deepEqual(Object.keys(gpt.weights), ['gguf', 'ollama']);
+    assert.deepEqual(gpt.weights.gguf.runners, ['llama.cpp']);
+    assert.deepEqual(gpt.weights.gguf.download, gpt.runners['llama.cpp'].download);
     assert.equal(gpt.runners['llama.cpp'].context.totalContext, 16384);
 });
 
@@ -383,7 +388,7 @@ test('a hanging Hugging Face lookup for Add model does not hold up Stop', async 
     const h = harness(t, { resolveHf: () => new Promise(() => {}) });
     const adding = h.controller.addModel({
         id: 'user-qwen',
-        sources: { 'llama.cpp': { type: 'huggingface', repo: 'Qwen/Qwen3-0.6B-GGUF', file: 'Qwen3-0.6B-Q8_0.gguf', revision: 'main' } },
+        sources: { gguf: { type: 'huggingface', repo: 'Qwen/Qwen3-0.6B-GGUF', file: 'Qwen3-0.6B-Q8_0.gguf', revision: 'main' } },
     });
     adding.catch(() => {});
     const stopped = await Promise.race([
@@ -545,23 +550,23 @@ test('updating a user model keeps its pin, and a re-pin that would orphan downlo
         },
     });
     const source = { type: 'huggingface', repo: 'Qwen/Qwen3-0.6B-GGUF', file: 'Qwen3-0.6B-Q8_0.gguf', revision: 'main' };
-    await h.controller.addModel({ id: 'user-qwen', displayName: 'Q', sources: { 'llama.cpp': source } });
+    await h.controller.addModel({ id: 'user-qwen', displayName: 'Q', sources: { gguf: source } });
     assert.equal(resolves, 1);
     // A metadata edit keeps the pinned commit instead of resolving main again.
-    await h.controller.updateModel({ id: 'user-qwen', displayName: 'Q2', sources: { 'llama.cpp': source } });
+    await h.controller.updateModel({ id: 'user-qwen', displayName: 'Q2', sources: { gguf: source } });
     assert.equal(resolves, 1);
-    assert.equal(h.controller.state.registry[0].sources['llama.cpp'].commit, commits[0]);
+    assert.equal(h.controller.state.registry[0].sources.gguf.commit, commits[0]);
     assert.equal(h.controller.state.registry[0].displayName, 'Q2');
     // With the pinned weights on disk, a changed source would orphan them.
     h.setInspect(async ({ artifact }) => (artifact.commit === commits[0] ? { state: 'complete', bytes: 4 } : { state: 'absent', bytes: 0 }));
     await assert.rejects(
-        () => h.controller.updateModel({ id: 'user-qwen', sources: { 'llama.cpp': { ...source, revision: 'v2' } } }),
+        () => h.controller.updateModel({ id: 'user-qwen', sources: { gguf: { ...source, revision: 'v2' } } }),
         { code: 'weights_present' },
     );
-    assert.equal(h.controller.state.registry[0].sources['llama.cpp'].commit, commits[0]);
+    assert.equal(h.controller.state.registry[0].sources.gguf.commit, commits[0]);
     h.setInspect(async () => ({ state: 'absent', bytes: 0 }));
-    await h.controller.updateModel({ id: 'user-qwen', sources: { 'llama.cpp': { ...source, revision: 'v2' } } });
-    assert.equal(h.controller.state.registry[0].sources['llama.cpp'].commit, commits[1]);
+    await h.controller.updateModel({ id: 'user-qwen', sources: { gguf: { ...source, revision: 'v2' } } });
+    assert.equal(h.controller.state.registry[0].sources.gguf.commit, commits[1]);
 });
 
 test('an abort that lands as the download completes starts no runner', async (t) => {
@@ -585,7 +590,7 @@ test('two Add model requests for one id store it once', async (t) => {
     const h = harness(t, { resolveHf: () => { const lookup = deferred(); lookups.push(lookup); return lookup.promise; } });
     const entry = {
         id: 'user-qwen', displayName: 'Q',
-        sources: { 'llama.cpp': { type: 'huggingface', repo: 'Qwen/Qwen3-0.6B-GGUF', file: 'Qwen3-0.6B-Q8_0.gguf', revision: 'main' } },
+        sources: { gguf: { type: 'huggingface', repo: 'Qwen/Qwen3-0.6B-GGUF', file: 'Qwen3-0.6B-Q8_0.gguf', revision: 'main' } },
     };
     // Both pass the early id check while their lookups run outside the queue.
     const results = Promise.allSettled([h.controller.addModel(entry), h.controller.addModel(entry)]);

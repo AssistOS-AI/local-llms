@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "local-llm.catalog/v1",
+  "$id": "local-llm.catalog/v2",
   "title": "local-llm model catalog",
-  "description": "Seed catalog entries (read-only, shipped with the agent) and user registry entries share this shape. Seed Hugging Face sources must pin commit, size and sha256; user sources are pinned when added.",
+  "description": "Seed catalog entries (read-only, shipped with the agent) and user registry entries share this shape. Sources are keyed by weight format; every runner reads one format, so runners that read the same format share one download. Seed Hugging Face sources must pin commit, size and sha256; user sources are pinned when added.",
   "type": "object",
   "required": ["schema", "models"],
   "additionalProperties": false,
   "properties": {
-    "schema": { "const": "local-llm.catalog/v1" },
+    "schema": { "const": "local-llm.catalog/v2" },
     "models": { "type": "array", "items": { "$ref": "#/$defs/model" } }
   },
   "$defs": {
@@ -29,10 +29,9 @@
           "type": "object",
           "minProperties": 1,
           "additionalProperties": false,
+          "description": "Keyed by weight format: gguf is a single GGUF file on Hugging Face (read by llama.cpp); ollama is an Ollama library tag (read by Ollama).",
           "properties": {
-            "llama.cpp": { "$ref": "#/$defs/huggingface" },
-            "lmstudio": { "$ref": "#/$defs/huggingface" },
-            "vllm": { "$ref": "#/$defs/huggingface" },
+            "gguf": { "$ref": "#/$defs/huggingface" },
             "ollama": { "$ref": "#/$defs/ollama" }
           }
         },
