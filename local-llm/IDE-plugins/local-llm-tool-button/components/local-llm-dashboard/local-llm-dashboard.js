@@ -19,6 +19,7 @@ import {
     ACTIVE_PHASES,
     detailInfoHtml,
     estimateHtml,
+    hasWeightsOnDisk,
     hardwareCardsHtml,
     modelsTableHtml,
     splitRunFields,
@@ -382,8 +383,12 @@ export class LocalLlmDashboard {
     async removeModel(_target, modelId) {
         const model = this.findModel(modelId);
         if (!model || model.seed || this.busy) return;
+        if (hasWeightsOnDisk(model)) {
+            this.setStatus(`Delete the downloaded weights of ${model.displayName || model.id} first; then Remove works.`, 'error');
+            return;
+        }
         const confirmed = await assistOS.UI.showModal('confirm-action-modal', {
-            message: confirmMessage(`Remove ${model.displayName || model.id} from the list? Downloaded weights are not deleted by this; delete them first if you want the disk space back.`),
+            message: confirmMessage(`Remove ${model.displayName || model.id} from the list? You can add it again later.`),
         }, true);
         if (!confirmed) return;
         const removed = await this.withBusy(`Removing ${model.id}…`, async () => {

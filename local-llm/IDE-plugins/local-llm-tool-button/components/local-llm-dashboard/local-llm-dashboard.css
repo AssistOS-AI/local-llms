@@ -139,6 +139,13 @@ local-llm-dashboard .local-llm-prompt-form {
     min-width: 0;
 }
 
+local-llm-dashboard .local-llm-remove {
+    display: grid;
+    justify-items: end;
+    gap: var(--space-xs);
+    text-align: right;
+}
+
 local-llm-dashboard .local-llm-runner-list {
     display: grid;
     gap: var(--space-sm);

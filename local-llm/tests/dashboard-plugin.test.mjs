@@ -116,7 +116,13 @@ test('the Models table has no buttons; the detail panel holds the one Run and th
     assert.match(catalog, /data-local-action="deleteWeights gpt-oss-20b llama\.cpp"/);
     assert.doesNotMatch(catalog, /deleteWeights gpt-oss-20b ollama/, 'nothing to delete for Ollama');
     const added = detailInfoHtml(OVERVIEW_MODELS[1], { runners: RUNNER_LIST });
-    assert.match(added, /data-local-action="removeModel qwen3-0\.6b"/);
+    assert.match(added, /data-local-action="removeModel qwen3-0\.6b"\s+disabled title="Delete its weights first"/,
+        'the server removes a model only without weights on disk');
+    assert.match(added, /Delete its weights first to remove it\./);
+    const emptyAdded = { ...OVERVIEW_MODELS[1], runners: { 'llama.cpp': { size: 1, download: { state: 'absent' }, admission: { status: 'ok' } } } };
+    const removable = detailInfoHtml(emptyAdded, { runners: RUNNER_LIST });
+    assert.match(removable, /data-local-action="removeModel qwen3-0\.6b"\s*>Remove/);
+    assert.doesNotMatch(removable, /Delete its weights first/);
     assert.doesNotMatch(added, />\s*Run\s*</);
     assert.equal(detailInfoHtml(null), '');
     assert.equal(modelsTableHtml([]), '<div class="settings-empty-state">No models in the catalog.</div>');

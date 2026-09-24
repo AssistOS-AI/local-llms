@@ -190,6 +190,11 @@ export function modelsTableHtml(models = [], { selectedId = '', activeModelId = 
         </div>`;
 }
 
+/** Whether any runner's weights of this model are on disk (downloaded or partial). */
+export function hasWeightsOnDisk(model) {
+    return Object.values(model?.runners || {}).some((entry) => ['complete', 'partial'].includes(entry?.download?.state));
+}
+
 /**
  * The selected model's heading and per-runner availability. Delete weights
  * sits next to each downloaded runner; an added model also gets Remove.
@@ -211,13 +216,21 @@ export function detailInfoHtml(model, { runners = [], activeModelId = '' } = {})
                 </li>`;
         }).join('');
     const facts = [modelSizes(model), model.license, model.id].filter(Boolean).join(' · ');
+    // The server removes a model only once none of its weights are on disk.
+    const weightsPresent = hasWeightsOnDisk(model);
+    const remove = model.seed ? '' : `
+            <div class="local-llm-remove">
+                <button type="button" class="gray-button" data-local-action="removeModel ${escapeHtml(model.id)}"
+                        ${weightsPresent ? 'disabled title="Delete its weights first"' : ''}>Remove</button>
+                ${weightsPresent ? '<span class="settings-card-meta">Delete its weights first to remove it.</span>' : ''}
+            </div>`;
     return `
         <div class="local-llm-detail-head">
             <div>
                 <h3 class="settings-section-title local-llm-model-name">${escapeHtml(model.displayName || model.id)} ${modelChips(model, activeModelId)}</h3>
                 <p class="settings-section-description">${escapeHtml(facts)}</p>
             </div>
-            ${model.seed ? '' : `<button type="button" class="gray-button" data-local-action="removeModel ${escapeHtml(model.id)}">Remove</button>`}
+            ${remove}
         </div>
         <ul class="local-llm-runner-list" aria-label="Runners">${rows || '<li class="settings-card-meta">No runner can run this model.</li>'}</ul>`;
 }
