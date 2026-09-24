@@ -77,6 +77,28 @@ test('an admin reaches the controller operation of each tool', async () => {
     assert.equal(Object.keys(TOOL_OPERATIONS).length + 1, TOOL_NAMES.length);
 });
 
+test('Install records the verified caller as the licence acceptor and takes no URL or acceptor from input', async () => {
+    const seen = [];
+    const call = async (op, args) => { seen.push([op, args]); return { ok: true }; };
+    const authInfo = { user: { roles: ['admin'], email: 'admin@example.com' } };
+    await handleTool('local_llm_runner_install',
+        { runnerId: 'vllm', acceptLicence: true, acceptedBy: 'someone-else', url: 'https://evil.example.com/x' }, { authInfo, call });
+    await handleTool('local_llm_runner_uninstall', { runnerId: 'vllm' }, { authInfo, call });
+    assert.deepEqual(seen, [
+        ['installRunner', { runnerId: 'vllm', acceptLicence: true, acceptedBy: 'admin@example.com' }],
+        ['uninstallRunner', { runnerId: 'vllm' }],
+    ]);
+    const config = read('mcp-config.json');
+    const install = config.tools.find((tool) => tool.name === 'local_llm_runner_install');
+    assert.deepEqual(Object.keys(install.inputSchema.properties).sort(), ['acceptLicence', 'runnerId']);
+    assert.equal(install.inputSchema.additionalProperties, false);
+    const uninstall = config.tools.find((tool) => tool.name === 'local_llm_runner_uninstall');
+    assert.deepEqual(Object.keys(uninstall.inputSchema.properties), ['runnerId']);
+    assert.equal(uninstall.inputSchema.additionalProperties, false);
+    await assert.rejects(() => handleTool('local_llm_runner_install', { runnerId: 'vllm' }, { authInfo: { user: { roles: ['user'] } }, call }),
+        { code: 'admin_required' });
+});
+
 test('the chat responder forwards to the ready runner with its key, and answers 503 otherwise', async () => {
     const notReady = await respond({ request: { messages: [] } }, {
         call: async () => { throw Object.assign(new Error('No local model is ready.'), { code: 'not_ready' }); },

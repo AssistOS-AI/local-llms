@@ -1,7 +1,7 @@
 import { codedError, deepFreeze, recommendedFor, validateParams } from './params.mjs';
 
 const ID = 'vllm';
-const UNSUPPORTED_REASON = 'Not supported or tested in this release; installable in a later release.';
+const UNSUPPORTED_REASON = 'Not supported in this release: vLLM can be installed now, and running models on it arrives in a later release.';
 
 const paramSchema = deepFreeze({
     type: 'object',
@@ -66,17 +66,25 @@ function describeContext(params = {}, { model } = {}) {
     return { totalContext: context, perRequestContext: context, parallel: maxNumSeqs, kvUnified: true };
 }
 
-function detect() {
-    return { installed: false, version: null, reason: UNSUPPORTED_REASON };
+// vLLM is installed on demand (DS004), so detection asks the installer, which
+// reads the cache and its install record; it never imports Python packages.
+async function detect({ installer } = {}) {
+    if (!installer?.installable(ID)) {
+        return { installed: false, version: null, reason: 'This image\'s runner lock has no vLLM entry.' };
+    }
+    const info = await installer.describe(ID);
+    if (!info.installed) return { installed: false, version: null, reason: 'Not installed. An admin can Install it under Runners.' };
+    return { installed: true, version: info.version, reason: UNSUPPORTED_REASON };
 }
 
 function buildLaunch() {
     throw codedError('runner_unsupported', `Runner ${ID} is not supported: ${UNSUPPORTED_REASON}`, { runner: ID });
 }
 
-// A placeholder until vLLM is installable (runners plan, Phase R5). It reads
-// Hugging Face snapshots, which the catalog does not offer yet, so no model
-// lists it, and the controller refuses to run it with UNSUPPORTED_REASON.
+// Installable on demand since runners plan Phase R2; running it arrives in
+// Phase R5. It reads Hugging Face snapshots, which the catalog does not offer
+// yet, so no model lists it, and the controller refuses to run it with
+// UNSUPPORTED_REASON.
 const vllmRuntime = Object.freeze({
     id: ID,
     displayName: 'vLLM',

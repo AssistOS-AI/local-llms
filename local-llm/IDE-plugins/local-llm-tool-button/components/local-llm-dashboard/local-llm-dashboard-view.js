@@ -253,6 +253,71 @@ export function detailInfoHtml(model, { runners = [], activeModelId = '' } = {})
         <ul class="local-llm-runner-list" aria-label="Runners">${fits || '<li class="settings-card-meta">No runner can run this model.</li>'}</ul>`;
 }
 
+function licenceLine(licence = {}, accepted = null) {
+    const links = [
+        licence.url ? `<a href="${escapeHtml(licence.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(licence.name || 'Licence')}</a>` : escapeHtml(licence.name || ''),
+        licence.source ? `<a href="${escapeHtml(licence.source)}" target="_blank" rel="noopener noreferrer">source</a>` : '',
+    ].filter(Boolean).join(' · ');
+    const acceptance = accepted?.acceptedBy
+        ? ` · accepted by ${escapeHtml(accepted.acceptedBy)} on ${escapeHtml(String(accepted.acceptedAt || '').slice(0, 10))}` : '';
+    return `<div class="settings-card-meta">Licence: ${links}${acceptance}</div>`;
+}
+
+function installProgress(state) {
+    const download = state?.download;
+    if (!download?.total || !['downloading', 'installing'].includes(state.phase)) return '';
+    const percent = progressPercent(download) ?? 0;
+    const rate = download.rate ? ` · ${formatBytes(download.rate)}/s` : '';
+    return `
+        <progress class="local-llm-progress" max="100" value="${percent}" aria-label="Install progress">${percent}%</progress>
+        <div class="settings-card-meta">${escapeHtml(`${formatBytes(download.bytes)} of ${formatBytes(download.total)}${rate}`)}</div>`;
+}
+
+/**
+ * The Runners tab: every runner with its state. Runners in the image have no
+ * actions; on-demand runners show their size, licence and install progress,
+ * with Install or Uninstall (never a second Install while one runs).
+ */
+export function runnersPanelHtml(runners = []) {
+    const busy = runners.some((runner) => runner.install?.installing);
+    const cards = runners.map((runner) => {
+        const install = runner.install;
+        const status = runner.installed
+            ? `${runner.version || install?.version || ''} · installed`
+            : (install ? 'not installed' : (runner.reason || 'not available'));
+        let body = '';
+        let actions = '';
+        if (install) {
+            const state = install.state || {};
+            const phase = install.installing ? state.phase : null;
+            body = `
+                <div class="settings-card-meta">${escapeHtml(`Version ${install.version} · ${formatBytes(install.totalBytes)} to download`)}${
+    state.rebuild?.seconds ? escapeHtml(` · set up in ${Math.round(state.rebuild.seconds)} s`) : ''}</div>
+                ${licenceLine(install.licence, state.licence)}
+                ${install.licence?.notice ? `<div class="settings-card-meta">${escapeHtml(install.licence.notice)}</div>` : ''}
+                ${phase ? `<div class="settings-card-meta">${escapeHtml(phase === 'installing' ? 'Setting up the runner…' : 'Downloading…')}</div>` : ''}
+                ${installProgress(install.installing ? state : null)}
+                ${state.phase === 'paused' && state.pausedReason ? `<div class="settings-card-meta">${escapeHtml(state.pausedReason)}</div>` : ''}
+                ${state.phase === 'error' && state.error ? `<div class="settings-status error">${escapeHtml(state.error)}</div>` : ''}`;
+            if (install.installed && !install.installing) {
+                actions = `<button type="button" class="gray-button" data-local-action="uninstallRunner ${escapeHtml(runner.id)}">Uninstall</button>`;
+            } else if (!install.installing && !busy) {
+                actions = `<button type="button" class="general-button" data-local-action="installRunner ${escapeHtml(runner.id)}">Install</button>`;
+            }
+        }
+        return `
+            <li class="local-llm-runner-item">
+                <div>
+                    <div class="settings-card-title">${escapeHtml(runner.displayName || runner.id)}</div>
+                    <div class="settings-card-meta">${escapeHtml(status)}</div>
+                    ${body}
+                </div>
+                ${actions}
+            </li>`;
+    }).join('');
+    return `<ul class="local-llm-runner-list" aria-label="Runners">${cards || '<li class="settings-card-meta">No runners.</li>'}</ul>`;
+}
+
 /** GPU and RAM estimate meters for the run form. */
 export function estimateHtml({ admission = null, context = null, error = '' } = {}, hardware = {}) {
     if (error) return `<div class="settings-status error">${escapeHtml(error)}</div>`;

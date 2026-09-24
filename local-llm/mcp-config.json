@@ -350,6 +350,72 @@
       "env": {
         "TOOL_NAME": "local_llm_test_prompt"
       }
+    },
+    {
+      "name": "local_llm_runner_install",
+      "title": "Install a runner",
+      "description": "Install an on-demand runner from the image's runner lock: download its pinned files into /data/runners, verify every sha256, and build the runnable copy offline. Returns at once; local_llm_overview shows progress. A runner whose licence needs acceptance (for example AGPL-3.0) requires acceptLicence; the acceptance is recorded with the caller and the time.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "runnerId": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$",
+            "description": "A runner listed in this image's runner lock (local_llm_overview shows which runners can be installed)."
+          },
+          "acceptLicence": {
+            "type": "boolean",
+            "description": "Accept the runner's licence terms, shown in the Runners tab, on this workspace's behalf."
+          }
+        },
+        "required": [
+          "runnerId"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_runner_install"
+      }
+    },
+    {
+      "name": "local_llm_runner_uninstall",
+      "title": "Uninstall a runner",
+      "description": "Delete an on-demand runner's downloaded files and runnable copy. Refused while the runner runs a model.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "runnerId": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$",
+            "description": "A runner listed in this image's runner lock (local_llm_overview shows which runners can be installed)."
+          }
+        },
+        "required": [
+          "runnerId"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_runner_uninstall"
+      }
     }
   ]
 }

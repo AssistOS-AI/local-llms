@@ -8,6 +8,7 @@ import {
     estimateHtml,
     hardwareCardsHtml,
     modelsTableHtml,
+    runnersPanelHtml,
     splitRunFields,
     statusCardHtml,
 } from '../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-view.js';
@@ -148,6 +149,33 @@ test('the Models table has no buttons; the detail panel holds the one Run and th
     assert.doesNotMatch(added, />\s*Run\s*</);
     assert.equal(detailInfoHtml(null), '');
     assert.equal(modelsTableHtml([]), '<div class="settings-empty-state">No models in the catalog.</div>');
+});
+
+test('the Runners tab offers Install and Uninstall only for on-demand runners, with size, licence and progress', () => {
+    const licence = { name: 'AGPL-3.0', url: 'https://github.com/example/tabby/blob/main/LICENSE', source: 'https://github.com/example/tabby',
+        notice: 'Installed from upstream, not redistributed.', requiresAcceptance: true };
+    const runners = [
+        { id: 'llama.cpp', displayName: 'llama.cpp', supported: true, installed: true, version: 'b11159' },
+        { id: 'vllm', displayName: 'vLLM', supported: true, installed: false, version: null,
+            install: { version: '0.30.0', totalBytes: 4.2e9, licence: { name: 'Apache-2.0', url: 'https://x.example/L' }, installed: false, runnable: false, state: null } },
+        { id: 'tabby', displayName: 'Tabby <API>', supported: true, installed: true, version: 'abc1234',
+            install: { version: 'abc1234', totalBytes: 3e9, licence, installed: true, runnable: true,
+                state: { phase: 'installed', licence: { acceptedBy: 'admin@example.com', acceptedAt: '2026-09-24T12:00:00.000Z' }, rebuild: { seconds: 42.5 } } } },
+        { id: 'busy', displayName: 'Busy', supported: true, installed: false,
+            install: { version: '1', totalBytes: 1e9, licence: { name: 'MIT', url: 'https://x.example/M' }, installed: false, runnable: false, installing: true,
+                state: { phase: 'downloading', download: { bytes: 2.5e8, total: 1e9, rate: 5e6 } } } },
+    ];
+    const idle = runnersPanelHtml(runners.filter((runner) => runner.id !== 'busy'));
+    assert.match(idle, /data-local-action="installRunner vllm"/);
+    const html = runnersPanelHtml(runners);
+    assert.doesNotMatch(html, /installRunner llama\.cpp|uninstallRunner llama\.cpp/, 'runners in the image are not installed on demand');
+    assert.doesNotMatch(html, /data-local-action="installRunner/, 'no Install anywhere while one install runs');
+    assert.match(html, /4\.2 GB/);
+    assert.match(html, /data-local-action="uninstallRunner tabby"/);
+    assert.match(html, /Tabby &lt;API&gt;/);
+    assert.match(html, /AGPL-3\.0[\s\S]*accepted by admin@example\.com/);
+    assert.match(html, /href="https:\/\/github\.com\/example\/tabby"/);
+    assert.match(html, /<progress[^>]*value="25"/);
 });
 
 test('basic run settings are the ones that decide the fit; everything else is under a closed Advanced', () => {

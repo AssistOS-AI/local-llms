@@ -91,6 +91,8 @@ const startup = (async () => {
             addModel: (args) => controller.addModel(args.model),
             updateModel: (args) => controller.updateModel(args.model),
             removeModel: (args) => controller.removeModel(args),
+            installRunner: (args) => controller.installRunner(args),
+            uninstallRunner: (args) => controller.uninstallRunner(args),
             chatTarget: () => controller.chatTarget(),
             recordCompletion: (args) => controller.recordCompletion(args),
         },

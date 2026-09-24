@@ -38,7 +38,26 @@ export const TOOL_OPERATIONS = Object.freeze({
     local_llm_model_add: { op: 'addModel', args: (input) => ({ model: input.model }) },
     local_llm_model_update: { op: 'updateModel', args: (input) => ({ model: input.model }) },
     local_llm_model_remove: { op: 'removeModel', args: (input) => ({ modelId: input.modelId }) },
+    // Who accepted a licence comes from the verified caller, never from input.
+    local_llm_runner_install: {
+        op: 'installRunner',
+        args: (input, authInfo) => ({
+            runnerId: input.runnerId,
+            acceptLicence: input.acceptLicence === true,
+            acceptedBy: callerName(authInfo),
+        }),
+    },
+    local_llm_runner_uninstall: { op: 'uninstallRunner', args: (input) => ({ runnerId: input.runnerId }) },
 });
+
+/** The verified caller's name for the licence record. */
+export function callerName(authInfo) {
+    const user = authInfo?.user || {};
+    for (const key of ['email', 'username', 'name', 'id']) {
+        if (typeof user[key] === 'string' && user[key]) return user[key].slice(0, 200);
+    }
+    return 'unknown admin';
+}
 
 export const TOOL_NAMES = Object.freeze([...Object.keys(TOOL_OPERATIONS), 'local_llm_test_prompt']);
 
@@ -75,7 +94,7 @@ export async function handleTool(name, input, { authInfo, call = callController,
         return run({ prompt: input.prompt, maxTokens: input.maxTokens, call });
     }
     const operation = TOOL_OPERATIONS[name];
-    return call(operation.op, operation.args(input || {}));
+    return call(operation.op, operation.args(input || {}, authInfo));
 }
 
 async function main() {

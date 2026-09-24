@@ -392,13 +392,14 @@ describe('unsupported runners', () => {
     };
 
     for (const runner of [vllmRunner]) {
-        it(`${runner.id} reports unsupported without spawning`, () => {
+        it(`${runner.id} reports unsupported without spawning`, async () => {
             assert.equal(runner.supported, false);
             assert.equal(runner.pinnedVersion, null);
-            assert.deepEqual(runner.detect({ spawnSync: throwingSpawn }), {
+            // Installed on demand: without an installer lock entry it cannot be installed.
+            assert.deepEqual(await runner.detect({ spawnSync: throwingSpawn }), {
                 installed: false,
                 version: null,
-                reason: 'Not supported or tested in this release; installable in a later release.'
+                reason: 'This image\'s runner lock has no vLLM entry.'
             });
             assertCode(() => runner.buildLaunch({ params: {}, port: 18080, apiKey: API_KEY, model: MODEL }),
                 'runner_unsupported');

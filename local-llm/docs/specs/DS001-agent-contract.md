@@ -57,6 +57,8 @@ Every tool is declared in `mcp-config.json` with `command: "node"`, `args: ["/co
 | `local_llm_weights_delete` | `deleteWeights` |
 | `local_llm_model_add` / `_update` / `_remove` | registry edits; seed entries are read-only |
 | `local_llm_test_prompt` | an admin smoke chat against the active runner on loopback; the one inference-routing exception (Question #3) |
+| `local_llm_runner_install` | `installRunner`: `runnerId`, `acceptLicence`; installs an on-demand runner from the image's runner lock (DS004). Who accepted a licence comes from the Router-signed invocation, never from tool input. |
+| `local_llm_runner_uninstall` | `uninstallRunner`: `runnerId`; refused while that runner runs a model |
 
 ### Authorization
 

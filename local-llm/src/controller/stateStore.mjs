@@ -25,6 +25,9 @@ export function emptyState() {
         // Blob digests each Ollama tag's pulls have touched, so partial
         // downloads are counted and deleted per tag.
         ollamaPulls: {},
+        // On-demand runner installs by runner id: phase, progress, error and
+        // the licence acceptance (who and when).
+        runnerInstalls: {},
     };
 }
 
@@ -50,6 +53,9 @@ function normalizeState(value) {
     if (Array.isArray(value.registry)) state.registry = value.registry.map(migrateModelEntry);
     if (value.ollamaPulls && typeof value.ollamaPulls === 'object' && !Array.isArray(value.ollamaPulls)) {
         state.ollamaPulls = value.ollamaPulls;
+    }
+    if (value.runnerInstalls && typeof value.runnerInstalls === 'object' && !Array.isArray(value.runnerInstalls)) {
+        state.runnerInstalls = value.runnerInstalls;
     }
     return state;
 }
@@ -92,6 +98,13 @@ export function createStateStore({ dataDir, fsApi = fs } = {}) {
  * explicit Run) and a starting or running model becomes idle. Weights stay.
  */
 export function reconcileAfterRestart(state, now = new Date().toISOString()) {
+    for (const install of Object.values(state.runnerInstalls || {})) {
+        if (['downloading', 'installing'].includes(install?.phase)) {
+            install.phase = 'paused';
+            install.pausedReason = 'The agent restarted during the install; press Install to resume.';
+            install.updatedAt = now;
+        }
+    }
     const deployment = state.deployment;
     if (!deployment) return state;
     if (['downloading', 'verifying', 'pulling'].includes(deployment.phase)) {

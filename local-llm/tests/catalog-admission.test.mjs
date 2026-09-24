@@ -88,7 +88,8 @@ test('admission: an unsupported runner is incompatible with the reason its adapt
     const vllm = getRunner('vllm');
     const result = admit({ runner: vllm, model: GPT, source: undefined, params: {}, snapshot: snapshot() });
     assert.equal(result.status, 'incompatible');
-    assert.equal(result.reason, 'Not supported or tested in this release; installable in a later release.');
+    assert.equal(result.reason, vllm.unsupportedReason);
+    assert.match(result.reason, /^Not supported in this release/);
 });
 
 test('admission: no GPU grant is an actionable incompatibility; big RAM users get a warning', () => {

@@ -41,6 +41,15 @@
                 aria-controls="localLlmPanelLogs"
                 aria-selected="false"
                 tabindex="-1">Logs</button>
+        <button type="button"
+                class="settings-tab"
+                id="localLlmTabRunners"
+                data-llm-tab="runners"
+                data-local-action="switchTab runners"
+                role="tab"
+                aria-controls="localLlmPanelRunners"
+                aria-selected="false"
+                tabindex="-1">Runners</button>
     </div>
 
     <section class="local-llm-panel local-llm-models-layout"
@@ -201,5 +210,20 @@
             </label>
         </div>
         <pre class="local-llm-log" data-llm-log tabindex="0" aria-label="Runner log">No runner output yet.</pre>
+    </section>
+
+    <section class="local-llm-panel"
+             id="localLlmPanelRunners"
+             data-llm-panel="runners"
+             role="tabpanel"
+             aria-labelledby="localLlmTabRunners"
+             hidden>
+        <div class="local-llm-section-heading">
+            <div>
+                <h3 class="settings-section-title">Runners</h3>
+                <p class="settings-section-description">llama.cpp, ik_llama.cpp and Ollama are part of the agent. Other runners are installed here, only when you press Install: their pinned files are downloaded, checked and set up on this workspace's disk.</p>
+            </div>
+        </div>
+        <div class="settings-busy-region" data-llm-runners aria-busy="false"></div>
     </section>
 </div>

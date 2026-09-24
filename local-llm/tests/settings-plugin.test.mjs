@@ -233,6 +233,6 @@ test('confirmation text cannot break out of the modal attribute', () => {
     assert.equal(confirmMessage('Remove "Evil" <img src=x onerror=alert(1)>?'), "Remove 'Evil' img src=x onerror=alert(1)?");
     const presenter = fs.readFileSync(new URL('IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard.js', ROOT), 'utf8');
     const confirms = presenter.match(/showModal\('confirm-action-modal', \{\s*message: ([a-zA-Z]+)\(/g) || [];
-    assert.equal(confirms.length, 3);
+    assert.equal(confirms.length, 5);
     assert.ok(confirms.every((call) => call.endsWith('confirmMessage(')));
 });

@@ -266,7 +266,7 @@ test('admission refuses before anything is downloaded, and re-checks before laun
     );
     await assert.rejects(
         () => h.controller.run({ modelId: 'gpt-oss-20b', runnerId: 'vllm', requestId: 'request-0002' }),
-        (error) => error.code === 'runner_unsupported' && /Not supported or tested in this release/.test(error.message),
+        (error) => error.code === 'runner_unsupported' && /Not supported in this release/.test(error.message),
     );
     assert.equal(h.calls.download.length, 0);
 

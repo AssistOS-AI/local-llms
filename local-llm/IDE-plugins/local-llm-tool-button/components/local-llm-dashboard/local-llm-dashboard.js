@@ -23,15 +23,18 @@ import {
     hasWeightsOnDisk,
     hardwareCardsHtml,
     modelsTableHtml,
+    runnersPanelHtml,
     splitRunFields,
     statusCardHtml,
 } from './local-llm-dashboard-view.js';
 
-const TABS = Object.freeze(['models', 'playground', 'logs']);
+const TABS = Object.freeze(['models', 'playground', 'logs', 'runners']);
 const PREVIEW_DELAY_MS = 400;
 // While the dashboard is open and visible, hardware and download states are
 // re-read on this interval, so the GPU card never shows a stale value.
 export const OVERVIEW_REFRESH_MS = 7000;
+// While a runner installs, its progress is read more often.
+const INSTALL_REFRESH_MS = 1500;
 
 async function callLocalLlm(tool, args = {}) {
     const client = window.webSkel?.appServices?.getClient?.('local-llm');
@@ -91,6 +94,7 @@ export class LocalLlmDashboard {
         this.promptResult = find('[data-llm-prompt-result]');
         this.promptNote = find('[data-llm-prompt-note]');
         this.logView = find('[data-llm-log]');
+        this.runnersRegion = find('[data-llm-runners]');
         this.follow = find('[data-llm-follow]');
         this.gatewayNote = find('[data-llm-gateway]');
 
@@ -210,6 +214,7 @@ export class LocalLlmDashboard {
         this.renderHardware();
         this.renderModels();
         this.renderDetailInfo();
+        this.renderRunners();
         this.renderDeployment();
         if (this.gatewayNote && this.overview.gatewayModel) {
             this.gatewayNote.textContent = 'Sends one prompt to the running model inside this agent and shows the runner\'s speed. '
@@ -231,7 +236,52 @@ export class LocalLlmDashboard {
         if (!globalThis.document?.hidden && !this.busy) {
             await this.loadOverview().catch(() => {});
         }
-        if (!globalThis.document?.hidden) this.scheduleOverviewRefresh();
+        if (!globalThis.document?.hidden) {
+            const installing = (this.overview?.runners || []).some((runner) => runner.install?.installing);
+            this.scheduleOverviewRefresh(installing ? INSTALL_REFRESH_MS : OVERVIEW_REFRESH_MS);
+        }
+    }
+
+    renderRunners() {
+        this.setHtml('runners', this.runnersRegion, runnersPanelHtml(this.overview?.runners || []));
+    }
+
+    async installRunner(_target, runnerId) {
+        const runner = (this.overview?.runners || []).find((entry) => entry.id === runnerId);
+        const install = runner?.install;
+        if (!install || this.busy) return;
+        const licence = install.licence || {};
+        const terms = licence.requiresAcceptance
+            ? ` It is licensed under ${licence.name} (${licence.url}${licence.source ? `; source: ${licence.source}` : ''}). ${licence.notice || ''} Installing accepts these terms on this workspace's behalf, and your acceptance is recorded.`
+            : ` Licence: ${licence.name}.`;
+        const confirmed = await assistOS.UI.showModal('confirm-action-modal', {
+            message: confirmMessage(`Install ${runner.displayName || runner.id} ${install.version}? It downloads ${formatBytes(install.totalBytes)} of pinned files to this workspace.${terms}`),
+        }, true);
+        if (!confirmed) return;
+        const started = await this.withBusy(`Installing ${runner.displayName || runner.id}…`, async () => {
+            const result = await callLocalLlm('local_llm_runner_install', { runnerId, acceptLicence: Boolean(licence.requiresAcceptance) });
+            await this.loadOverview();
+            return result;
+        });
+        if (started) {
+            this.setStatus(`Installing ${runner.displayName || runner.id}; progress shows under Runners.`, 'success');
+            this.scheduleOverviewRefresh(INSTALL_REFRESH_MS);
+        }
+    }
+
+    async uninstallRunner(_target, runnerId) {
+        const runner = (this.overview?.runners || []).find((entry) => entry.id === runnerId);
+        if (!runner?.install || this.busy) return;
+        const confirmed = await assistOS.UI.showModal('confirm-action-modal', {
+            message: confirmMessage(`Uninstall ${runner.displayName || runner.id}? Its downloaded files are deleted; installing it again downloads them again.`),
+        }, true);
+        if (!confirmed) return;
+        const removed = await this.withBusy(`Uninstalling ${runner.displayName || runner.id}…`, async () => {
+            const result = await callLocalLlm('local_llm_runner_uninstall', { runnerId });
+            await this.loadOverview();
+            return result;
+        });
+        if (removed) this.setStatus(`Uninstalled ${runner.displayName || runner.id}; freed ${formatBytes(removed.freedBytes)}.`, 'success');
     }
 
     activeModelId() {

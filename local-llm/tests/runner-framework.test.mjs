@@ -236,3 +236,18 @@ test('an unsupported runner is refused with the reason its adapter gives, before
     await assert.rejects(() => h.controller.run({ modelId: 'gpt-oss-20b', runnerId: 'vllm', requestId: 'request-vllm-01' }),
         { code: 'runner_unsupported', message: /Not supported/ });
 });
+
+test('vLLM detection reads the on-demand installer, so it follows an install or an uninstall', async () => {
+    const vllm = RUNNERS.vllm;
+    const installer = (installed) => ({ installable: (id) => id === 'vllm', describe: async () => ({ installed, version: '0.30.0' }) });
+    assert.deepEqual(await vllm.detect({ installer: installer(true) }), { installed: true, version: '0.30.0', reason: vllm.unsupportedReason });
+    const absent = await vllm.detect({ installer: installer(false) });
+    assert.equal(absent.installed, false);
+    assert.equal(absent.version, null);
+    assert.match(absent.reason, /Install/);
+    // An image without vLLM in its runner lock cannot install it at all.
+    const noLock = await vllm.detect({ installer: { installable: () => false } });
+    assert.equal(noLock.installed, false);
+    assert.match(noLock.reason, /runner lock/);
+    assert.equal((await vllm.detect()).installed, false);
+});

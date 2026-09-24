@@ -27,6 +27,8 @@ const MAX_TREE_PAGES = 50;
 const SPACE_MARGIN = 1.05;
 const RATE_WINDOW_MS = 5000;
 const IDENTITY_KEYS = Object.freeze(['repo', 'file', 'commit', 'size', 'sha256']);
+// A file named by a fixed URL (a runner's lock entry) is identified by that URL.
+const FILE_IDENTITY_KEYS = Object.freeze(['url', 'size', 'sha256']);
 
 export class DownloadError extends Error {
     constructor(code, message = code, { retryable = false, details } = {}) {
@@ -265,12 +267,12 @@ export function artifactPaths({ root, artifact }) {
     return { dir, file, partial, identity: `${partial}.json`, meta: `${file}.json` };
 }
 
-function identityOf(artifact) {
-    return Object.fromEntries(IDENTITY_KEYS.map((key) => [key, artifact[key]]));
+function identityOf(artifact, keys = IDENTITY_KEYS) {
+    return Object.fromEntries(keys.map((key) => [key, artifact[key]]));
 }
 
-function sameIdentity(record, artifact) {
-    return Boolean(record) && IDENTITY_KEYS.every((key) => record[key] === artifact[key]);
+function sameIdentity(record, artifact, keys = IDENTITY_KEYS) {
+    return Boolean(record) && keys.every((key) => record[key] === artifact[key]);
 }
 
 async function readJson(fsApi, filePath) {
@@ -301,14 +303,14 @@ async function writeJsonAtomic(fsApi, target, value) {
     }
 }
 
-async function inspectWith(fsApi, paths, artifact) {
+async function inspectWith(fsApi, paths, artifact, keys = IDENTITY_KEYS) {
     const size = await fileSize(fsApi, paths.file);
-    if (size === artifact.size && sameIdentity(await readJson(fsApi, paths.meta), artifact)) {
+    if (size === artifact.size && sameIdentity(await readJson(fsApi, paths.meta), artifact, keys)) {
         return { state: 'complete', bytes: size };
     }
     const partialSize = await fileSize(fsApi, paths.partial);
     if (partialSize !== null && partialSize <= artifact.size
-        && sameIdentity(await readJson(fsApi, paths.identity), artifact)) {
+        && sameIdentity(await readJson(fsApi, paths.identity), artifact, keys)) {
         return { state: 'partial', bytes: partialSize };
     }
     return { state: 'absent', bytes: 0 };
@@ -325,13 +327,13 @@ async function removePartial(fsApi, paths) {
 
 // A partial is kept only when its identity record matches this artifact and
 // it is not longer than the artifact; anything else restarts from zero.
-async function reconcilePartial(fsApi, paths, artifact) {
+async function reconcilePartial(fsApi, paths, artifact, keys = IDENTITY_KEYS) {
     const have = await fileSize(fsApi, paths.partial);
     if (have === null) {
         await fsApi.promises.rm(paths.identity, { force: true });
         return 0;
     }
-    if (have > artifact.size || !sameIdentity(await readJson(fsApi, paths.identity), artifact)) {
+    if (have > artifact.size || !sameIdentity(await readJson(fsApi, paths.identity), artifact, keys)) {
         await removePartial(fsApi, paths);
         return 0;
     }
@@ -517,7 +519,8 @@ async function handleResponse(ctx, response) {
         return { retry: 'expired-redirect', status };
     }
     if (status === 404) {
-        throw new DownloadError('NOT_FOUND', 'Model file not found at the pinned commit', { details: { status } });
+        throw new DownloadError('NOT_FOUND', ctx.url ? 'File not found at its pinned URL' : 'Model file not found at the pinned commit',
+            { details: { status } });
     }
     if (isRetryableStatus(status)) {
         return { retry: 'server-error', status };
@@ -535,7 +538,7 @@ async function attemptOnce(ctx) {
         headers.Range = `bytes=${ctx.have}-`;
     }
     try {
-        const response = await ctx.fetchImpl(resolveUrl(ctx.baseUrl, artifact), {
+        const response = await ctx.fetchImpl(ctx.url || resolveUrl(ctx.baseUrl, artifact), {
             headers,
             redirect: 'follow',
             signal: AbortSignal.any(signals),
@@ -607,7 +610,7 @@ async function finalize(ctx, paths) {
     // Meta goes first: a crash before the rename leaves a verifiable partial,
     // never a final file without its identity record.
     await writeJsonAtomic(ctx.fsApi, paths.meta, {
-        ...identityOf(ctx.artifact),
+        ...identityOf(ctx.artifact, ctx.identityKeys),
         verifiedAt: new Date().toISOString(),
     });
     await ctx.fsApi.promises.rename(paths.partial, paths.file);
@@ -647,6 +650,20 @@ export async function downloadArtifact({
     token = '',
     fetchImpl = globalThis.fetch,
     baseUrl = 'https://huggingface.co',
+    ...options
+}) {
+    const paths = artifactPaths({ root, artifact });
+    return downloadInto({ paths, artifact, identityKeys: IDENTITY_KEYS, url: null, token, fetchImpl, baseUrl, ...options });
+}
+
+async function downloadInto({
+    paths,
+    artifact,
+    identityKeys,
+    url,
+    token = '',
+    fetchImpl = globalThis.fetch,
+    baseUrl = 'https://huggingface.co',
     onProgress = () => {},
     signal,
     statfs = (p) => fs.promises.statfs(p),
@@ -656,19 +673,20 @@ export async function downloadArtifact({
     backoffMs = (attempt) => Math.min(30_000, 1000 * 2 ** attempt),
     sleep,
 }) {
-    const paths = artifactPaths({ root, artifact });
     throwIfAborted(signal);
-    const current = await inspectWith(fsApi, paths, artifact);
+    const current = await inspectWith(fsApi, paths, artifact, identityKeys);
     if (current.state === 'complete') {
         await fsApi.promises.rm(paths.identity, { force: true });
         return { status: 'complete', path: paths.file, bytesTransferred: 0 };
     }
-    const have = await reconcilePartial(fsApi, paths, artifact);
+    const have = await reconcilePartial(fsApi, paths, artifact, identityKeys);
     await assertFreeSpace({ fsApi, statfs, dir: paths.dir, remaining: artifact.size - have });
     await fsApi.promises.mkdir(path.dirname(paths.file), { recursive: true });
-    await writeJsonAtomic(fsApi, paths.identity, identityOf(artifact));
+    await writeJsonAtomic(fsApi, paths.identity, identityOf(artifact, identityKeys));
     const ctx = {
         artifact,
+        identityKeys,
+        url,
         token,
         fetchImpl,
         baseUrl,
@@ -685,6 +703,51 @@ export async function downloadArtifact({
     };
     await runTransfer(ctx, paths);
     return { status: 'complete', path: paths.file, bytesTransferred: ctx.transferred };
+}
+
+function fileSource({ url, size, sha256, target, allowHttp = false }) {
+    let parsed;
+    try {
+        parsed = new URL(url);
+    } catch {
+        throw invalidSource('Invalid file URL');
+    }
+    if (parsed.protocol !== 'https:' && !(allowHttp && parsed.protocol === 'http:')) {
+        throw invalidSource('Files are fetched over https only');
+    }
+    if (parsed.username || parsed.password) {
+        throw invalidSource('A file URL must not carry credentials');
+    }
+    if (!Number.isSafeInteger(size) || size <= 0) {
+        throw invalidSource('Invalid file size');
+    }
+    if (typeof sha256 !== 'string' || !SHA256_RE.test(sha256)) {
+        throw invalidSource('Invalid file sha256');
+    }
+    if (typeof target !== 'string' || !path.isAbsolute(target) || target.includes('\0')) {
+        throw invalidSource('Invalid file target');
+    }
+    const file = path.resolve(target);
+    return {
+        artifact: Object.freeze({ url: parsed.href, size, sha256 }),
+        paths: { dir: path.dirname(file), file, partial: `${file}.partial`, identity: `${file}.partial.json`, meta: `${file}.json` },
+    };
+}
+
+/**
+ * One file pinned by URL, size and sha256 (a runner lock entry), downloaded
+ * to `target` with the same resume, free-space and verification rules as
+ * model weights. `<target>.json` records the verified identity. Plain http is
+ * refused unless `allowHttp` (tests only).
+ */
+export async function downloadFile({ url, size, sha256, target, allowHttp = false, ...options }) {
+    const { artifact, paths } = fileSource({ url, size, sha256, target, allowHttp });
+    return downloadInto({ paths, artifact, identityKeys: FILE_IDENTITY_KEYS, url: artifact.url, ...options });
+}
+
+export async function inspectFile({ url, size, sha256, target, allowHttp = true }) {
+    const { artifact, paths } = fileSource({ url, size, sha256, target, allowHttp });
+    return inspectWith(fs, paths, artifact, FILE_IDENTITY_KEYS);
 }
 
 async function removeFile(filePath) {

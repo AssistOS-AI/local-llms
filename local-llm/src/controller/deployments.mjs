@@ -30,6 +30,8 @@ import {
     resolveHuggingFaceArtifact,
 } from './downloader.mjs';
 import { readSnapshot } from './hardware.mjs';
+import { createRunnerInstaller } from './runnerInstaller.mjs';
+import { loadRunnerLock } from './runnerLock.mjs';
 import { createLogBuffer, parseRunnerReport, startRunnerProcess } from './runnerProcess.mjs';
 import { createStateStore, reconcileAfterRestart } from './stateStore.mjs';
 import { createWeightStores } from './weightStores.mjs';
@@ -77,7 +79,14 @@ export function createController({
     readyTimeoutMs = 20 * 60_000,
     stopGraceMs = 10_000,
     pollMs = 1000,
-    detectRunner = (runner) => runner.detect({ spawnSync }),
+    // On-demand runners (runners plan §5.2): the lock shipped in the image,
+    // a verified cache under /data/runners, runnable copies under /opt/runners.
+    installer = createRunnerInstaller({
+        lock: loadRunnerLock(env.LOCAL_LLM_RUNNER_LOCK || undefined),
+        cacheRoot: path.join(dataDir, 'runners'),
+        runRoot: env.LOCAL_LLM_RUN_ROOT || undefined,
+    }),
+    detectRunner = (runner) => runner.detect({ spawnSync, installer }),
     now = () => new Date(),
 } = {}) {
     const log = createLogBuffer({ file: path.join(dataDir, 'logs', 'runner.log') });
@@ -85,6 +94,12 @@ export function createController({
     const state = reconcileAfterRestart(stateStore.load(), now().toISOString());
     let detected = {};
     let job = null;
+    // One runner install at a time, beside the deployment job.
+    let installJob = null;
+    // Installable through the controller: in the image's runner lock and with
+    // an adapter here. A lock entry for a runner this release cannot run is
+    // installed only by the CI install check.
+    const installable = (id) => typeof id === 'string' && Object.hasOwn(runners, id) && installer.installable(id);
     let runner = null;
     let draining = false;
     // Speed of the last completion served by the ready runner, as the chat
@@ -154,8 +169,9 @@ export function createController({
         return model.sources[definition.weightFormat];
     }
 
-    function runnerInfo(id) {
-        if (!detected[id]) detected[id] = detectRunner(runners[id]);
+    // Detection may read the disk (an installed runner's record), so it is async.
+    async function runnerInfo(id) {
+        if (!detected[id]) detected[id] = await detectRunner(runners[id]);
         return detected[id];
     }
 
@@ -228,10 +244,14 @@ export function createController({
 
     async function overview({ preview = null } = {}) {
         const snap = await snapshot();
-        const runnerList = Object.values(runners).map((definition) => ({
-            ...runnerSummary(definition),
-            ...runnerInfo(definition.id),
-        }));
+        const runnerList = [];
+        for (const definition of Object.values(runners)) {
+            runnerList.push({
+                ...runnerSummary(definition),
+                ...(await runnerInfo(definition.id)),
+                ...(installable(definition.id) ? { install: await installInfo(definition.id) } : {}),
+            });
+        }
         const models = [];
         for (const model of catalog()) {
             // One entry per weight format: runners that read it share the download.
@@ -449,7 +469,7 @@ export function createController({
     // process through `launch` (an argv and a minimal environment), waits
     // with `waitForHttp`, and may report phases and progress for weights it
     // fetches itself; the controller owns the process and the state.
-    function startContext(deployment, model, signal, weights) {
+    function startContext(deployment, model, signal, weights, runnerDir = null) {
         const definition = getRunner(deployment.runnerId);
         const port = ports[deployment.runnerId];
         const apiKey = definition.apiKey ? apiKeyFactory() : null;
@@ -459,6 +479,8 @@ export function createController({
             params: deployment.params,
             artifact: deployment.artifact,
             weights,
+            // An on-demand runner's runnable copy (null for runners in the image).
+            runnerDir,
             port,
             apiKey,
             dataDir,
@@ -497,7 +519,15 @@ export function createController({
             throwIfAborted(signal);
         }
         setPhase('starting');
-        const details = await definition.start(startContext(deployment, model, signal, weights));
+        let runnerDir = null;
+        if (installable(definition.id)) {
+            log.append('controller', `preparing ${definition.id} from its verified cache`);
+            const built = await installer.ensureRunnable(definition.id, { signal });
+            runnerDir = installer.pathsFor(installer.entryFor(definition.id)).runDir;
+            if (built.rebuilt) log.append('controller', `rebuilt ${definition.id} in ${built.seconds.toFixed(1)} s (${built.bytes} bytes)`);
+            throwIfAborted(signal);
+        }
+        const details = await definition.start(startContext(deployment, model, signal, weights, runnerDir));
         throwIfAborted(signal);
         if (!runner || runner.deploymentId !== deployment.id) {
             throw new LocalLlmError('runner_exited', 'The runner is not running after its start-up.');
@@ -587,6 +617,12 @@ export function createController({
                 throw new LocalLlmError('runner_unsupported', result.reason);
             }
             if (!source) throw new LocalLlmError('no_source', `${model.displayName} has no ${definition.displayName} source.`);
+            if (installJob?.runnerId === runnerId) {
+                throw new LocalLlmError('busy', `${definition.displayName} is being installed; run it once the install finishes.`);
+            }
+            if (installable(runnerId) && !(await installer.describe(runnerId)).installed) {
+                throw new LocalLlmError('runner_not_installed', `${definition.displayName} is not installed; install it first.`);
+            }
             const store = storeFor(source);
             if (!store.isPinned(source)) {
                 throw new LocalLlmError('unpinned', 'The model source is not pinned to a commit; update the model entry.');
@@ -798,6 +834,123 @@ export function createController({
         });
     }
 
+    // ---------------------------------------------------------- installs
+
+    async function installInfo(id) {
+        const info = await installer.describe(id);
+        const record = state.runnerInstalls?.[id] || null;
+        return { ...info, state: record ? structuredClone(record) : null, installing: installJob?.runnerId === id };
+    }
+
+    function setInstall(id, fields) {
+        state.runnerInstalls ||= {};
+        state.runnerInstalls[id] = { ...(state.runnerInstalls[id] || {}), ...fields, updatedAt: now().toISOString() };
+        save();
+    }
+
+    function startInstallJob(entry) {
+        const controller = new AbortController();
+        const current = { runnerId: entry.id, abort: controller, cancelReason: null, promise: null };
+        current.promise = (async () => {
+            setInstall(entry.id, { phase: 'downloading', error: null, pausedReason: null });
+            const licence = state.runnerInstalls[entry.id]?.licence || null;
+            await installer.fetchAll(entry, {
+                signal: controller.signal,
+                licence,
+                onProgress: (progress) => setInstall(entry.id, {
+                    download: { bytes: progress.bytes, total: progress.total, rate: Math.round(progress.rate || 0), transferred: progress.transferred },
+                }),
+            });
+            setInstall(entry.id, { phase: 'installing' });
+            const built = await installer.ensureRunnable(entry.id, { signal: controller.signal });
+            // The old version's cache goes only after the new one is in place.
+            await installer.pruneOtherVersions(entry.id);
+            setInstall(entry.id, { phase: 'installed', version: entry.version, rebuild: { seconds: built.seconds, bytes: built.bytes }, installedAt: now().toISOString() });
+            log.append('controller', `installed ${entry.id} ${entry.version}; runnable copy built in ${built.seconds.toFixed(1)} s`);
+        })().catch((error) => {
+            const aborted = controller.signal.aborted || (error instanceof DownloadError && error.code === 'ABORTED');
+            if (aborted || (error instanceof DownloadError && ['PAUSED_ENOSPC', 'NETWORK'].includes(error.code))) {
+                const reason = current.cancelReason === 'drain'
+                    ? 'The agent restarted during the install; press Install to resume.'
+                    : (aborted ? 'Install stopped; press Install to resume.' : error.message);
+                setInstall(entry.id, { phase: 'paused', pausedReason: reason, error: aborted ? null : error.message });
+                return;
+            }
+            setInstall(entry.id, { phase: 'error', error: error.message });
+        }).finally(() => {
+            if (installJob === current) installJob = null;
+            redetectRunners();
+        });
+        installJob = current;
+    }
+
+    /**
+     * Install one runner from the image's lock. Only the lock's files are ever
+     * fetched; a licence that needs acceptance must be accepted, and the
+     * acceptance is recorded with who (from the verified caller) and when.
+     */
+    function installRunner({ runnerId, acceptLicence = false, acceptedBy = null, ...rest } = {}) {
+        return queue.run(async () => {
+            if (Object.keys(rest).length) {
+                throw new LocalLlmError('invalid_request', `Unexpected install fields: ${Object.keys(rest).join(', ')}`);
+            }
+            if (!installable(runnerId)) {
+                throw new LocalLlmError('not_installable', `No installable runner '${String(runnerId)}' in this image's runner lock.`);
+            }
+            if (draining) throw new LocalLlmError('shutting_down', 'The agent is restarting; install again once it is back.');
+            const entry = installer.entryFor(runnerId);
+            if (installJob) {
+                if (installJob.runnerId === runnerId) return { accepted: true, install: await installInfo(runnerId) };
+                throw new LocalLlmError('busy', `${installJob.runnerId} is being installed; wait for it to finish.`);
+            }
+            const record = state.runnerInstalls?.[runnerId];
+            const accepted = record?.licence && record.version === entry.version ? record.licence : null;
+            if (entry.licence.requiresAcceptance && !accepted && acceptLicence !== true) {
+                throw new LocalLlmError('licence_required', `Installing ${runnerId} needs its ${entry.licence.name} terms accepted.`,
+                    { licence: entry.licence });
+            }
+            if ((await installer.describe(runnerId)).installed && (await installer.describe(runnerId)).runnable) {
+                return { accepted: false, installed: true, install: await installInfo(runnerId) };
+            }
+            setInstall(runnerId, {
+                version: entry.version,
+                phase: 'downloading',
+                download: { bytes: 0, total: entry.totalBytes, rate: 0, transferred: 0 },
+                error: null,
+                pausedReason: null,
+                licence: accepted || (entry.licence.requiresAcceptance
+                    ? { name: entry.licence.name, acceptedBy: typeof acceptedBy === 'string' && acceptedBy ? acceptedBy : 'unknown admin', acceptedAt: now().toISOString() }
+                    : null),
+            });
+            startInstallJob(entry);
+            return { accepted: true, install: await installInfo(runnerId) };
+        });
+    }
+
+    function uninstallRunner({ runnerId } = {}) {
+        return queue.run(async () => {
+            if (!installable(runnerId)) {
+                throw new LocalLlmError('not_installable', `No installable runner '${String(runnerId)}' in this image's runner lock.`);
+            }
+            const deployment = state.deployment;
+            if (deployment?.runnerId === runnerId && (ACTIVE_PHASES.has(deployment.phase) || job !== null)) {
+                throw new LocalLlmError('in_use', `${runnerId} is running; stop the model first.`);
+            }
+            if (installJob?.runnerId === runnerId) {
+                installJob.cancelReason = 'uninstall';
+                installJob.abort.abort();
+                await installJob.promise;
+            }
+            const result = await installer.uninstall(runnerId);
+            if (state.runnerInstalls?.[runnerId]) {
+                delete state.runnerInstalls[runnerId];
+                save();
+            }
+            redetectRunners();
+            return result;
+        });
+    }
+
     /**
      * Drain for SIGTERM: stop admitting commands, checkpoint any download
      * (the partial and its identity stay), stop the runner, persist.
@@ -813,6 +966,11 @@ export function createController({
             job.cancelReason = 'drain';
             job.abort.abort();
             await job.promise;
+        }
+        if (installJob) {
+            installJob.cancelReason = 'drain';
+            installJob.abort.abort();
+            await installJob.promise;
         }
         if (runner) {
             const stopping = runner;
@@ -843,6 +1001,8 @@ export function createController({
         addModel,
         updateModel,
         removeModel,
+        installRunner,
+        uninstallRunner,
         redetectRunners,
         drain,
         get state() { return state; },
