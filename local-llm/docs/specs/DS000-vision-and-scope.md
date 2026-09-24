@@ -10,7 +10,7 @@ summary: What local-llm is, how it differs from the legacy agents, and what it d
 
 ## Introduction
 
-`local-llm` runs open-weight language models on the workspace's own NVIDIA GPU. A workspace administrator picks a model and a runner in Explorer's Settings, presses Run, and the agent downloads the weights, starts the runner on the GPU, and exposes the running model to other agents through the workspace-local Soul Gateway.
+`local-llm` runs open-weight language models on the workspace's own NVIDIA GPU. A workspace administrator opens Local LLMs from Explorer's toolbar (or Settings → Agents → Local LLMs), picks a model and a runner, presses Run, and the agent downloads the weights, starts the runner on the GPU, and exposes the running model to other agents through the workspace-local Soul Gateway.
 
 ## Core Content
 

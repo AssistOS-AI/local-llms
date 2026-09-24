@@ -50,38 +50,20 @@ test('the presenter module exports only LocalLlmSettings, which the settings loa
     assert.equal(first, 'LocalLlmSettings');
 });
 
-// Explorer's settings style rules (explorer/tests/unit/settingsModalPluginSettings.test.js,
-// the DPU Data Sources assertions), applied to this plugin because Explorer's
-// own test reads only the DPU files.
-test('the settings plugin follows Explorer settings style rules', () => {
+// The settings entry is now a launcher: it opens the Local LLMs dashboard in
+// Explorer's full-screen panel and closes itself.
+test('the settings launcher keeps Explorer settings style rules and has no dialog of its own to style', () => {
     const presenter = readText('local-llm-settings.js');
     const template = readText('local-llm-settings.html');
     const styles = readText('local-llm-settings.css');
-    assert.match(presenter, /constructor\(element, invalidate\)[\s\S]*?this\.invalidate\(\);/);
-    assert.match(presenter, /webSkelPresenter\?\.setOptions/);
-    assert.match(template, /class="settings-tabs"[\s\S]*?role="tablist"/);
-    assert.match(template, /data-llm-tab="models"[\s\S]*?role="tab"/);
-    assert.match(template, /data-llm-panel="models"[\s\S]*?role="tabpanel"/);
-    assert.match(template, /<custom-select id="localLlmRunner"/);
-    assert.match(presenter, /assistOS\.UI\.showModal\('confirm-action-modal'/);
-    assert.doesNotMatch(presenter, /window\.confirm|window\.prompt|window\.alert/);
-    assert.match(template, /class="close"[\s\S]*?\/explorer\/assets\/icons\/x-mark\.svg/);
-    assert.match(template, /data-local-action="toggleFullscreen"/);
-    assert.match(template, /\/explorer\/assets\/icons\/fullscreen\.svg/);
-    assert.match(template, /class="settings-card settings-card-static local-llm-editor"/);
-    assert.doesNotMatch(template, /<select\b/);
-    assert.doesNotMatch(presenter, /<select\b/);
+    assert.match(presenter, /constructor\(element, invalidate[\s\S]*?this\.invalidate\(\);/);
+    assert.match(template, /class="close"[\s\S]*?\/explorer\/shared\/assets\/icons\/x-mark\.svg/);
+    assert.match(template, /data-local-action="openDashboard"/);
+    assert.doesNotMatch(template, /\/explorer\/assets\/icons\//, 'icons that moved to /explorer/shared/assets/icons answer 404');
     assert.doesNotMatch(template, /\$\$/, 'WebSkel treats $$name as a template variable');
-    assert.doesNotMatch(styles, /min-width:\s*(?:[1-9]\d*px|min\()/);
     assert.doesNotMatch(styles, /#[0-9a-f]{3,8}\b/i);
-    assert.doesNotMatch(styles, /\.(?:general-button|gray-button|form-input|modal-actions)\s*\{/);
     assert.doesNotMatch(styles, /(?:color|background|border(?:-color|-radius)?|box-shadow):/);
-    assert.match(styles, /var\(--(?:space|text|surface|border|radius)-/);
-    assert.match(styles, /local-llm-settings-dialog\s*\{[\s\S]*?height:\s*min\(720px,/);
-    assert.match(styles, /local-llm-settings-dialog\.is-fullscreen/);
-    assert.match(presenter, /classList\.toggle\('is-fullscreen'/);
-    assert.match(styles, /@media \(max-width: 720px\)/);
-    // Every rule is scoped to the component tag or its dialog.
+    assert.doesNotMatch(styles, /\/\*/, 'WebSkel mis-scopes the rule after a CSS comment');
     for (const rule of styles.replace(/@media[^{]*\{/g, '').split('}')) {
         const selector = rule.split('{')[0].trim();
         if (!selector) continue;
@@ -91,23 +73,58 @@ test('the settings plugin follows Explorer settings style rules', () => {
     }
 });
 
-test('the settings modal toggles fullscreen on its host dialog', () => {
-    const classes = new Set();
-    const dialog = {
-        classList: {
-            contains: (name) => classes.has(name),
-            toggle: (name, enabled) => (enabled ? classes.add(name) : classes.delete(name)),
-        },
+function launcherHarness({ openExpandedModal, registered = false, registerRuntimeComponent } = {}) {
+    const calls = [];
+    const ui = {
+        ...(openExpandedModal === null ? {} : { openExpandedModal: openExpandedModal || ((descriptor) => { calls.push(['open', descriptor]); }) }),
+        closeModal: (element) => calls.push(['close', element === host]),
     };
-    const aria = new Map();
-    const modal = new presenterModule.LocalLlmSettings({ closest: () => dialog }, () => {});
-    modal.fullscreenButton = { setAttribute: (name, value) => aria.set(name, value) };
-    modal.toggleFullscreen();
-    assert.equal(classes.has('is-fullscreen'), true);
-    assert.equal(aria.get('aria-pressed'), 'true');
-    modal.toggleFullscreen();
-    assert.equal(classes.has('is-fullscreen'), false);
-    assert.equal(aria.get('aria-pressed'), 'false');
+    const statusLine = { textContent: '', classList: { toggle: (name, on) => { if (on) calls.push(['status', name]); } } };
+    const host = { querySelector: () => statusLine };
+    const saved = { customElements: globalThis.customElements, fetch: globalThis.fetch };
+    globalThis.customElements = { get: () => (registered ? class {} : undefined) };
+    globalThis.fetch = async (url) => { calls.push(['fetch', String(url).split('/').slice(-1)[0]]); return { ok: true, text: async () => 'x' }; };
+    const presenter = new presenterModule.LocalLlmSettings(host, () => {}, {
+        ui: () => ui,
+        webSkel: () => ({ name: 'webSkel' }),
+        baseUrl: new URL('../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard', import.meta.url).href,
+        loadRegistration: async () => ({ registerRuntimeComponent: registerRuntimeComponent || (async (webSkel, definition) => {
+            calls.push(['register', definition.name, definition.presenterClassName, typeof definition.presenterModule?.LocalLlmDashboard]);
+        }) }),
+    });
+    presenter.statusLine = statusLine;
+    const restore = () => Object.assign(globalThis, saved);
+    return { presenter, calls, statusLine, restore };
+}
+
+test('the settings launcher registers the dashboard when needed, opens it full screen and closes itself', async (t) => {
+    const fresh = launcherHarness();
+    t.after(fresh.restore);
+    assert.equal(await fresh.presenter.openDashboard(), true);
+    assert.deepEqual(fresh.calls.filter(([kind]) => kind === 'register'), [['register', 'local-llm-dashboard', 'LocalLlmDashboard', 'function']]);
+    assert.deepEqual(fresh.calls.filter(([kind]) => kind === 'fetch').map(([, name]) => name).sort(), ['local-llm-dashboard.css', 'local-llm-dashboard.html']);
+    assert.deepEqual(fresh.calls.find(([kind]) => kind === 'open')[1], { mode: 'component', component: 'local-llm-dashboard', title: 'Local LLMs' });
+    assert.deepEqual(fresh.calls.at(-1), ['close', true]);
+    fresh.restore();
+
+    const already = launcherHarness({ registered: true });
+    t.after(already.restore);
+    assert.equal(await already.presenter.openDashboard(), true);
+    assert.equal(already.calls.some(([kind]) => kind === 'register' || kind === 'fetch'), false, 'no second registration');
+    already.restore();
+
+    const old = launcherHarness({ openExpandedModal: null });
+    t.after(old.restore);
+    assert.equal(await old.presenter.openDashboard(), false);
+    assert.match(old.statusLine.textContent, /toolbar/);
+    assert.equal(old.calls.some(([kind]) => kind === 'close'), false, 'stays open to show why');
+    old.restore();
+
+    const failing = launcherHarness({ registerRuntimeComponent: async () => { throw new Error('boom'); } });
+    t.after(failing.restore);
+    assert.equal(await failing.presenter.openDashboard(), false);
+    assert.match(failing.statusLine.textContent, /could not be loaded: boom/);
+    failing.restore();
 });
 
 test('the parameter form is generated from the runner schema and read back as typed values', () => {
@@ -189,132 +206,8 @@ test('tool results are parsed, and tool failures surface their message', () => {
 
 test('confirmation text cannot break out of the modal attribute', () => {
     assert.equal(confirmMessage('Remove "Evil" <img src=x onerror=alert(1)>?'), "Remove 'Evil' img src=x onerror=alert(1)?");
-    const presenter = readText('local-llm-settings.js');
+    const presenter = fs.readFileSync(new URL('IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard.js', ROOT), 'utf8');
     const confirms = presenter.match(/showModal\('confirm-action-modal', \{\s*message: ([a-zA-Z]+)\(/g) || [];
     assert.equal(confirms.length, 3);
     assert.ok(confirms.every((call) => call.endsWith('confirmMessage(')));
-});
-
-// Fake timers and a fake local-llm client for the presenter's polling.
-function pollingHarness(t, callTool) {
-    const saved = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, window: globalThis.window };
-    const pending = new Map();
-    let nextId = 1;
-    globalThis.setTimeout = (fn, ms) => { const id = nextId++; pending.set(id, { fn, ms }); return id; };
-    globalThis.clearTimeout = (id) => { pending.delete(id); };
-    globalThis.window = { webSkel: { appServices: { getClient: () => ({ callTool }) } } };
-    t.after(() => Object.assign(globalThis, saved));
-    const settle = async () => { for (let i = 0; i < 6; i += 1) await new Promise((resolve) => saved.setTimeout(resolve, 0)); };
-    const fireAll = async () => {
-        const due = [...pending.values()];
-        pending.clear();
-        for (const timer of due) timer.fn();
-        await settle();
-    };
-    const presenter = new presenterModule.LocalLlmSettings({ isConnected: true, querySelector: () => null, querySelectorAll: () => [] }, () => {});
-    return { presenter, pending, fireAll, settle };
-}
-
-const statusText = (phase) => ({ content: [{ type: 'text', text: JSON.stringify({
-    phase, deployment: { phase, modelId: 'm', runnerId: 'llama.cpp' }, logs: [], nextSeq: 0,
-}) }] });
-
-test('each Send, Stop or Cancel keeps a single polling chain', async (t) => {
-    let statusCalls = 0;
-    const h = pollingHarness(t, async (tool) => {
-        if (tool === 'local_llm_status') { statusCalls += 1; return statusText('ready'); }
-        if (tool === 'local_llm_test_prompt') return { content: [{ type: 'text', text: JSON.stringify({ text: 'PONG', elapsedMs: 5 }) }] };
-        return { content: [{ type: 'text', text: '{}' }] };
-    });
-    const p = h.presenter;
-    p.status = { phase: 'ready' };
-    p.promptForm = { reportValidity: () => true, elements: { prompt: { value: 'hi' }, maxTokens: { value: '16' } } };
-    p.promptResult = { innerHTML: '' };
-    p.startPollingIfActive();
-    await h.fireAll();
-    assert.equal(h.pending.size, 1);
-    for (let send = 1; send <= 3; send += 1) {
-        await p.submitPrompt({ preventDefault() {} });
-        await h.settle();
-        assert.equal(h.pending.size, 1, `after Send #${send}`);
-    }
-    await p.stopDeployment();
-    await h.settle();
-    await p.cancelDownload();
-    await h.settle();
-    assert.equal(h.pending.size, 1, 'after Stop and Cancel');
-    const before = statusCalls;
-    await h.fireAll();
-    assert.equal(statusCalls - before, 1, 'one status call per tick');
-    p.closed = true;
-    await h.fireAll();
-    assert.equal(h.pending.size, 0);
-});
-
-test('a failed status call backs off and keeps polling while the modal is open', async (t) => {
-    let calls = 0;
-    const h = pollingHarness(t, async () => {
-        calls += 1;
-        if (calls === 2) throw new Error('transient router 502');
-        return statusText('downloading');
-    });
-    const p = h.presenter;
-    p.status = { phase: 'downloading' };
-    p.startPollingIfActive();
-    await h.fireAll();
-    assert.equal(calls, 1);
-    await h.fireAll();
-    assert.equal(calls, 2);
-    assert.equal(h.pending.size, 1, 'still polling after the failure');
-    assert.ok([...h.pending.values()][0].ms > 1500, 'with a backoff');
-    await h.fireAll();
-    assert.equal(calls, 3);
-    assert.equal(h.pending.size, 1);
-    assert.equal([...h.pending.values()][0].ms, 1500, 'back to the normal interval after a success');
-});
-
-function deferred() {
-    let resolve;
-    const promise = new Promise((ok) => { resolve = ok; });
-    return { promise, resolve };
-}
-
-test('at most one status request is in flight; a poll asked for meanwhile runs once after it', { timeout: 5000 }, async (t) => {
-    const replies = [];
-    let inFlight = 0;
-    let maxInFlight = 0;
-    const h = pollingHarness(t, async () => {
-        inFlight += 1;
-        maxInFlight = Math.max(maxInFlight, inFlight);
-        const reply = deferred();
-        replies.push(reply);
-        try {
-            return await reply.promise;
-        } finally {
-            inFlight -= 1;
-        }
-    });
-    const p = h.presenter;
-    p.status = { phase: 'downloading' };
-    const first = p.poll();
-    await h.settle();
-    assert.equal(replies.length, 1);
-    // A direct poll and a forced restart while the request is pending only
-    // mark a follow-up; they neither send a request nor arm a timer.
-    const second = p.poll();
-    p.startPollingIfActive(true);
-    await h.settle();
-    assert.equal(replies.length, 1);
-    assert.equal(h.pending.size, 0);
-    await second;
-    replies[0].resolve(statusText('downloading'));
-    await first;
-    await h.settle();
-    assert.equal(h.pending.size, 1);
-    assert.equal([...h.pending.values()][0].ms, 0, 'the follow-up runs at once');
-    await h.fireAll();
-    assert.equal(replies.length, 2);
-    assert.equal(maxInFlight, 1);
-    replies[1].resolve(statusText('ready'));
-    await h.settle();
 });

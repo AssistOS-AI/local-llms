@@ -25,7 +25,7 @@ Every entry is validated by `validateModel` (`src/controller/catalog.mjs`). Ids 
 
 ### Weights on demand
 
-Nothing is downloaded at enable, at restart, when Settings is opened, or when a model is added. Weights are fetched only by `local_llm_run`.
+Nothing is downloaded at enable, at restart, when the Local LLMs dashboard is opened, or when a model is added. Weights are fetched only by `local_llm_run`.
 
 | Runner | Download |
 | --- | --- |

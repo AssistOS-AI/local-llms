@@ -1,0 +1,26 @@
+local-llm-tool-button {
+    display: block;
+    width: 100%;
+    text-align: center;
+}
+
+.app-toolbar-slot local-llm-tool-button,
+local-llm-tool-button[data-host-orientation="horizontal"] {
+    width: auto;
+    text-align: initial;
+}
+
+local-llm-tool-button .local-llm-tool {
+    display: inline-flex;
+    width: 100%;
+    justify-content: center;
+}
+
+.app-toolbar-slot local-llm-tool-button .local-llm-tool,
+local-llm-tool-button[data-host-orientation="horizontal"] .local-llm-tool {
+    width: auto;
+}
+
+local-llm-tool-button .local-llm-tool-button[hidden] {
+    display: none;
+}

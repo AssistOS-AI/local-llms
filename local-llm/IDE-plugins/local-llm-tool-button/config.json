@@ -1,0 +1,33 @@
+{
+  "pluginCategory": "application",
+  "id": "local-llm-tool-button",
+  "component": "local-llm-tool-button",
+  "location": [
+    "file-exp:toolbar"
+  ],
+  "locationOrder": 295,
+  "label": "Local LLMs",
+  "tooltip": "Run open-weight models on this workspace's GPU",
+  "icon": "./icon.svg",
+  "presenter": "LocalLlmToolButton",
+  "type": "embedded",
+  "autoPin": false,
+  "adminOnly": true,
+  "dependencies": [
+    {
+      "component": "local-llm-dashboard",
+      "presenter": "LocalLlmDashboard",
+      "type": "embedded"
+    },
+    {
+      "component": "custom-select",
+      "presenter": "CustomSelect",
+      "path": "explorer/web-components/components/custom-select/custom-select"
+    }
+  ],
+  "toolbarModal": {
+    "mode": "component",
+    "component": "local-llm-dashboard",
+    "title": "Local LLMs"
+  }
+}
