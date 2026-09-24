@@ -386,37 +386,34 @@ describe('Ollama runner', () => {
     });
 });
 
-describe('unsupported runners', () => {
+describe('vLLM runner', () => {
     const throwingSpawn = () => {
         throw new Error('must not spawn');
     };
 
-    for (const runner of [vllmRunner]) {
-        it(`${runner.id} reports unsupported without spawning`, async () => {
-            assert.equal(runner.supported, false);
-            assert.equal(runner.pinnedVersion, null);
-            // Installed on demand: without an installer lock entry it cannot be installed.
-            assert.deepEqual(await runner.detect({ spawnSync: throwingSpawn }), {
-                installed: false,
-                version: null,
-                reason: 'This image\'s runner lock has no vLLM entry.'
-            });
-            assertCode(() => runner.buildLaunch({ params: {}, port: 18080, apiKey: API_KEY, model: MODEL }),
-                'runner_unsupported');
+    it('detects through the installer, never by spawning', async () => {
+        assert.equal(vllmRunner.supported, true);
+        assert.equal(vllmRunner.pinnedVersion, '0.30.0');
+        // Installed on demand: without an installer lock entry it cannot be installed.
+        assert.deepEqual(await vllmRunner.detect({ spawnSync: throwingSpawn }), {
+            installed: false,
+            version: null,
+            reason: 'This image\'s runner lock has no vLLM entry.'
         });
-    }
+        // It needs its runnable copy, weights and a GPU share to launch.
+        assertCode(() => vllmRunner.buildLaunch({ params: {}, port: 18082, apiKey: API_KEY, model: MODEL }), 'invalid_launch');
+    });
 
     it('validates vLLM params', () => {
         assert.equal(vllmRuntime, vllmRunner);
         const values = vllmRunner.normalizeParams({ maxModelLen: 8192 });
-        assert.equal(values.gpuMemoryUtilization, 0.9);
+        assert.equal(values.gpuMemoryUtilization, null);
         assert.equal(values.maxNumSeqs, 1);
         assert.equal(values.quantization, null);
+        assert.equal(values.enforceEager, true);
         assertParamError(() => vllmRunner.normalizeParams({ gpuMemoryUtilization: 1 }), 'gpuMemoryUtilization');
         assertParamError(() => vllmRunner.normalizeParams({ quantization: 'awq;id' }), 'quantization');
-        assertParamError(() => vllmRunner.normalizeParams({ cpuOffloadParams: 'a b' }), 'cpuOffloadParams');
-        assert.equal(vllmRunner.normalizeParams({ cpuOffloadParams: 'experts.*,lm_head' }).cpuOffloadParams,
-            'experts.*,lm_head');
+        assertParamError(() => vllmRunner.normalizeParams({ cpuOffloadParams: 'experts.*' }), 'cpuOffloadParams');
     });
 });
 

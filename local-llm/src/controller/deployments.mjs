@@ -87,6 +87,12 @@ export function createController({
         runRoot: env.LOCAL_LLM_RUN_ROOT || undefined,
     }),
     detectRunner = (runner) => runner.detect({ spawnSync, installer }),
+    // Test seams for Hugging Face snapshots (the store's defaults are the real downloader).
+    downloadSnapshot = undefined,
+    inspectSnapshot = undefined,
+    resolveSnapshot = undefined,
+    // The agent's own /dev/shm (a private tmpfs), where PyTorch runners keep sockets.
+    shmDir = '/dev/shm',
     now = () => new Date(),
 } = {}) {
     const log = createLogBuffer({ file: path.join(dataDir, 'logs', 'runner.log') });
@@ -120,6 +126,9 @@ export function createController({
         state: () => state,
         save: () => save(),
         activeArtifact: () => (job !== null ? state.deployment?.artifact ?? null : null),
+        ...(downloadSnapshot ? { downloadSnapshot } : {}),
+        ...(inspectSnapshot ? { inspectSnapshot } : {}),
+        ...(resolveSnapshot ? { resolveSnapshot } : {}),
     });
 
     // A drain has a fixed time budget (drainBudget.mjs); a Stop gives the
@@ -481,6 +490,9 @@ export function createController({
             weights,
             // An on-demand runner's runnable copy (null for runners in the image).
             runnerDir,
+            // The admission just re-checked before launch; vLLM sizes its GPU share from it.
+            admission: deployment.admission ?? null,
+            shmDir,
             port,
             apiKey,
             dataDir,

@@ -22,13 +22,14 @@ This specification defines how `local-llm` presents itself to Ploinky: the manif
 | `agent` | `exec node /code/src/main.mjs` | The controller is the container's main process |
 | `readiness` | `{ "protocol": "mcp" }` | Ready when AgentServer answers MCP |
 | `volumes` | `{ ".data/local-llm": "/data" }` | Weights, state and logs survive restarts |
+| `containerSecurity.shmSize` | `"8g"` | The agent's own `/dev/shm` (Ploinky gives every agent its own IPC namespace). vLLM keeps its inter-process sockets there, because the container's `/tmp` (fuse-overlayfs) cannot hold a usable socket, and PyTorch runners exchange tensors through it. It is a tmpfs limit, not memory set aside. |
 | `containerSecurity.gpu` | `true` | Declares GPU access (Ploinky D14): Ploinky attaches the single CDI device `ploinky.local/gpu=all` when the Box's GPU wiring names this agent and is active; otherwise the agent starts without it and reports why (DS003) |
 | `routerAccess.agentPorts` | `false` | Closes the Router's agent-port relay, so runner ports are never reachable from a browser session |
 | `ideSettings` | key `local-llm-settings`, scope `workspace`, plugin `local-llm/local-llm-settings`, `adminOnly: true` | Settings → Agents → Local LLMs. The entry is a launcher: it opens the dashboard below and closes itself. |
 | IDE plugin `local-llm-tool-button` (found in `IDE-plugins/`, not a manifest field) | `file-exp:toolbar`, `locationOrder` 295, `adminOnly: true`, `toolbarModal` `{mode: "component", component: "local-llm-dashboard"}` | The toolbar button, placed after Soul Gateway's. It opens the WebSkel dashboard `local-llm-dashboard` in Explorer's full-screen panel, which has cards for GPU, RAM, disk and the running model, and tabs for Models, Playground and Logs. The dashboard uses Explorer's tokens only, so it follows Explorer's light and dark themes. |
 | `endpoints.chatCompletions` | `node /code/src/chatResponder.mjs`, `supportsStream: true` | The model's only consumer-facing surface |
 
-The manifest declares no other `containerSecurity` field, no `llmRuntime` block (so no `runtimePolicy` device entry and no `llmRuntime.enabled`), and no published ports.
+The manifest declares no other `containerSecurity` field (and needs a Ploinky that knows `shmSize`, from ploinky 9512fd30), no `llmRuntime` block (so no `runtimePolicy` device entry and no `llmRuntime.enabled`), and no published ports.
 
 ### Processes
 

@@ -35,7 +35,7 @@ The repository's other twelve agents share the CPU image `assistos/local-llms`, 
 | llama.cpp `b11159` (CUDA 12.8 build) | Supported. GGUF from Hugging Face, pinned by commit, size and sha256. |
 | ik_llama.cpp, commit `20f7a72` (built into the image with CUDA 12.8 for sm_86 and sm_89) | Supported. A llama.cpp fork with faster hybrid CPU/GPU inference for mixture-of-experts models. It reads the same GGUF files as llama.cpp, so the two share one download. |
 | Ollama `0.34.4` | Supported. Library tags pulled by the Ollama daemon, verified by manifest digest when the catalog pins one. |
-| vLLM `0.30.0` | Installable on demand from the image's runner lock (DS004); running models on it is not supported yet (runners plan, Phase R5). It reads Hugging Face snapshots (`hf`, DS002). |
+| vLLM `0.30.0` | Supported once an admin installs it from the image's runner lock (DS004). It reads Hugging Face snapshots (`hf`, DS002), such as the seed Qwen3-4B-AWQ, runs eager by default for a faster start, and takes only a model whose weights and KV cache fit the GPU unless the admin offloads weights to RAM (DS003). |
 
 Every runner is an adapter in `src/runners/`: its identity, the weight format it reads, its loopback port and per-start key, its parameter schema and basic form fields, detection, its start-up pipeline (launch and readiness), the model name for chat requests, its admission policy and its log parser. The controller, the tools and the dashboard have no per-runner branches, so a new runner is an adapter plus data.
 

@@ -176,7 +176,7 @@ test('a runner that dies right after its readiness probes ends in error, never i
 });
 
 test('ports come from the adapters, one per supported runner, all distinct', () => {
-    assert.deepEqual(defaultPorts(), { 'llama.cpp': 18080, 'ik_llama.cpp': 18081, ollama: 18434 });
+    assert.deepEqual(defaultPorts(), { 'llama.cpp': 18080, 'ik_llama.cpp': 18081, ollama: 18434, vllm: 18082 });
     assert.throws(() => defaultPorts({ a: { id: 'a', supported: true, port: 18080 }, b: { id: 'b', supported: true, port: 18080 } }),
         /port 18080/);
 });
@@ -227,12 +227,11 @@ test('runner detection is cached, and re-detection picks up an install or remova
 });
 
 test('an unsupported runner is refused with the reason its adapter gives, before anything is downloaded', async (t) => {
-    const h = harness(t);
+    // A runner this release lists but cannot run (as vLLM was before R5).
+    const unsupported = { ...RUNNERS.vllm, supported: false, unsupportedReason: 'Not supported in this release: a test runner.' };
+    const h = harness(t, { runners: { ...RUNNERS, vllm: unsupported } });
     const overview = await h.controller.overview();
-    const vllm = overview.runners.find((runner) => runner.id === 'vllm');
-    assert.equal(vllm.supported, false);
-    // vLLM reads Hugging Face snapshots; the seed has none, so it has no entry for gpt-oss-20b.
-    assert.equal(overview.models[0].runners.vllm, undefined);
+    assert.equal(overview.runners.find((runner) => runner.id === 'vllm').supported, false);
     await assert.rejects(() => h.controller.run({ modelId: 'gpt-oss-20b', runnerId: 'vllm', requestId: 'request-vllm-01' }),
         { code: 'runner_unsupported', message: /Not supported/ });
 });
@@ -240,7 +239,7 @@ test('an unsupported runner is refused with the reason its adapter gives, before
 test('vLLM detection reads the on-demand installer, so it follows an install or an uninstall', async () => {
     const vllm = RUNNERS.vllm;
     const installer = (installed) => ({ installable: (id) => id === 'vllm', describe: async () => ({ installed, version: '0.30.0' }) });
-    assert.deepEqual(await vllm.detect({ installer: installer(true) }), { installed: true, version: '0.30.0', reason: vllm.unsupportedReason });
+    assert.deepEqual(await vllm.detect({ installer: installer(true) }), { installed: true, version: '0.30.0', reason: null });
     const absent = await vllm.detect({ installer: installer(false) });
     assert.equal(absent.installed, false);
     assert.equal(absent.version, null);

@@ -178,6 +178,75 @@ export function admitOllama({ model, source, params, gpu, memory, disk, remainin
     return result('ok', null, withRam, warnings);
 }
 
+// vLLM on this GPU (measured with Qwen3-4B-AWQ on the RTX 3060 Laptop):
+// CUDA reports about 94 % of nvidia-smi's total as usable, and besides the
+// weights and the KV cache vLLM holds activations, the CUDA context and
+// allocator slack, budgeted at 768 MiB.
+const VLLM_USABLE_SHARE = 0.94;
+const VLLM_OVERHEAD_BYTES = 768 * MIB;
+const VLLM_MAX_UTILIZATION = 0.9;
+const VLLM_RUNNER_RAM_BYTES = 3 * GIB;
+
+// The vLLM policy: all weights on the GPU unless the admin explicitly offloads
+// some to RAM (cpuOffloadGb, much slower), a KV cache sized for maxModelLen,
+// and a GPU memory share (--gpu-memory-utilization) taken from what is free.
+export function admitVllm({ model, source, params, gpu, memory, disk, remainingDownloadBytes = 0 }) {
+    const size = source.size || 0;
+    const offloadBytes = Math.round((params.cpuOffloadGb || 0) * GIB);
+    const gpuWeightsBytes = Math.max(0, size - offloadBytes);
+    const kvFactor = params.kvCacheDtype === 'fp8' ? 0.5 : 1;
+    const kvBytes = Math.round((model.memory?.kvBytesPerToken || DEFAULT_KV_BYTES_PER_TOKEN) * params.maxModelLen * kvFactor);
+    const gpuBytes = gpuWeightsBytes + kvBytes + VLLM_OVERHEAD_BYTES;
+    const usable = (share) => share * gpu.totalBytes * VLLM_USABLE_SHARE;
+    const fromFree = Math.floor(Math.min(VLLM_MAX_UTILIZATION, (gpu.freeBytes - 2 * GPU_MARGIN_BYTES) / gpu.totalBytes) * 100) / 100;
+    const gpuMemoryUtilization = params.gpuMemoryUtilization ?? fromFree;
+    const ramBytes = offloadBytes + VLLM_RUNNER_RAM_BYTES;
+    const estimate = {
+        weightsBytes: size, gpuWeightsBytes, cpuWeightsBytes: offloadBytes, kvBytes, gpuBytes, ramBytes,
+        gpuMemoryUtilization, basis: 'snapshot size, KV cache for maxModelLen and a measured vLLM overhead',
+    };
+    const warnings = ramWarning(ramBytes, memory);
+    if (offloadBytes > 0) {
+        warnings.push(`Offloading ${gib(offloadBytes)} of weights to system RAM makes generation much slower: `
+            + 'every token reads them over PCIe.');
+    }
+    if (offloadBytes > size) {
+        return result('incompatible', `cpuOffloadGb (${gib(offloadBytes)}) is larger than the model (${gib(size)}).`, estimate, warnings);
+    }
+    // Whether it can ever fit: at the admin's share when set, else at vLLM's usual maximum.
+    const ceiling = params.gpuMemoryUtilization ?? VLLM_MAX_UTILIZATION;
+    if (gpuBytes > usable(ceiling)) {
+        if (params.gpuMemoryUtilization !== null && params.gpuMemoryUtilization !== undefined) {
+            return result('incompatible', `Needs about ${gib(gpuBytes)} of GPU memory; gpuMemoryUtilization ${params.gpuMemoryUtilization} `
+                + `gives vLLM about ${gib(usable(ceiling))}. Raise gpuMemoryUtilization or leave it empty.`, estimate, warnings);
+        }
+        const needed = Math.ceil((gpuBytes - usable(ceiling)) / GIB);
+        return result('incompatible', `Needs about ${gib(gpuBytes)} of GPU memory for its weights and a KV cache for `
+            + `${params.maxModelLen} tokens; vLLM can use about ${gib(usable(ceiling))} of this GPU. Reduce maxModelLen, `
+            + `pick a smaller model, or offload weights to RAM with cpuOffloadGb (at least ${needed + (offloadBytes / GIB)} GiB; much slower).`,
+        estimate, warnings);
+    }
+    if (memory.totalBytes && ramBytes > memory.totalBytes) {
+        return result('incompatible', `Needs about ${gib(ramBytes)} of RAM; this machine has ${gib(memory.totalBytes)}.`, estimate, warnings);
+    }
+    // Busy now: the share does not fit in the free memory, or what is free
+    // leaves vLLM less than its minimum share (a large GPU mostly in use).
+    if (gpuMemoryUtilization < 0.1 || gpuMemoryUtilization * gpu.totalBytes > gpu.freeBytes - GPU_MARGIN_BYTES
+        || gpuBytes > usable(gpuMemoryUtilization)) {
+        return result('insufficient-now', `Needs about ${gib(gpuBytes)} of GPU memory; ${gib(gpu.freeBytes)} is free now`
+            + `${otherGpuUsers(gpu)}.`, estimate, warnings);
+    }
+    if (memory.availableBytes && ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
+        return result('insufficient-now', `Needs about ${gib(ramBytes)} of RAM; ${gib(memory.availableBytes)} is available now.`,
+            estimate, warnings);
+    }
+    if (diskShortage(remainingDownloadBytes, disk)) {
+        return result('insufficient-now', `The download needs ${gib(remainingDownloadBytes * 1.05)} of free disk; `
+            + `${gib(disk.freeBytes)} is free.`, estimate, warnings);
+    }
+    return result('ok', null, estimate, warnings);
+}
+
 /**
  * The checks every runner shares, then the runner's own policy
  * (`runner.admit`), which sizes the estimate for how that runner uses memory.

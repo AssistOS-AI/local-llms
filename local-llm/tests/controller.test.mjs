@@ -264,9 +264,10 @@ test('admission refuses before anything is downloaded, and re-checks before laun
         () => h.controller.run({ ...RUN, requestId: 'request-0001', params: { ctxSize: 131072, nCpuMoe: 0 } }),
         (error) => error.code === 'admission_incompatible' && /GPU memory/.test(error.message),
     );
+    // vLLM would need gpt-oss-20b's 13.8 GB snapshot on a 6 GB GPU (R5 exit criterion).
     await assert.rejects(
         () => h.controller.run({ modelId: 'gpt-oss-20b', runnerId: 'vllm', requestId: 'request-0002' }),
-        (error) => error.code === 'runner_unsupported' && /Not supported in this release/.test(error.message),
+        (error) => error.code === 'admission_incompatible' && /GPU memory/.test(error.message) && /cpuOffloadGb/.test(error.message),
     );
     assert.equal(h.calls.download.length, 0);
 
@@ -289,10 +290,11 @@ test('overview lists runners, per-runner sizes, download state and admission', a
     assert.equal(gpt.runners.ollama.size, 13793441244);
     assert.equal(gpt.runners['llama.cpp'].admission.status, 'ok');
     assert.equal(gpt.runners['llama.cpp'].admission.estimate.isEstimate, true);
-    // vLLM reads Hugging Face snapshots, which gpt-oss-20b's entry does not offer.
-    assert.equal(gpt.runners.vllm, undefined);
+    // vLLM reads the Hugging Face snapshot, which does not fit this GPU without offload.
+    assert.equal(gpt.runners.vllm.size, 13789244452);
+    assert.equal(gpt.runners.vllm.admission.status, 'incompatible');
     // One download per weight format, shared by the runners that read it.
-    assert.deepEqual(Object.keys(gpt.weights), ['gguf', 'ollama']);
+    assert.deepEqual(Object.keys(gpt.weights), ['gguf', 'ollama', 'hf']);
     assert.deepEqual(gpt.weights.gguf.runners, ['llama.cpp', 'ik_llama.cpp']);
     assert.deepEqual(gpt.weights.gguf.download, gpt.runners['llama.cpp'].download);
     assert.equal(gpt.runners['llama.cpp'].context.totalContext, 16384);

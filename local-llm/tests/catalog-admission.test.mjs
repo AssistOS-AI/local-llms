@@ -85,11 +85,10 @@ test('admission: enough hardware but VRAM held by another process is insufficien
 });
 
 test('admission: an unsupported runner is incompatible with the reason its adapter gives', () => {
-    const vllm = getRunner('vllm');
-    const result = admit({ runner: vllm, model: GPT, source: undefined, params: {}, snapshot: snapshot() });
+    const unsupported = { ...getRunner('vllm'), supported: false, unsupportedReason: 'Not supported in this release: a test runner.' };
+    const result = admit({ runner: unsupported, model: GPT, source: undefined, params: {}, snapshot: snapshot() });
     assert.equal(result.status, 'incompatible');
-    assert.equal(result.reason, vllm.unsupportedReason);
-    assert.match(result.reason, /^Not supported in this release/);
+    assert.equal(result.reason, unsupported.unsupportedReason);
 });
 
 test('admission: no GPU grant is an actionable incompatibility; big RAM users get a warning', () => {

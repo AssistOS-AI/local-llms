@@ -24,11 +24,12 @@ test('every tool is admin-tagged, runs from /code, and names itself', () => {
     }
 });
 
-test('the manifest declares GPU access and nothing else, and closes the agent-port relay', () => {
+test('the manifest declares GPU access and its own shared memory, nothing else, and closes the agent-port relay', () => {
     const manifest = read('manifest.json');
     // containerSecurity.gpu implies the one CDI device (Ploinky D14), so no
-    // runtimePolicy device entry and no other llmRuntime setting is needed.
-    assert.deepEqual(manifest.containerSecurity, { gpu: true });
+    // runtimePolicy device entry and no other llmRuntime setting is needed;
+    // shmSize sizes the agent's private /dev/shm (vLLM's sockets, PyTorch runners).
+    assert.deepEqual(manifest.containerSecurity, { gpu: true, shmSize: '8g' });
     assert.equal(manifest.llmRuntime, undefined);
     assert.equal(manifest.routerAccess.agentPorts, false);
     assert.deepEqual(manifest.volumes, { '.data/local-llm': '/data' });

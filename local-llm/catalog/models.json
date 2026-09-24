@@ -27,6 +27,25 @@
           "tag": "gpt-oss:20b",
           "manifestDigest": "sha256:17052f91a42e97930aa6e28a6c6c06a983e6a58dbb00434885a0cf5313e376f7",
           "size": 13793441244
+        },
+        "hf": {
+          "type": "hf-snapshot",
+          "repo": "openai/gpt-oss-20b",
+          "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+          "commit": "6cee5e81ee83917806bbde320786a8fb61efebee",
+          "quantization": "MXFP4",
+          "files": [
+            { "path": "chat_template.jinja", "size": 16738, "sha256": "a4c9919cbbd4acdd51ccffe22da049264b1b73e59055fa58811a99efbd7c8146" },
+            { "path": "config.json", "size": 1806, "sha256": "3a2a26ded679375b7928ddeca59764df7cea83220c1961035f6d6e232659e9ce" },
+            { "path": "generation_config.json", "size": 177, "sha256": "f9970ada892d2d1f72e3ed0a6535ccebadd11897318794ca671d8c7014c957da" },
+            { "path": "model-00000-of-00002.safetensors", "size": 4792272488, "sha256": "16d0f997dcfc4462089d536bffe51b4bcea2f872f5c430be09ef8ed392312427" },
+            { "path": "model-00001-of-00002.safetensors", "size": 4798702184, "sha256": "4fbe328ab445455d6f58dc73852b85873bd626986310abd91cd4d2ce3245eaea" },
+            { "path": "model-00002-of-00002.safetensors", "size": 4170342232, "sha256": "a18106b209e9ab35c3406db4f6f12a927364a058b21e9d1373d682e20674b303" },
+            { "path": "model.safetensors.index.json", "size": 36355, "sha256": "0e085b977c4c9942f85938828e8c989ed7d5cdabf852e4da6a67c116cd502cd1" },
+            { "path": "special_tokens_map.json", "size": 98, "sha256": "dd5e191d20c12d2fee1da5bae14ca1db0f5f4215300af691f23cdee97120a293" },
+            { "path": "tokenizer.json", "size": 27868174, "sha256": "0614fe83cadab421296e664e1f48f4261fa8fef6e03e63bb75c20f38e37d07d3" },
+            { "path": "tokenizer_config.json", "size": 4200, "sha256": "9279e942392b742d633c7adbb89ebe002c98399db8926a7af5125c726f404070" }
+          ]
         }
       },
       "memory": {
@@ -59,12 +78,52 @@
         },
         "ollama": {
           "numCtx": 4096
+        },
+        "vllm": {
+          "maxModelLen": 4096
         }
       },
       "validated": {
         "llama.cpp": "RTX 3060 Laptop (6 GB), b11159, 16k context, 12 threads: 4,798 MiB VRAM, 38.4 tok/s generation, 246.7 tok/s prompt",
         "ik_llama.cpp": "RTX 3060 Laptop (6 GB), 20f7a72, 16k context, 12 threads: 5,340 MiB VRAM, 40.5 tok/s generation, 386.6 tok/s prompt",
         "ollama": "RTX 3060 Laptop (6 GB), 4k context: 67%/33% CPU/GPU, 32.1 tok/s generation"
+      }
+    },
+    {
+      "id": "qwen3-4b-awq",
+      "displayName": "Qwen3 4B AWQ",
+      "description": "Qwen3 4B quantized to 4 bits with AWQ, as a Hugging Face snapshot of safetensors files. It fits a 6 GB GPU with room for an 8k KV cache on vLLM.",
+      "license": "Apache-2.0",
+      "architecture": "dense",
+      "totalParams": "4B",
+      "activeParams": "4B",
+      "contextLength": 40960,
+      "sources": {
+        "hf": {
+          "type": "hf-snapshot",
+          "repo": "Qwen/Qwen3-4B-AWQ",
+          "revision": "74d4bd2bd4bff9cafc9345221320bffb08b406a3",
+          "commit": "74d4bd2bd4bff9cafc9345221320bffb08b406a3",
+          "quantization": "AWQ",
+          "files": [
+            { "path": "config.json", "size": 904, "sha256": "cf74d40352c502483cca3a94fd8037dce0d7b31c21831f1721ff6ee360b50075" },
+            { "path": "generation_config.json", "size": 239, "sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2" },
+            { "path": "merges.txt", "size": 1671853, "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5" },
+            { "path": "model.safetensors", "size": 2666027672, "sha256": "a7043493ebd993f5fea18794ad7b5b3e064a52023f392a7fcce7ce0984c341f0" },
+            { "path": "tokenizer.json", "size": 11422654, "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4" },
+            { "path": "tokenizer_config.json", "size": 9732, "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101" },
+            { "path": "vocab.json", "size": 2776833, "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910" }
+          ]
+        }
+      },
+      "memory": {
+        "layers": 36,
+        "kvBytesPerToken": 147456
+      },
+      "recommended": {
+        "vllm": {
+          "maxModelLen": 8192
+        }
       }
     }
   ]
