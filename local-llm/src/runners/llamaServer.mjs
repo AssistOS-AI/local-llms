@@ -6,6 +6,7 @@
 import { spawnSync as realSpawnSync } from 'node:child_process';
 
 import { admitLlamaServer } from '../controller/admission.mjs';
+import { defaultThreads, physicalCoreCount } from '../controller/hardware.mjs';
 import { parseRunnerReport } from '../controller/runnerProcess.mjs';
 import {
     ParamError,
@@ -60,7 +61,7 @@ export const LLAMA_SERVER_PARAM_SCHEMA = deepFreeze({
         threads: {
             type: ['integer', 'null'], minimum: 1, maximum: 256, default: null,
             title: 'CPU threads',
-            description: 'Number of CPU threads for generation; empty uses the runner default.'
+            description: 'Number of CPU threads for generation; empty uses the physical CPU cores minus 2.'
         },
         parallel: {
             type: 'integer', minimum: 1, maximum: 16, default: 1,
@@ -118,9 +119,17 @@ function assertModelId(model) {
  * dialect.loadArgs(v)    flags for mlock/noMmap
  * dialect.jinja(model)   whether to pass --jinja
  * dialect.parseVersion   the version from `--version` output, or null
+ *
+ * cpuCores() counts the physical cores for the default --threads; it is read
+ * once, on the first launch.
  */
-export function createLlamaServerRunner({ id, displayName, executable, pinnedVersion, port, dialect }) {
+export function createLlamaServerRunner({ id, displayName, executable, pinnedVersion, port, dialect, cpuCores = physicalCoreCount }) {
     const paramSchema = LLAMA_SERVER_PARAM_SCHEMA;
+    let autoThreads = null;
+    // The servers default to few threads; physical cores minus 2 is faster
+    // here and leaves room for the agent and the host (runners plan, I2).
+    // An admin-set value wins; the stored parameters keep "empty".
+    const threadsFor = (values) => values.threads ?? (autoThreads ??= defaultThreads(cpuCores()));
 
     function normalizeParams(params = {}, { model } = {}) {
         const values = validateParams(paramSchema, params, { defaults: recommendedFor(model, id) });
@@ -156,9 +165,7 @@ export function createLlamaServerRunner({ id, displayName, executable, pinnedVer
         }
         args.push('--flash-attn', values.flashAttn);
         args.push('--cache-type-k', values.cacheTypeK, '--cache-type-v', values.cacheTypeV);
-        if (values.threads != null) {
-            args.push('--threads', values.threads);
-        }
+        args.push('--threads', threadsFor(values));
         args.push('-np', values.parallel);
         if (dialect.unifiedKv && values.parallel > 1) {
             args.push('--kv-unified');

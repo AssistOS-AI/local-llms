@@ -5,6 +5,7 @@ import { RUNNERS, getRunner, runnerSummaries } from '../src/runners/index.mjs';
 import { ikLlamaCppRunner } from '../src/runners/ikLlamaCpp.mjs';
 import { llamaCppRunner } from '../src/runners/llamaCpp.mjs';
 import { parseRunnerReport } from '../src/controller/runnerProcess.mjs';
+import { defaultThreads, physicalCoreCount } from '../src/controller/hardware.mjs';
 import { loadSeedCatalog } from '../src/controller/catalog.mjs';
 import { ollamaRunner } from '../src/runners/ollama.mjs';
 import { vllmRunner, vllmRuntime } from '../src/runners/vllm.mjs';
@@ -12,6 +13,9 @@ import { vllmRunner, vllmRuntime } from '../src/runners/vllm.mjs';
 const API_KEY = 'k'.repeat(24) + '_-AZaz09k';
 const MODEL = Object.freeze({ id: 'qwen3-8b-q4' });
 const SHELL_META = /[;&|`$<>\n\\]/;
+
+// Default --threads on this machine (runners plan, I2).
+const AUTO_THREADS = String(defaultThreads(physicalCoreCount()));
 
 function llamaLaunch(params, overrides = {}) {
     return llamaCppRunner.buildLaunch({
@@ -128,7 +132,7 @@ describe('llama.cpp runner', () => {
             '--api-key', API_KEY, '--no-webui', '-lv', '4', '--alias', MODEL.id,
             '--ctx-size', '16384', '--n-gpu-layers', '99',
             '--flash-attn', 'auto', '--cache-type-k', 'f16', '--cache-type-v', 'f16',
-            '-np', '1', '--batch-size', '2048', '--ubatch-size', '512'
+            '--threads', AUTO_THREADS, '-np', '1', '--batch-size', '2048', '--ubatch-size', '512'
         ]);
     });
 
@@ -196,9 +200,9 @@ describe('llama.cpp runner', () => {
         assertParamError(() => llamaLaunch({ chatTemplateKwargs: { other: 1 } }), 'chatTemplateKwargs.other');
     });
 
-    it('adds --threads only when set', () => {
+    it('passes --threads: the admin-set value, else physical cores minus 2', () => {
         assert.ok(hasPair(llamaLaunch({ threads: 8 }).args, '--threads', '8'));
-        assert.ok(!llamaLaunch({ threads: null }).args.includes('--threads'));
+        assert.ok(hasPair(llamaLaunch({ threads: null }).args, '--threads', AUTO_THREADS));
     });
 
     it('rejects bad port, apiKey, artifactPath and model id', () => {
@@ -255,7 +259,8 @@ describe('ik_llama.cpp runner', () => {
         assert.deepEqual(launch.args, [
             '-m', PATH, '--host', '127.0.0.1', '--port', '18081', '--api-key', API_KEY,
             '--webui', 'none', '--alias', 'gpt-oss-20b', '--ctx-size', '16384', '--n-gpu-layers', '99',
-            '--n-cpu-moe', '17', '--flash-attn', 'auto', '--cache-type-k', 'f16', '--cache-type-v', 'f16', '-np', '1',
+            '--n-cpu-moe', '17', '--flash-attn', 'auto', '--cache-type-k', 'f16', '--cache-type-v', 'f16',
+            '--threads', AUTO_THREADS, '-np', '1',
             '--batch-size', '256', '--ubatch-size', '256', '--chat-template-kwargs', '{"reasoning_effort":"low"}', '--jinja',
         ]);
     });

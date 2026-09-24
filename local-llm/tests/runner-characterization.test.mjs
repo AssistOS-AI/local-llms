@@ -11,6 +11,7 @@ import test from 'node:test';
 import { loadSeedCatalog } from '../src/controller/catalog.mjs';
 import { createController } from '../src/controller/deployments.mjs';
 import { manifestPath } from '../src/controller/ollamaStore.mjs';
+import { defaultThreads, physicalCoreCount } from '../src/controller/hardware.mjs';
 import { createStateStore } from '../src/controller/stateStore.mjs';
 
 const MIB = 1024 * 1024;
@@ -98,7 +99,9 @@ test('llama.cpp: the exact launch, probes and chat target', async (t) => {
     assert.deepEqual(process.args, [
         '-m', '/data/models/gguf/gpt.gguf', '--host', '127.0.0.1', '--port', '18080', '--api-key', KEY,
         '--no-webui', '-lv', '4', '--alias', 'gpt-oss-20b', '--ctx-size', '16384', '--n-gpu-layers', '99',
-        '--n-cpu-moe', '17', '--flash-attn', 'auto', '--cache-type-k', 'f16', '--cache-type-v', 'f16', '-np', '1',
+        '--n-cpu-moe', '17', '--flash-attn', 'auto', '--cache-type-k', 'f16', '--cache-type-v', 'f16',
+        // Intended change (runners plan, I2): threads default to physical cores minus 2.
+        '--threads', String(defaultThreads(physicalCoreCount())), '-np', '1',
         '--batch-size', '256', '--ubatch-size', '256', '--chat-template-kwargs', '{"reasoning_effort":"low"}', '--jinja',
     ]);
     assert.deepEqual(process.env, {

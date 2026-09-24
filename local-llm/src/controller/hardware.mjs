@@ -76,6 +76,82 @@ export function readMemory({ fsApi = fs } = {}) {
     return { totalBytes: value('MemTotal'), availableBytes: value('MemAvailable'), swapFreeBytes: value('SwapFree') };
 }
 
+function readText(fsApi, file) {
+    try {
+        return fsApi.readFileSync(file, 'utf8');
+    } catch {
+        return null;
+    }
+}
+
+// "0-3,8,10-11" -> [0, 1, 2, 3, 8, 10, 11]
+function parseCpuList(text) {
+    const cpus = [];
+    for (const part of String(text).trim().split(',')) {
+        const match = /^(\d+)(?:-(\d+))?$/.exec(part.trim());
+        if (!match) return null;
+        const first = Number(match[1]);
+        const last = match[2] === undefined ? first : Number(match[2]);
+        if (last < first || last - first > 4096) return null;
+        for (let cpu = first; cpu <= last; cpu += 1) cpus.push(cpu);
+    }
+    return cpus.length ? cpus : null;
+}
+
+/**
+ * Physical CPU cores this process may run on: the CPUs its affinity or
+ * cpuset allows, counted once per (package, core) so SMT siblings share one
+ * core, and capped by a cgroup v2 CPU quota. Falls back to /proc/cpuinfo when
+ * sysfs has no topology, then to the logical CPU count.
+ */
+export function physicalCoreCount({ fsApi = fs, availableParallelism = () => os.availableParallelism?.() ?? os.cpus().length } = {}) {
+    const logical = Math.max(1, availableParallelism());
+    const status = readText(fsApi, '/proc/self/status');
+    const allowedMatch = status && /^Cpus_allowed_list:\s*(\S+)\s*$/m.exec(status);
+    const allowed = allowedMatch ? parseCpuList(allowedMatch[1]) : null;
+    const allowedSet = allowed ? new Set(allowed) : null;
+
+    let cores = null;
+    if (allowed) {
+        const seen = new Set();
+        for (const cpu of allowed) {
+            const base = `/sys/devices/system/cpu/cpu${cpu}/topology`;
+            const pkg = readText(fsApi, `${base}/physical_package_id`);
+            const core = readText(fsApi, `${base}/core_id`);
+            if (pkg === null || core === null) {
+                seen.clear();
+                break;
+            }
+            seen.add(`${pkg.trim()}:${core.trim()}`);
+        }
+        if (seen.size) cores = seen.size;
+    }
+    if (cores === null) {
+        const cpuinfo = readText(fsApi, '/proc/cpuinfo');
+        const seen = new Set();
+        for (const block of (cpuinfo || '').split(/\n\s*\n/)) {
+            const field = (name) => new RegExp(`^${name}\\s*:\\s*(\\S+)`, 'm').exec(block)?.[1];
+            const processor = field('processor');
+            const core = field('core id');
+            if (processor === undefined || core === undefined) continue;
+            if (allowedSet && !allowedSet.has(Number(processor))) continue;
+            seen.add(`${field('physical id') ?? 0}:${core}`);
+        }
+        cores = seen.size || logical;
+    }
+    const quota = readText(fsApi, '/sys/fs/cgroup/cpu.max');
+    const quotaMatch = quota && /^(\d+)\s+(\d+)\s*$/.exec(quota.trim());
+    if (quotaMatch && Number(quotaMatch[2]) > 0) {
+        cores = Math.min(cores, Math.max(1, Math.ceil(Number(quotaMatch[1]) / Number(quotaMatch[2]))));
+    }
+    return cores;
+}
+
+/** The llama-server runners' default CPU threads: physical cores minus 2 (runners plan, I2). */
+export function defaultThreads(cores) {
+    return Math.max(1, cores - 2);
+}
+
 export async function readDisk(dataDir, { statfs = (target) => fs.promises.statfs(target) } = {}) {
     const stats = await statfs(dataDir);
     return { freeBytes: Number(stats.bavail) * Number(stats.bsize), totalBytes: Number(stats.blocks) * Number(stats.bsize) };
