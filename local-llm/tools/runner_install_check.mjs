@@ -11,11 +11,13 @@
 //     (libcuda.so.1), when another wheel in the same environment ships it
 //     (loaded at run time, as torch loads its CUDA libraries), or when the
 //     lock lists it in check.optionalLibraries with the reason the runner
-//     never needs it. Anything else fails.
+//     never needs it. Anything else fails;
+//   - every pinned data file (`into`) is in the runnable copy with its bytes.
 // Usage: node runner_install_check.mjs <runnerId> [--cache DIR] [--lock FILE]
 // Prints one JSON report; exits 1 if any check fails.
 
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { argv, exit, stdout } from 'node:process';
@@ -90,6 +92,22 @@ export function classifyMissingLibraries({ missing, provided, optional = {} }) {
     return { unresolved, optional: optionalFound, providedByEnvironment: [...providedFound].sort() };
 }
 
+/** Each pinned data file (`into`) must be in the runnable copy with the lock's bytes. */
+export function checkDataFiles(entry, runDir) {
+    const placed = {};
+    const problems = [];
+    for (const file of entry.files.filter((candidate) => candidate.into)) {
+        const relative = path.join(file.into, file.name);
+        let digest = null;
+        try {
+            digest = crypto.createHash('sha256').update(fs.readFileSync(path.join(runDir, relative))).digest('hex');
+        } catch {}
+        placed[relative] = digest === null ? 'missing' : (digest === file.sha256 ? 'ok' : 'differs');
+        if (placed[relative] !== 'ok') problems.push(`${relative} ${digest === null ? 'is missing' : 'differs from the lock'}`);
+    }
+    return { placed, problems };
+}
+
 // Written in full before the process exits, even to a pipe.
 function finish(report, code) {
     stdout.write(`${JSON.stringify(report, null, 2)}\n`, () => exit(code));
@@ -127,6 +145,9 @@ async function main() {
             if (!ok && !gpuOnly) report.problems.push(`import ${module} failed`);
         }
     }
+    const data = checkDataFiles(entry, runDir);
+    report.dataFiles = data.placed;
+    report.problems.push(...data.problems);
     const objects = sharedObjects(runDir);
     report.sharedObjects = objects.files.length;
     const missing = {};

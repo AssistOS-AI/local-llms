@@ -6,9 +6,13 @@
 // the reason.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
-import { classifyMissingLibraries } from '../tools/runner_install_check.mjs';
+import { checkDataFiles, classifyMissingLibraries } from '../tools/runner_install_check.mjs';
 import { validateRunnerLock } from '../src/controller/runnerLock.mjs';
 
 const TOOL = new URL('../tools/runner_install_check.mjs', import.meta.url).pathname;
@@ -41,6 +45,23 @@ test('the lock names optional libraries with a reason; anything else is refused'
     for (const bad of [{ '*': 'everything' }, { 'lib/../x.so': 'r' }, { 'libx.so': '' }, { 'libx.so': 3 }, ['libx.so']]) {
         assert.throws(() => validateRunnerLock(lock({ optionalLibraries: bad })), /optionalLibraries/);
     }
+});
+
+test('every pinned data file must sit in its directory of the runnable copy with the pinned bytes', (t) => {
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-datacheck-'));
+    t.after(() => fs.rmSync(runDir, { recursive: true, force: true }));
+    const vocab = crypto.randomBytes(2048);
+    const sha256 = crypto.createHash('sha256').update(vocab).digest('hex');
+    const entry = { files: [
+        { name: 'x-1-py3-none-any.whl', sha256: 'a'.repeat(64) },
+        { name: 'o200k_base.tiktoken', sha256, into: 'tiktoken' },
+    ] };
+    assert.deepEqual(checkDataFiles(entry, runDir), { placed: { 'tiktoken/o200k_base.tiktoken': 'missing' }, problems: ['tiktoken/o200k_base.tiktoken is missing'] });
+    fs.mkdirSync(path.join(runDir, 'tiktoken'));
+    fs.writeFileSync(path.join(runDir, 'tiktoken', 'o200k_base.tiktoken'), Buffer.concat([vocab, Buffer.from('x')]));
+    assert.deepEqual(checkDataFiles(entry, runDir).problems, ['tiktoken/o200k_base.tiktoken differs from the lock']);
+    fs.writeFileSync(path.join(runDir, 'tiktoken', 'o200k_base.tiktoken'), vocab);
+    assert.deepEqual(checkDataFiles(entry, runDir), { placed: { 'tiktoken/o200k_base.tiktoken': 'ok' }, problems: [] });
 });
 
 test('the check prints its whole report before it exits, however long', async () => {

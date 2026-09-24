@@ -296,6 +296,13 @@ export function createRunnerInstaller({
             await fs.promises.mkdir(into, { recursive: true });
             await step(`unpacking ${file.name}`, 'tar', ['-xzf', path.join(sourceDir, file.name), '-C', into, '--strip-components=1', '--no-same-owner'], { signal, env });
         }
+        // Data files the runner reads at run time, copied as verified.
+        for (const file of entry.files.filter((candidate) => candidate.into)) {
+            const dir = path.join(paths.runDir, file.into);
+            await fs.promises.mkdir(dir, { recursive: true });
+            await fs.promises.copyFile(path.join(sourceDir, file.name), path.join(dir, file.name), fs.constants.COPYFILE_EXCL);
+            await fs.promises.chmod(path.join(dir, file.name), 0o444);
+        }
         await fs.promises.rm(paths.tmpDir, { recursive: true, force: true });
     }
 

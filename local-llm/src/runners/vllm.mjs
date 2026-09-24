@@ -28,6 +28,12 @@ const NVIDIA_LIB_DIR = '/usr/local/nvidia/lib64';
 // /dev/shm is a private tmpfs (Ploinky gives every agent its own IPC namespace).
 const RPC_DIR_NAME = 'local-llm-vllm';
 const RPC_DIR = `/dev/shm/${RPC_DIR_NAME}`;
+// gpt-oss's chat format (openai_harmony) needs OpenAI's o200k_base tokenizer
+// vocabulary. The runner lock pins it into this directory of the runnable copy
+// (`into`), and harmony reads it from here, checking its sha256, instead of
+// downloading it from openaipublic when the first request arrives.
+const TIKTOKEN_DIR_NAME = 'tiktoken';
+const O200K_FILE = 'o200k_base.tiktoken';
 
 const paramSchema = deepFreeze({
     type: 'object',
@@ -155,14 +161,31 @@ function buildLaunch({ runnerDir, artifactPath, params, port, apiKey, model, gpu
             DO_NOT_TRACK: '1',
             HF_HUB_OFFLINE: '1',
             TRANSFORMERS_OFFLINE: '1',
+            TIKTOKEN_ENCODINGS_BASE: path.join(runRoot, TIKTOKEN_DIR_NAME),
         },
     };
+}
+
+function snapshotModelType(snapshotDir) {
+    try {
+        return JSON.parse(fs.readFileSync(path.join(snapshotDir, 'config.json'), 'utf8'))?.model_type ?? null;
+    } catch {
+        return null;
+    }
 }
 
 // The runnable copy is rebuilt per container; the Triton and vLLM caches sit
 // beside it in the container's own filesystem, so compiled kernels never
 // outlive the container either.
 async function start(ctx) {
+    // vLLM loads harmony only on the first gpt-oss chat request, after
+    // readiness passed; without the pinned vocabulary that request would fail.
+    const vocabulary = path.join(ctx.runnerDir, TIKTOKEN_DIR_NAME, O200K_FILE);
+    if (snapshotModelType(ctx.weights.path) === 'gpt_oss' && !fs.existsSync(vocabulary)) {
+        throw codedError('runner_incomplete',
+            `This vLLM install has no pinned ${O200K_FILE}, which gpt-oss models need; uninstall vLLM and install it again from this image's runner lock.`,
+            { file: O200K_FILE });
+    }
     const cacheDir = path.join(path.dirname(path.dirname(ctx.runnerDir)), '.cache', ID);
     const rpcDir = path.join(ctx.shmDir || '/dev/shm', RPC_DIR_NAME);
     for (const dir of [cacheDir, rpcDir]) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });

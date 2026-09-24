@@ -92,6 +92,11 @@ test('vLLM runs from its runnable copy on loopback, with the key in its environm
     for (const [name, value] of Object.entries({ HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', VLLM_USE_FLASHINFER_SAMPLER: '0', VLLM_NO_USAGE_STATS: '1', DO_NOT_TRACK: '1' })) {
         assert.equal(env[name], value, name);
     }
+    // gpt-oss's chat format (openai_harmony) reads its tokenizer vocabulary
+    // from this directory, checking its sha256, instead of downloading it from
+    // openaipublic at run time; the runner lock pins the file into the
+    // runnable copy.
+    assert.equal(env.TIKTOKEN_ENCODINGS_BASE, `${RUN_DIR}/tiktoken`);
 });
 
 test('explicit parameters win; offload, quantization and KV cache type are passed only when set', () => {
@@ -232,4 +237,37 @@ test('a vLLM Run reaches ready through the controller, launched with the GPU sha
     assert.ok(fs.existsSync(path.join(root, 'opt', 'runners', '.cache', 'vllm')));
     assert.deepEqual(probes.map(([url, auth]) => [new URL(url).pathname, auth]), [['/health', null], ['/v1/models', 'Bearer ***']]);
     await controller.stop();
+});
+
+test('a gpt-oss snapshot is refused before launch when the pinned tokenizer vocabulary is missing from the runnable copy', async (t) => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-vllm-vocab-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const runnerDir = path.join(root, 'opt', 'runners', 'vllm', '0.30.0');
+    fs.mkdirSync(runnerDir, { recursive: true });
+    const snapshotDir = (modelType) => {
+        const dir = path.join(root, 'models', modelType);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ model_type: modelType }));
+        return dir;
+    };
+    const launches = [];
+    const start = (weightsPath, model) => vllmRunner.start({
+        runner: vllmRunner, runnerDir, weights: { path: weightsPath }, params: {}, port: 18082, apiKey: KEY, model,
+        admission: { estimate: { gpuMemoryUtilization: 0.85 } }, shmDir: path.join(root, 'shm'),
+        launch: (spec) => { launches.push(spec); return { pid: 1 }; }, waitForHttp: async () => {},
+    });
+    // harmony would read <runnerDir>/tiktoken/o200k_base.tiktoken on the first
+    // chat request, after readiness passed: refuse at start instead.
+    await assert.rejects(() => start(snapshotDir('gpt_oss'), GPT), { code: 'runner_incomplete' });
+    assert.equal(launches.length, 0);
+    // Other models never load harmony.
+    await start(snapshotDir('qwen3'), QWEN);
+    assert.equal(launches.length, 1);
+    fs.mkdirSync(path.join(runnerDir, 'tiktoken'));
+    fs.writeFileSync(path.join(runnerDir, 'tiktoken', 'o200k_base.tiktoken'), 'vocab');
+    await start(snapshotDir('gpt_oss'), GPT);
+    assert.equal(launches.length, 2);
 });

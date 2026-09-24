@@ -118,6 +118,24 @@ test('the lock accepts only pinned https files on allowed hosts', () => {
     assert.throws(() => validateRunnerLock(lock({ ...good, name: 'r.tar.gz' }, 'python')), /wheel/);
     assert.throws(() => validateRunnerLock({ schema: 'x', runners: {} }), /schema/);
     assert.ok(ALLOWED_HOSTS.includes('files.pythonhosted.org'));
+    // A data file a runner reads at run time (gpt-oss's tokenizer vocabulary)
+    // is pinned like any other file and placed in a named directory.
+    const vocab = { name: 'o200k_base.tiktoken', url: 'https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken', size: 3613922, sha256: 'b'.repeat(64), into: 'tiktoken' };
+    assert.ok(ALLOWED_HOSTS.includes('openaipublic.blob.core.windows.net'));
+    const wheel = { name: 'w-1-py3-none-any.whl', url: 'https://files.pythonhosted.org/packages/w-1-py3-none-any.whl', size: 1, sha256: 'a'.repeat(64) };
+    const both = validateRunnerLock({ ...lock(wheel, 'python'), runners: { r: { ...lock(wheel, 'python').runners.r, files: [wheel, vocab] } } });
+    assert.equal(both.runners.r.files[1].into, 'tiktoken');
+    assert.equal(both.runners.r.totalBytes, 1 + 3613922);
+    for (const [file, message] of [
+        [{ ...vocab, into: undefined }, /wheel, a \.tar\.gz archive with extract, or a data file with into/],
+        [{ ...vocab, into: '../etc' }, /into must be a directory name/],
+        [{ ...vocab, into: 'a/b' }, /into must be a directory name/],
+        [{ ...wheel, into: 'tiktoken' }, /into is only for data files/],
+        [{ ...vocab, name: 'r.tar.gz', extract: 'x' }, /into is only for data files/],
+    ]) {
+        assert.throws(() => validateRunnerLock(lock(file, 'python')), message);
+    }
+    assert.throws(() => validateRunnerLock(lock(vocab, 'archive')), /\.tar\.gz archive/);
     // An image without a lock offers nothing to install.
     assert.deepEqual(loadRunnerLock('/nonexistent/runners.lock.json').runners, {});
 });
@@ -241,6 +259,40 @@ test('a Python runner is installed by uv from the cached wheels only: offline, p
     assert.equal(Object.keys(calls[1].env).some((key) => /token|secret|proxy/i.test(key)), false);
     assert.equal(wheelRequirement({ name: 'torch-2.13.0-cp313-cp313-manylinux_2_28_x86_64.whl', sha256: 'f'.repeat(64) }),
         `torch==2.13.0 --hash=sha256:${'f'.repeat(64)}`);
+});
+
+test('a pinned data file is copied read-only into its directory of the runnable copy, from the verified staging copy', async (t) => {
+    const wheel = crypto.randomBytes(4096);
+    const vocab = crypto.randomBytes(8192);
+    const name = 'tiny_runner-1.2.3-py3-none-any.whl';
+    const { base } = await serve(t, { [name]: wheel, 'o200k_base.tiktoken': vocab });
+    const lock = validateRunnerLock({
+        schema: 'local-llm.runners-lock/v1',
+        runners: { tiny: { version: '1.2.3', kind: 'python', licence: { name: 'MIT', url: 'https://example.org' },
+            files: [
+                { name, url: `https://files.pythonhosted.org/packages/aa/bb/${name}`, size: wheel.length, sha256: SHA(wheel) },
+                { name: 'o200k_base.tiktoken', url: 'https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken', size: vocab.length, sha256: SHA(vocab), into: 'tiktoken' },
+            ] } },
+    });
+    const fakeRun = async ({ args }) => {
+        if (args[0] === 'venv') fs.mkdirSync(path.join(args.at(-1), 'bin'), { recursive: true });
+        return { code: 0, signal: null, output: '', aborted: false };
+    };
+    const { installer: inst, runRoot, cacheRoot } = installer(t, lock, base, { run: fakeRun });
+    await inst.fetchAll(inst.entryFor('tiny'));
+    await inst.ensureRunnable('tiny');
+    const runDir = path.join(runRoot, 'tiny', '1.2.3');
+    const placed = path.join(runDir, 'tiktoken', 'o200k_base.tiktoken');
+    assert.equal(SHA(fs.readFileSync(placed)), SHA(vocab));
+    assert.equal(fs.statSync(placed).mode & 0o777, 0o444);
+    // uv installs wheels only; the data file is not a requirement.
+    assert.equal(fs.readFileSync(path.join(runDir, 'requirements.txt'), 'utf8'), `tiny_runner==1.2.3 --hash=sha256:${SHA(wheel)}\n`);
+    // A data file changed in the cache blocks the rebuild like any other file.
+    fs.rmSync(runRoot, { recursive: true, force: true });
+    const cached = path.join(cacheRoot, 'tiny', '1.2.3', 'files', 'o200k_base.tiktoken');
+    fs.writeFileSync(cached, crypto.randomBytes(vocab.length));
+    await assert.rejects(() => inst.ensureRunnable('tiny'), { code: 'cache_changed' });
+    assert.equal(fs.existsSync(placed), false);
 });
 
 test('an install step runs in its own process group and an abort stops all of it', async () => {

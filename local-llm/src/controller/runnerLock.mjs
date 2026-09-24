@@ -9,7 +9,7 @@
 //       "version": "0.30.0",
 //       "kind": "python" | "archive",
 //       "licence": { "name", "url", "source"?, "notice"?, "requiresAcceptance" },
-//       "files": [{ "name", "url", "size", "sha256", "extract"? }],
+//       "files": [{ "name", "url", "size", "sha256", "extract"?, "into"? }],
 //       "check": { "distributions": { "<dist>": "<version>" }, "imports": [], "gpuImports": [],
 //                  "optionalLibraries": { "<soname glob>": "<why this runner does not need it>" } }
 //     }
@@ -19,6 +19,8 @@
 // A python runner's files are wheels (plus optional source archives with
 // `extract`); `uv` installs exactly those wheels, offline, with their hashes.
 // An archive runner's files are archives extracted into its runnable copy.
+// A python runner may also pin data files it would otherwise download at run
+// time (`into`: the directory of the runnable copy the file is copied to).
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -35,6 +37,8 @@ export const ALLOWED_HOSTS = Object.freeze([
     'github.com',
     'codeload.github.com',
     'download.pytorch.org',
+    // OpenAI's tiktoken vocabularies (gpt-oss's o200k_base on vLLM).
+    'openaipublic.blob.core.windows.net',
 ]);
 
 const ID_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
@@ -92,7 +96,7 @@ export function validateLockUrl(value, field) {
 
 function validateFile(value, field, kind) {
     if (!plainObject(value)) throw invalid(`${field} must be an object`);
-    onlyKeys(value, ['name', 'url', 'size', 'sha256', 'extract'], field);
+    onlyKeys(value, ['name', 'url', 'size', 'sha256', 'extract', 'into'], field);
     if (typeof value.name !== 'string' || !FILE_NAME_RE.test(value.name) || value.name.includes('..')) {
         throw invalid(`${field}.name must be a plain file name`);
     }
@@ -102,10 +106,18 @@ function validateFile(value, field, kind) {
     if (extract !== null && (typeof extract !== 'string' || !EXTRACT_RE.test(extract))) {
         throw invalid(`${field}.extract must be a directory name`);
     }
+    const into = value.into === undefined ? null : value.into;
+    if (into !== null && (typeof into !== 'string' || !EXTRACT_RE.test(into))) {
+        throw invalid(`${field}.into must be a directory name`);
+    }
     const archive = /\.(tar\.gz|tgz)$/.test(value.name);
+    const wheel = value.name.endsWith('.whl');
+    if (into !== null && (wheel || archive || extract !== null)) {
+        throw invalid(`${field}.into is only for data files, not wheels or archives`);
+    }
     if (kind === 'archive' && !archive) throw invalid(`${field} must be a .tar.gz archive`);
-    if (kind === 'python' && !value.name.endsWith('.whl') && !(archive && extract)) {
-        throw invalid(`${field} must be a wheel, or a .tar.gz archive with extract`);
+    if (kind === 'python' && !wheel && !(archive && extract) && into === null) {
+        throw invalid(`${field} must be a wheel, a .tar.gz archive with extract, or a data file with into`);
     }
     return Object.freeze({
         name: value.name,
@@ -113,6 +125,7 @@ function validateFile(value, field, kind) {
         size: value.size,
         sha256: value.sha256,
         ...(extract ? { extract } : {}),
+        ...(into ? { into } : {}),
     });
 }
 
