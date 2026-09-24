@@ -32,7 +32,7 @@ export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI 
     if (!query.ok) {
         const reason = query.error?.code === 'ENOENT'
             ? 'No GPU is available to this agent: the workspace Box has no GPU grant for it '
-                + '(on the host: ploinky gpu grant nvidia --agent local-llms/local-llm).'
+                + '(on the host: ploinky gpu grant --agent local-llms/local-llm).'
             : `nvidia-smi failed: ${(query.stderr || query.error?.message || '').trim().slice(0, 300)}`;
         return { available: false, reason };
     }

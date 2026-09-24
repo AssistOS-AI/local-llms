@@ -16,7 +16,7 @@ This specification defines how `local-llm` reaches the GPU, how it decides wheth
 
 ### GPU access through the Box grant
 
-An operator grants the GPU to this agent on one workspace with `ploinky gpu grant nvidia --agent local-llms/local-llm` (Ploinky `ploinky-box/gpuGrant.mjs`; `ploinky gpu status` shows the grant). The grant recreates that workspace's Box with the NVIDIA device nodes (`/dev/nvidia0`, `/dev/nvidiactl`, `/dev/nvidia-uvm`), read-only binds of the driver libraries under `/usr/local/nvidia/lib64` and of `nvidia-smi` under `/usr/local/nvidia/bin`, a hookless CDI spec `ploinky.local/gpu=all`, and a grant marker naming the agent.
+An operator grants the GPU to this agent on one workspace with `ploinky gpu grant --agent local-llms/local-llm` (Ploinky `ploinky-box/gpuGrant.mjs`; `ploinky gpu status` shows the grant). The grant recreates that workspace's Box with the NVIDIA device nodes (`/dev/nvidia0`, `/dev/nvidiactl`, `/dev/nvidia-uvm`), read-only binds of the driver libraries under `/usr/local/nvidia/lib64` and of `nvidia-smi` under `/usr/local/nvidia/bin`, a hookless CDI spec `ploinky.local/gpu=all`, and a grant marker naming the agent.
 
 The manifest asks for that CDI device and nothing else. Ploinky admits the request only for the named agent while the marker is valid, and checks again before every launch. Without an active grant naming the agent, or with a stale grant, Ploinky refuses to start the agent container and names the grant command; there is no CPU fallback in this release (plan decision D7). If the GPU disappears while the agent runs, the hardware snapshot reports it unavailable and every Run is refused as `incompatible`.
 
