@@ -126,8 +126,9 @@ export function startRunnerProcess({ command, args, env, cwd = '/', log, spawnIm
         try {
             killImpl(-child.pid, signal);
             return;
-        } catch (error) {
-            if (error?.code === 'ESRCH') return;
+        } catch {
+            // No such group (a spawn that could not make the runner a group
+            // leader): signal the runner itself.
         }
         try { child.kill(signal); } catch {}
     }

@@ -101,6 +101,14 @@ test('a state file written before catalog v2 loads with its registry migrated an
     assert.deepEqual(store.load(), state);
 });
 
+test('two user entries with one id keep only the first, so lookups and removal agree', () => {
+    // Possible after a downgrade: the old controller hides a migrated entry and
+    // lets the same id be added again.
+    const first = { id: 'user-qwen', displayName: 'First', sources: { gguf: GGUF } };
+    const second = { id: 'user-qwen', displayName: 'Second', sources: { ollama: OLLAMA } };
+    assert.deepEqual(mergeCatalog([], [first, second]).map((model) => model.displayName), ['First']);
+});
+
 test('a state file from a newer controller is kept aside, not overwritten silently', (t) => {
     const store = tempStore(t, { version: 99, registry: [{ id: 'x' }] });
     const state = store.load();

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import { PassThrough } from 'node:stream';
@@ -48,6 +49,20 @@ test('stop signals the runner\'s whole process group, so a helper it started doe
     assert.equal(await until(() => !alive(helper)), true, 'the helper was stopped with the runner');
 });
 
+test('a runner that is not a group leader is still stopped', async () => {
+    const log = createLogBuffer();
+    const runner = startRunnerProcess({
+        command: '/bin/sh', args: ['-c', 'exec sleep 60'], env: { PATH: process.env.PATH }, log,
+        spawnImpl: (command, args, options) => spawn(command, args, { ...options, detached: false }),
+    });
+    const outcome = await Promise.race([
+        runner.stop({ graceMs: 500 }).then(() => 'stopped'),
+        new Promise((resolve) => setTimeout(resolve, 3000, 'hung')),
+    ]);
+    if (outcome === 'hung') process.kill(runner.pid, 'SIGKILL');
+    assert.equal(outcome, 'stopped');
+});
+
 test('a helper left behind by a runner that exits on its own is stopped too', async (t) => {
     const { runner, helper } = await runnerWithHelper(t, 'sleep 60 & echo "helper $!"; sleep 0.5; exit 3');
     const result = await runner.exited;
@@ -67,7 +82,7 @@ function fakeChild() {
 test('runner output split across chunks is logged as whole lines', async () => {
     const log = createLogBuffer();
     const child = fakeChild();
-    startRunnerProcess({ command: 'runner', args: [], env: {}, log, spawnImpl: () => child });
+    startRunnerProcess({ command: 'runner', args: [], env: {}, log, spawnImpl: () => child, killImpl: () => {} });
     child.stderr.write('load_tensors:        CUDA0 model buffer size =  40');
     child.stderr.write('73.34 MiB\nllama_kv_cache:      CUDA0 KV buffer size =   384.00 MiB\nload_tensors: off');
     child.stderr.write(Buffer.from('loaded 25/25 layers to GPU — done\n', 'utf8').subarray(0, 30));

@@ -64,11 +64,14 @@ test('an admin reaches the controller operation of each tool', async () => {
         { authInfo, call });
     await handleTool('local_llm_status', { sinceSeq: 5 }, { authInfo, call });
     await handleTool('local_llm_weights_delete', { modelId: 'gpt-oss-20b', runnerId: 'ollama' }, { authInfo, call });
+    // The dashboard names weights by format.
+    await handleTool('local_llm_weights_delete', { modelId: 'gpt-oss-20b', format: 'gguf' }, { authInfo, call });
     const prompt = await handleTool('local_llm_test_prompt', { prompt: 'hi' }, { authInfo, call, testPrompt: async ({ prompt }) => ({ echo: prompt }) });
     assert.deepEqual(seen, [
         ['run', { requestId: 'req-000001', modelId: 'gpt-oss-20b', runnerId: 'llama.cpp', params: { ctxSize: 8192 }, replace: false }],
         ['status', { sinceSeq: 5 }],
         ['deleteWeights', { modelId: 'gpt-oss-20b', runnerId: 'ollama' }],
+        ['deleteWeights', { modelId: 'gpt-oss-20b', format: 'gguf' }],
     ]);
     assert.deepEqual(prompt, { echo: 'hi' });
     assert.equal(Object.keys(TOOL_OPERATIONS).length + 1, TOOL_NAMES.length);

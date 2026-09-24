@@ -152,6 +152,27 @@ test('a third runner registered as an adapter runs through the controller withou
     await h.controller.stop();
     assert.equal(process.stopped ?? !process.running, true);
     assert.equal((await h.controller.deleteWeights({ modelId: 'gpt-oss-20b', format: 'gguf' })).freedBytes, 1);
+    await assert.rejects(() => h.controller.deleteWeights({ modelId: 'gpt-oss-20b', format: 'bogus' }), { code: 'invalid_request' });
+    await assert.rejects(() => h.controller.deleteWeights({ modelId: 'gpt-oss-20b', format: 'toString' }), { code: 'invalid_request' });
+});
+
+test('a runner that dies right after its readiness probes ends in error, never in ready', async (t) => {
+    const record = {};
+    const base = fakeRunner(record);
+    const dying = Object.freeze({
+        ...base,
+        async start(ctx) {
+            const process = ctx.launch({ command: '/opt/fake/fake-server', args: [], env: {} });
+            await ctx.waitForHttp(`http://127.0.0.1:${ctx.port}/ready`, { process });
+            await process.stop();
+            return {};
+        },
+    });
+    const h = harness(t, { runners: { ...RUNNERS, [dying.id]: dying } });
+    await h.controller.run({ modelId: 'gpt-oss-20b', runnerId: 'fake-gguf', requestId: 'request-dying-1' });
+    await until(() => ['ready', 'error'].includes(h.controller.state.deployment?.phase));
+    assert.equal(h.controller.state.deployment.phase, 'error');
+    await assert.rejects(async () => h.controller.chatTarget(), { code: 'not_ready' });
 });
 
 test('ports come from the adapters, one per supported runner, all distinct', () => {

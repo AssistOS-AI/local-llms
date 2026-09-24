@@ -224,14 +224,19 @@ export function loadSeedCatalog(file = path.join(import.meta.dirname, '..', '..'
     return Object.freeze(models);
 }
 
-/** Seed entries first, then valid user entries whose ids do not shadow a seed. */
+/**
+ * Seed entries first, then valid user entries whose ids do not shadow a seed
+ * or an earlier user entry (two can exist after a downgrade hid one).
+ */
 export function mergeCatalog(seed, registry = []) {
-    const seedIds = new Set(seed.map((model) => model.id));
+    const seenIds = new Set(seed.map((model) => model.id));
     const user = [];
     for (const entry of registry) {
         try {
             const model = validateModel(entry, { seed: false });
-            if (!seedIds.has(model.id)) user.push(model);
+            if (seenIds.has(model.id)) continue;
+            seenIds.add(model.id);
+            user.push(model);
         } catch {
             // An invalid persisted entry is skipped, never allowed to break the catalog.
         }
