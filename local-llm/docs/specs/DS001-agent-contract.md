@@ -18,7 +18,7 @@ This specification defines how `local-llm` presents itself to Ploinky: the manif
 
 | Field | Value | Why |
 | --- | --- | --- |
-| `container` | `localhost/local-llm:dev` during development; a pinned digest once published | Built from `container-image-builds/images/local-llm` |
+| `container` | `docker.io/assistos/local-llm@sha256:b8a5ba072252645e7d26b3ae46cb2951efa62c4ff8838c82f276c090d9a8c176`, pinned by digest; linux/amd64 only | Built and proven by `publish-local-llm-image.yml` from `container-image-builds/images/local-llm` at `78ccdaf` (run 35968307553). A local build tagged `localhost/local-llm:dev` can stand in during development. |
 | `agent` | `exec node /code/src/main.mjs` | The controller is the container's main process |
 | `readiness` | `{ "protocol": "mcp" }` | Ready when AgentServer answers MCP |
 | `volumes` | `{ ".data/local-llm": "/data" }` | Weights, state and logs survive restarts |
