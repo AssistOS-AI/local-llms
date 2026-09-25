@@ -18,7 +18,7 @@ This specification defines how `local-llm` presents itself to Ploinky: the manif
 
 | Field | Value | Why |
 | --- | --- | --- |
-| `container` | `docker.io/assistos/local-llm@sha256:15e596fc47870dc8f2c119a7a2e630a09198801d3dc7fbb65a21b30b63fe5454`, pinned by digest; linux/amd64 only | Built and proven by `publish-local-llm-image.yml` from `container-image-builds/images/local-llm` at `ce1c3d9` (run 36049257168): llama.cpp b11159, Ollama 0.34.4, ik_llama.cpp `20f7a72` built for sm_86 and sm_89, and the on-demand runner lock (vLLM 0.30.0, TabbyAPI f07131c) with uv 0.12.18 (DS004). A local build tagged `localhost/local-llm:dev` can stand in during development. |
+| `container` | `docker.io/assistos/local-llm@sha256:98fbb73d6dd14d78df48c0ca3deca0543580ba785a973a001486b2d213867212`, pinned by digest; linux/amd64 only | Built and proven by `publish-local-llm-image.yml` from `container-image-builds/images/local-llm` at `fb45a21` (run 36073115222): llama.cpp b11159, Ollama 0.34.4, ik_llama.cpp `20f7a72` built for sm_86 and sm_89, and the on-demand runner lock (vLLM 0.30.0 with gpt-oss's pinned `o200k_base.tiktoken`, TabbyAPI f07131c) with uv 0.12.18 (DS004). A local build tagged `localhost/local-llm:dev` can stand in during development. |
 | `agent` | `exec node /code/src/main.mjs` | The controller is the container's main process |
 | `readiness` | `{ "protocol": "mcp" }` | Ready when AgentServer answers MCP |
 | `volumes` | `{ ".data/local-llm": "/data" }` | Weights, state and logs survive restarts |
