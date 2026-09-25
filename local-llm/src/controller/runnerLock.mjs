@@ -8,8 +8,8 @@
 //     "<id>": {
 //       "version": "0.30.0",
 //       "kind": "python" | "archive",
-//       "licence": { "name", "url", "source"?, "notice"?, "requiresAcceptance" },
-//       "files": [{ "name", "url", "size", "sha256", "extract"?, "into"? }],
+//       "licence": { "name", "url", "source"?, "notice"?, "requiresAcceptance", "proprietary"? },
+//       "files": [{ "name", "url", "size", "sha256", "extract"?, "into"?, "strip"? }],
 //       "check": { "distributions": { "<dist>": "<version>" }, "imports": [], "gpuImports": [],
 //                  "optionalLibraries": { "<soname glob>": "<why this runner does not need it>" } }
 //     }
@@ -18,9 +18,16 @@
 //
 // A python runner's files are wheels (plus optional source archives with
 // `extract`); `uv` installs exactly those wheels, offline, with their hashes.
-// An archive runner's files are archives extracted into its runnable copy.
+// An archive runner's files are archives extracted into its runnable copy,
+// dropping one leading directory unless the file says `strip: 0` (an archive
+// whose entries sit at its root, like LM Studio's llmster tarball).
 // A python runner may also pin data files it would otherwise download at run
 // time (`into`: the directory of the runnable copy the file is copied to).
+//
+// A proprietary licence (LM Studio) forbids redistributing the software. Such
+// an entry must require acceptance, and the CI install check validates it from
+// the lock without downloading it, since a download would accept its terms on
+// behalf of whoever runs CI.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -39,6 +46,8 @@ export const ALLOWED_HOSTS = Object.freeze([
     'download.pytorch.org',
     // OpenAI's tiktoken vocabularies (gpt-oss's o200k_base on vLLM).
     'openaipublic.blob.core.windows.net',
+    // LM Studio's headless daemon, llmster (proprietary).
+    'llmster.lmstudio.ai',
 ]);
 
 const ID_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
@@ -96,7 +105,7 @@ export function validateLockUrl(value, field) {
 
 function validateFile(value, field, kind) {
     if (!plainObject(value)) throw invalid(`${field} must be an object`);
-    onlyKeys(value, ['name', 'url', 'size', 'sha256', 'extract', 'into'], field);
+    onlyKeys(value, ['name', 'url', 'size', 'sha256', 'extract', 'into', 'strip'], field);
     if (typeof value.name !== 'string' || !FILE_NAME_RE.test(value.name) || value.name.includes('..')) {
         throw invalid(`${field}.name must be a plain file name`);
     }
@@ -112,6 +121,10 @@ function validateFile(value, field, kind) {
     }
     const archive = /\.(tar\.gz|tgz)$/.test(value.name);
     const wheel = value.name.endsWith('.whl');
+    if (value.strip !== undefined) {
+        if (value.strip !== 0 && value.strip !== 1) throw invalid(`${field}.strip must be 0 or 1`);
+        if (!archive) throw invalid(`${field}.strip is only for archives`);
+    }
     if (into !== null && (wheel || archive || extract !== null)) {
         throw invalid(`${field}.into is only for data files, not wheels or archives`);
     }
@@ -126,6 +139,7 @@ function validateFile(value, field, kind) {
         sha256: value.sha256,
         ...(extract ? { extract } : {}),
         ...(into ? { into } : {}),
+        ...(value.strip !== undefined ? { strip: value.strip } : {}),
     });
 }
 
@@ -181,14 +195,19 @@ function validateRunner(id, value) {
     if (typeof value.version !== 'string' || !VERSION_RE.test(value.version)) throw invalid(`${field}.version is invalid`);
     if (!['python', 'archive'].includes(value.kind)) throw invalid(`${field}.kind must be python or archive`);
     if (!plainObject(value.licence)) throw invalid(`${field}.licence must be an object`);
-    onlyKeys(value.licence, ['name', 'url', 'source', 'notice', 'requiresAcceptance'], `${field}.licence`);
+    onlyKeys(value.licence, ['name', 'url', 'source', 'notice', 'requiresAcceptance', 'proprietary'], `${field}.licence`);
+    if (![undefined, true, false].includes(value.licence.proprietary)) throw invalid(`${field}.licence.proprietary must be true or false`);
     const licence = Object.freeze({
         name: text(value.licence.name, `${field}.licence.name`, { required: true, max: 80 }),
         url: text(value.licence.url, `${field}.licence.url`, { required: true, max: 400 }),
         source: text(value.licence.source, `${field}.licence.source`, { max: 400 }),
         notice: text(value.licence.notice, `${field}.licence.notice`),
         requiresAcceptance: value.licence.requiresAcceptance === true,
+        proprietary: value.licence.proprietary === true,
     });
+    if (licence.proprietary && !licence.requiresAcceptance) {
+        throw invalid(`${field}: a proprietary licence must require acceptance`);
+    }
     if (!Array.isArray(value.files) || value.files.length === 0 || value.files.length > 2000) {
         throw invalid(`${field}.files must list 1-2000 files`);
     }

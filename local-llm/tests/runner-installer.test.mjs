@@ -140,6 +140,41 @@ test('the lock accepts only pinned https files on allowed hosts', () => {
     assert.deepEqual(loadRunnerLock('/nonexistent/runners.lock.json').runners, {});
 });
 
+// LM Studio's headless daemon (runners plan §5.7): a proprietary archive from
+// LM Studio's own download host. Its Terms forbid redistribution, so the
+// entry says so, and accepting them is required before anything downloads.
+test('a proprietary runner comes from its pinned archive and always needs its terms accepted', () => {
+    const llmster = {
+        name: '0.0.25-1-linux-x64.full+cuda12.tar.gz',
+        url: 'https://llmster.lmstudio.ai/download/0.0.25-1-linux-x64.full%2Bcuda12.tar.gz',
+        size: 1105623572,
+        sha256: '46778639487e1f6def9a722d3a4e0c5ce8960f4cd290be79832a36d7f95a1e6a',
+    };
+    const licence = { name: 'LM Studio Terms of Use, version August 23, 2026', url: 'https://lmstudio.ai/app-terms', requiresAcceptance: true, proprietary: true };
+    const lock = (overrides = {}) => ({
+        schema: 'local-llm.runners-lock/v1',
+        runners: { lmstudio: { version: '0.0.25-1', kind: 'archive', licence, files: [llmster], ...overrides } },
+    });
+    assert.ok(ALLOWED_HOSTS.includes('llmster.lmstudio.ai'));
+    const entry = validateRunnerLock(lock()).runners.lmstudio;
+    assert.equal(entry.licence.proprietary, true);
+    assert.equal(entry.licence.requiresAcceptance, true);
+    // The escaped '+' stays escaped: the request goes to the exact pinned URL.
+    assert.equal(entry.files[0].url, 'https://llmster.lmstudio.ai/download/0.0.25-1-linux-x64.full%2Bcuda12.tar.gz');
+    assert.equal(entry.totalBytes, 1105623572);
+    // Other licences are not proprietary unless they say so.
+    const mit = validateRunnerLock({ ...lock(), runners: { r: { ...lock().runners.lmstudio, licence: { name: 'MIT', url: 'https://example.org' } } } });
+    assert.equal(mit.runners.r.licence.proprietary, false);
+    // Proprietary software is never installed without its terms accepted.
+    assert.throws(() => validateRunnerLock(lock({ licence: { ...licence, requiresAcceptance: false } })),
+        /proprietary licence must require acceptance/);
+    assert.throws(() => validateRunnerLock(lock({ licence: { ...licence, proprietary: 'yes' } })), /proprietary must be true or false/);
+    // Only LM Studio's download host, not its web site or a look-alike.
+    for (const url of ['https://lmstudio.ai/download/x.tar.gz', 'https://llmster.lmstudio.ai.evil.example/x.tar.gz']) {
+        assert.throws(() => validateRunnerLock(lock({ files: [{ ...llmster, url }] })), /not on an allowed host/);
+    }
+});
+
 test('install downloads only the lock URL, resumes a cut transfer, and records the install', async (t) => {
     const bytes = makeArchive(t, '1.0.0');
     const { base, requests } = await serve(t, { 'runner-1.0.0.tar.gz': bytes }, { cutFirst: 64 * 1024 });
@@ -185,6 +220,56 @@ test('the runnable copy is built once per container and rebuilt after the contai
     fs.rmSync(runRoot, { recursive: true, force: true });
     assert.equal((await inst.ensureRunnable('testrunner')).rebuilt, true);
     assert.equal(fs.readFileSync(path.join(runDir, 'bin', 'runner'), 'utf8'), '#!/bin/sh\necho runner\n');
+});
+
+// llmster's tarball has no top-level directory (`llmster` and `.bundle/` sit
+// at its root), so its lock entry says strip 0. Unpacking never restores file
+// times: on the container's fuse-overlayfs, setting a directory's time fails
+// with EPERM and tar exits 2 (observed with llmster's 373 directories).
+test('an archive whose entries sit at its root unpacks with strip 0, without restoring times', async (t) => {
+    const src = tempDir(t, 'flat-src');
+    fs.writeFileSync(path.join(src, 'llmster'), '#!/bin/sh\necho daemon\n', { mode: 0o755 });
+    fs.mkdirSync(path.join(src, '.bundle', 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(src, '.bundle', 'lms'), '#!/bin/sh\necho cli\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(src, '.bundle', 'bin', 'padding.bin'), crypto.randomBytes(256 * 1024));
+    const archive = path.join(tempDir(t, 'flat-out'), 'flat-1.0.0.tar.gz');
+    execFileSync('tar', ['-czf', archive, '-C', src, 'llmster', '.bundle']);
+    const bytes = fs.readFileSync(archive);
+    const { base } = await serve(t, { 'flat-1.0.0.tar.gz': bytes });
+    const lock = validateRunnerLock({
+        schema: 'local-llm.runners-lock/v1',
+        runners: { flat: { version: '1.0.0', kind: 'archive', licence: { name: 'MIT', url: 'https://example.org' },
+            files: [{ name: 'flat-1.0.0.tar.gz', url: 'https://github.com/example/flat/releases/download/1.0.0/flat-1.0.0.tar.gz',
+                size: bytes.length, sha256: SHA(bytes), strip: 0 }] } },
+    });
+    assert.equal(lock.runners.flat.files[0].strip, 0);
+    const steps = [];
+    const { installer: inst, runRoot } = installer(t, lock, base, { run: (options) => { steps.push(options.args); return runTool(options); } });
+    await inst.fetchAll(inst.entryFor('flat'));
+    await inst.ensureRunnable('flat');
+    const runDir = path.join(runRoot, 'flat', '1.0.0');
+    assert.equal(fs.readFileSync(path.join(runDir, 'llmster'), 'utf8'), '#!/bin/sh\necho daemon\n');
+    assert.equal(fs.readFileSync(path.join(runDir, '.bundle', 'lms'), 'utf8'), '#!/bin/sh\necho cli\n');
+    const untar = steps.find((args) => args[0] === '-xzf');
+    assert.ok(untar.includes('--strip-components=0'));
+    assert.ok(untar.includes('--touch'));
+    // A file without `strip` keeps the old default of one leading directory.
+    const plain = makeArchive(t, '2.0.0');
+    const second = await serve(t, { 'runner-2.0.0.tar.gz': plain });
+    const other = [];
+    const { installer: again, runRoot: otherRoot } = installer(t, archiveLock('2.0.0', plain), second.base,
+        { run: (options) => { other.push(options.args); return runTool(options); } });
+    await again.fetchAll(again.entryFor('testrunner'));
+    await again.ensureRunnable('testrunner');
+    assert.ok(other.find((args) => args[0] === '-xzf').includes('--strip-components=1'));
+    assert.equal(fs.readFileSync(path.join(otherRoot, 'testrunner', '2.0.0', 'VERSION'), 'utf8'), '2.0.0\n');
+    // strip is 0 or 1, and only for archives.
+    const withStrip = (file, kind = 'archive') => validateRunnerLock({ schema: 'local-llm.runners-lock/v1',
+        runners: { r: { version: '1', kind, licence: { name: 'MIT', url: 'https://example.org' }, files: [file] } } });
+    const tarball = { name: 'r.tar.gz', url: 'https://github.com/o/r/releases/download/v1/r.tar.gz', size: 1, sha256: 'a'.repeat(64) };
+    for (const strip of [2, -1, '0', 0.5]) assert.throws(() => withStrip({ ...tarball, strip }), /strip must be 0 or 1/);
+    const wheel = { name: 'w-1-py3-none-any.whl', url: 'https://files.pythonhosted.org/packages/w-1-py3-none-any.whl', size: 1, sha256: 'a'.repeat(64) };
+    assert.throws(() => withStrip({ ...wheel, strip: 0 }, 'python'), /strip is only for archives/);
 });
 
 test('a cached file changed on disk blocks the rebuild', async (t) => {

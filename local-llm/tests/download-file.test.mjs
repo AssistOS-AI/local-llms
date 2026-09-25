@@ -68,6 +68,46 @@ test('a dropped connection resumes with Range from the partial', async (t) => {
     assert.equal(crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex'), SHA256);
 });
 
+// LM Studio's download host (llmster.lmstudio.ai, observed 2026-09-25) answers
+// a Range request with 200, only the requested bytes and no Content-Range. A
+// 200 cannot say where its body starts, so the partial is discarded and the
+// file downloads again from the start, instead of failing the resume.
+test('a 200 reply to a Range request that carries only part of the file restarts from zero', async (t) => {
+    const dir = tempDir(t);
+    const requests = [];
+    const server = http.createServer((req, res) => {
+        requests.push(req.headers.range ?? null);
+        const range = /^bytes=(\d+)-$/.exec(req.headers.range ?? '');
+        const start = range ? Number(range[1]) : 0;
+        res.writeHead(200, { 'Content-Length': PAYLOAD.length - start });
+        if (requests.length === 1) {
+            res.write(PAYLOAD.subarray(0, 1024 * 1024), () => res.destroy());
+            return;
+        }
+        res.end(PAYLOAD.subarray(start));
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => server.close());
+    const url = `http://127.0.0.1:${server.address().port}/download/runner.tar.gz`;
+    const target = path.join(dir, 'runner.tar.gz');
+    await downloadFile({ url, size: PAYLOAD.length, sha256: SHA256, target, statfs: bigDisk, allowHttp: true, sleep: noSleep });
+    assert.equal(crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex'), SHA256);
+    assert.equal(requests.length, 3);
+    assert.equal(requests[0], null);
+    assert.match(requests[1], /^bytes=\d+-$/);
+    assert.equal(requests[2], null, 'the restart asks for the whole file');
+});
+
+test('a 200 reply of the wrong size without a Range request still fails', async (t) => {
+    const dir = tempDir(t);
+    const { url } = await serve(t, { body: PAYLOAD.subarray(0, PAYLOAD.length - 1) });
+    const target = path.join(dir, 'runner.whl');
+    await assert.rejects(
+        () => downloadFile({ url, size: PAYLOAD.length, sha256: SHA256, target, statfs: bigDisk, allowHttp: true, sleep: noSleep }),
+        (error) => error instanceof DownloadError && error.code === 'HTTP_ERROR',
+    );
+});
+
 test('bytes that do not match the pinned sha256 are refused and removed', async (t) => {
     const dir = tempDir(t);
     const other = crypto.randomBytes(PAYLOAD.length);

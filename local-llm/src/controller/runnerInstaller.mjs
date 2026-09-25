@@ -291,10 +291,13 @@ export function createRunnerInstaller({
                 '-r', requirements,
             ], { signal, env });
         }
+        // File times are not restored (--touch): on the container's
+        // fuse-overlayfs, setting a directory's time fails with EPERM.
         for (const file of entry.files.filter((candidate) => /\.(tar\.gz|tgz)$/.test(candidate.name))) {
             const into = path.join(paths.runDir, file.extract || '.');
             await fs.promises.mkdir(into, { recursive: true });
-            await step(`unpacking ${file.name}`, 'tar', ['-xzf', path.join(sourceDir, file.name), '-C', into, '--strip-components=1', '--no-same-owner'], { signal, env });
+            await step(`unpacking ${file.name}`, 'tar', ['-xzf', path.join(sourceDir, file.name), '-C', into,
+                `--strip-components=${file.strip ?? 1}`, '--no-same-owner', '--touch'], { signal, env });
         }
         // Data files the runner reads at run time, copied as verified.
         for (const file of entry.files.filter((candidate) => candidate.into)) {

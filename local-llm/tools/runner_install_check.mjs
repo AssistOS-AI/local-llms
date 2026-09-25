@@ -13,7 +13,11 @@
 //     lock lists it in check.optionalLibraries with the reason the runner
 //     never needs it. Anything else fails;
 //   - every pinned data file (`into`) is in the runnable copy with its bytes.
-// Usage: node runner_install_check.mjs <runnerId> [--cache DIR] [--lock FILE]
+// A proprietary entry (LM Studio) is never downloaded here: that would accept
+// its terms on behalf of whoever runs CI. It is validated from the lock alone
+// (hosts, sizes, sha256 pins and licence fields), as --validate-only does for
+// any entry; its install is proven live on a deployment that accepted them.
+// Usage: node runner_install_check.mjs <runnerId> [--validate-only] [--cache DIR] [--lock FILE]
 // Prints one JSON report; exits 1 if any check fails.
 
 import { spawnSync } from 'node:child_process';
@@ -119,6 +123,22 @@ async function main() {
     const installer = createRunnerInstaller({ lock, cacheRoot: option('--cache', '/tmp/runner-check/cache') });
     const entry = installer.entryFor(runnerId);
     const report = { runnerId, version: entry.version, files: entry.files.length, totalBytes: entry.totalBytes, ok: true, problems: [] };
+    if (entry.licence.proprietary || argv.includes('--validate-only')) {
+        // loadRunnerLock has already validated every entry: https on an
+        // allowed host, a positive size and a sha256 per file, the licence fields.
+        report.downloaded = false;
+        report.skipped = entry.licence.proprietary
+            ? `proprietary (${entry.licence.name}): validated from the lock, not downloaded; installing accepts its terms`
+            : 'validate-only: validated from the lock, not downloaded';
+        report.validated = {
+            files: entry.files.length,
+            totalBytes: entry.totalBytes,
+            hosts: [...new Set(entry.files.map((file) => new URL(file.url).hostname))].sort(),
+            licence: { name: entry.licence.name, url: entry.licence.url, requiresAcceptance: entry.licence.requiresAcceptance, proprietary: entry.licence.proprietary },
+        };
+        finish(report, 0);
+        return;
+    }
     const started = Date.now();
     const fetched = await installer.fetchAll(entry);
     report.downloadSeconds = (Date.now() - started) / 1000;

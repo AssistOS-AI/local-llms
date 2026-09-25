@@ -514,6 +514,14 @@ async function handleResponse(ctx, response) {
     }
     if (status === 200) {
         const length = response.headers.get('content-length');
+        if (length !== null && Number(length) !== artifact.size && ctx.have > 0) {
+            // A 200 to a Range request that carries only part of the file
+            // (LM Studio's download host does this): a 200 does not say where
+            // its body starts, so start again from zero without a Range.
+            await discardBody(response);
+            await resetPartial(ctx);
+            return { retry: 'partial-200', status };
+        }
         if (length !== null && Number(length) !== artifact.size) {
             await discardBody(response);
             throw new DownloadError('HTTP_ERROR', 'Server reported a size that differs from the pinned artifact', {

@@ -64,6 +64,54 @@ test('every pinned data file must sit in its directory of the runnable copy with
     assert.deepEqual(checkDataFiles(entry, runDir), { placed: { 'tiktoken/o200k_base.tiktoken': 'ok' }, problems: [] });
 });
 
+// CI never downloads proprietary software: running the check would accept its
+// terms on behalf of whoever runs CI (LM Studio, decision L3). The entry is
+// validated from the lock alone, and the live install is proven elsewhere.
+test('a proprietary lock entry is validated but never downloaded, and any entry can be checked without downloading', async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-proprietary-check-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const lockFile = path.join(dir, 'runners.lock.json');
+    fs.writeFileSync(lockFile, JSON.stringify({
+        schema: 'local-llm.runners-lock/v1',
+        runners: {
+            lmstudio: {
+                version: '0.0.25-1', kind: 'archive',
+                licence: { name: 'LM Studio Terms of Use, version August 23, 2026', url: 'https://lmstudio.ai/app-terms', requiresAcceptance: true, proprietary: true },
+                files: [{ name: '0.0.25-1-linux-x64.full+cuda12.tar.gz', url: 'https://llmster.lmstudio.ai/download/0.0.25-1-linux-x64.full%2Bcuda12.tar.gz',
+                    size: 1105623572, sha256: '46778639487e1f6def9a722d3a4e0c5ce8960f4cd290be79832a36d7f95a1e6a' }],
+            },
+            open: {
+                version: '1', kind: 'archive', licence: { name: 'MIT', url: 'https://example.org' },
+                files: [{ name: 'r.tar.gz', url: 'https://github.com/o/r/releases/download/v1/r.tar.gz', size: 10, sha256: 'a'.repeat(64) }],
+            },
+        },
+    }));
+    const cache = path.join(dir, 'cache');
+    const check = async (...args) => {
+        // A dead proxy in the child: any download attempt would fail the check.
+        const child = spawn(process.execPath, [TOOL, ...args, '--lock', lockFile, '--cache', cache],
+            { stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH, HTTPS_PROXY: 'http://127.0.0.1:9', NODE_USE_ENV_PROXY: '1' } });
+        let out = '';
+        child.stdout.on('data', (chunk) => { out += chunk; });
+        const code = await new Promise((resolve) => child.on('exit', resolve));
+        return { code, report: JSON.parse(out) };
+    };
+    const proprietary = await check('lmstudio');
+    assert.equal(proprietary.code, 0);
+    assert.equal(proprietary.report.ok, true);
+    assert.equal(proprietary.report.downloaded, false);
+    assert.match(proprietary.report.skipped, /proprietary/);
+    assert.deepEqual(proprietary.report.validated, { files: 1, totalBytes: 1105623572, hosts: ['llmster.lmstudio.ai'],
+        licence: { name: 'LM Studio Terms of Use, version August 23, 2026', url: 'https://lmstudio.ai/app-terms', requiresAcceptance: true, proprietary: true } });
+    assert.equal(fs.existsSync(cache), false, 'nothing was fetched or cached');
+    // --validate-only checks any entry the same way, without downloading it.
+    const open = await check('open', '--validate-only');
+    assert.equal(open.code, 0);
+    assert.equal(open.report.downloaded, false);
+    assert.match(open.report.skipped, /validate-only/);
+    assert.equal(fs.existsSync(cache), false);
+});
+
 test('the check prints its whole report before it exits, however long', async () => {
     // An unknown runner id fails fast; the report must still arrive complete on a pipe.
     const child = spawn(process.execPath, [TOOL, 'no-such-runner', '--lock', '/nonexistent/lock.json'], { stdio: ['ignore', 'pipe', 'pipe'] });
