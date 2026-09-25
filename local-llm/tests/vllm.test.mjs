@@ -140,15 +140,63 @@ test('admission refuses gpt-oss-20b on vLLM without offload, with the reason and
     assert.equal(refused.status, 'incompatible');
     assert.match(refused.reason, /GPU memory/);
     assert.match(refused.reason, /cpuOffloadGb/);
+    const roomy = { ...snapshot(), memory: { totalBytes: 64 * GIB, availableBytes: 48 * GIB } };
     const offloaded = admit({ runner: vllmRunner, model: GPT, source: GPT.sources.hf,
-        params: vllmRunner.normalizeParams({ cpuOffloadGb: 11 }, { model: GPT }), snapshot: snapshot() });
+        params: vllmRunner.normalizeParams({ cpuOffloadGb: 10 }, { model: GPT }), snapshot: roomy });
     assert.equal(offloaded.status, 'ok', offloaded.reason);
     assert.ok(offloaded.warnings.some((warning) => /offload/i.test(warning) && /slower/.test(warning)));
-    assert.equal(offloaded.estimate.cpuWeightsBytes, 11 * GIB);
+    assert.equal(offloaded.estimate.cpuWeightsBytes, 10 * GIB);
     // Offloading more than the RAM that is free is refused.
     const noRam = admit({ runner: vllmRunner, model: GPT, source: GPT.sources.hf,
         params: vllmRunner.normalizeParams({ cpuOffloadGb: 11 }, { model: GPT }), snapshot: snapshot({ availableGiB: 6 }) });
     assert.equal(noRam.status, 'insufficient-now');
+});
+
+test('admission: vLLM CPU offload is sized from the measured drop in available memory, with a margin, and keeps a floor free', () => {
+    const at = (availableGiB, totalGiB = 31) => ({ ...snapshot(), memory: { totalBytes: totalGiB * GIB, availableBytes: availableGiB * GIB } });
+    const params = vllmRunner.normalizeParams({ cpuOffloadGb: 10 }, { model: GPT });
+    // Measured on this machine (31 GiB, swap already full) with gpt-oss-20b
+    // and cpuOffloadGb 10: available memory fell by about 21 GiB, and shared
+    // memory grew by about 18.1 GiB (1.81 x the offload) plus 3.0 GiB resident.
+    const need = (1.81 * 10 + 3) * 1.15 * GIB;
+    // At the 23.5 GiB available after the runs it is refused, naming the numbers.
+    const now = admit({ runner: vllmRunner, model: GPT, source: GPT.sources.hf, params, snapshot: at(23.5) });
+    assert.equal(now.status, 'insufficient-now');
+    assert.ok(Math.abs(now.estimate.ramBytes - need) < MIB, String(now.estimate.ramBytes / GIB));
+    assert.match(now.reason, /Offloading 10\.0 GiB needs about 24\.3 GiB of system RAM/);
+    assert.match(now.reason, /23\.5 GiB is available now and 4\.0 GiB must stay free/);
+    assert.ok(now.warnings.some((warning) => /slower/.test(warning)), 'the speed warning stays');
+    // The floor, not just the estimate: 28 GiB available would leave only 3.7 GiB.
+    assert.equal(admit({ runner: vllmRunner, model: GPT, source: GPT.sources.hf, params, snapshot: at(28) }).status, 'insufficient-now');
+    const ok = admit({ runner: vllmRunner, model: GPT, source: GPT.sources.hf, params, snapshot: at(28.5) });
+    assert.equal(ok.status, 'ok', ok.reason);
+    // The guard's floor travels with the admission.
+    assert.equal(ok.estimate.ramFloorBytes, 4 * GIB);
+    // gpt-oss needs at least 9 GiB of offload on this GPU: 22.2 GiB, so at least 26.2 GiB available.
+    const nine = vllmRunner.normalizeParams({ cpuOffloadGb: 9 }, { model: GPT });
+    assert.equal(admit({ runner: vllmRunner, model: GPT, source: GPT.sources.hf, params: nine, snapshot: at(26) }).status, 'insufficient-now');
+    assert.equal(admit({ runner: vllmRunner, model: GPT, source: GPT.sources.hf, params: nine, snapshot: at(26.3) }).status, 'ok');
+    // On a large machine the floor is 10 % of its RAM.
+    const big = (availableGiB) => admit({ runner: vllmRunner, model: GPT, source: GPT.sources.hf, params, snapshot: at(availableGiB, 128) });
+    assert.equal(big(37).status, 'insufficient-now');
+    assert.match(big(37).reason, /12\.8 GiB must stay free/);
+    assert.equal(big(37.2).status, 'ok');
+    assert.equal(big(37.2).estimate.ramFloorBytes, Math.round(12.8 * GIB));
+    // A machine that could never keep the floor free is incompatible.
+    const small = admit({ runner: vllmRunner, model: GPT, source: GPT.sources.hf, params, snapshot: at(27, 28) });
+    assert.equal(small.status, 'incompatible');
+    assert.match(small.reason, /this machine has 28\.0 GiB and 4\.0 GiB must stay free/);
+});
+
+test('admission: a vLLM model without offload keeps its RAM estimate and check', () => {
+    const params = vllmRunner.normalizeParams({}, { model: QWEN });
+    const at = (availableGiB) => ({ ...snapshot(), memory: { totalBytes: 31 * GIB, availableBytes: availableGiB * GIB } });
+    const ok = admit({ runner: vllmRunner, model: QWEN, source: QWEN.sources.hf, params, snapshot: at(5) });
+    assert.equal(ok.status, 'ok', ok.reason);
+    assert.equal(ok.estimate.ramBytes, 3 * GIB);
+    // No floor, so no memory guard.
+    assert.equal(ok.estimate.ramFloorBytes, undefined);
+    assert.equal(admit({ runner: vllmRunner, model: QWEN, source: QWEN.sources.hf, params, snapshot: at(3.5) }).status, 'insufficient-now');
 });
 
 test('the report parser reads the model and KV cache sizes vLLM logs', () => {

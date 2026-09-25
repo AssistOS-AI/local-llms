@@ -186,6 +186,21 @@ const VLLM_USABLE_SHARE = 0.94;
 const VLLM_OVERHEAD_BYTES = 768 * MIB;
 const VLLM_MAX_UTILIZATION = 0.9;
 const VLLM_RUNNER_RAM_BYTES = 3 * GIB;
+// System RAM with CPU offload (cpuOffloadGb), measured on 2026-09-25 on the
+// RTX 3060 Laptop machine (31 GiB RAM, its 8 GiB swap already full) with
+// gpt-oss-20b and cpuOffloadGb 10. On 8080 available memory fell from 23.2 to
+// 2.2 GiB, and `free` showed shared memory grow by about 18.1 GiB (1.81 x the
+// offload: vLLM's pinned copies, more than any one process's RssShmem shows);
+// the engine and API server held about 3.0 GiB more. In the fixture it fell
+// by at least 20.1 GiB before a guard stopped it. The old estimate (offload +
+// 3 GiB, 13.0 GiB) admitted that. Two runs on one machine, so the estimate is
+// (1.81 x offload + 3.0 GiB) x 1.15, an offload run must leave max(4 GiB,
+// 10 % of RAM) available, and the controller's memory guard is the backstop.
+const VLLM_OFFLOAD_RAM_FACTOR = 1.81;
+const VLLM_OFFLOAD_RESIDENT_BYTES = 3 * GIB;
+const VLLM_OFFLOAD_RAM_MARGIN = 1.15;
+const VLLM_RAM_FLOOR_BYTES = 4 * GIB;
+const VLLM_RAM_FLOOR_SHARE = 0.1;
 
 // The vLLM policy: all weights on the GPU unless the admin explicitly offloads
 // some to RAM (cpuOffloadGb, much slower), a KV cache sized for maxModelLen,
@@ -200,10 +215,17 @@ export function admitVllm({ model, source, params, gpu, memory, disk, remainingD
     const usable = (share) => share * gpu.totalBytes * VLLM_USABLE_SHARE;
     const fromFree = Math.floor(Math.min(VLLM_MAX_UTILIZATION, (gpu.freeBytes - 2 * GPU_MARGIN_BYTES) / gpu.totalBytes) * 100) / 100;
     const gpuMemoryUtilization = params.gpuMemoryUtilization ?? fromFree;
-    const ramBytes = offloadBytes + VLLM_RUNNER_RAM_BYTES;
+    const ramBytes = offloadBytes > 0
+        ? Math.round((offloadBytes * VLLM_OFFLOAD_RAM_FACTOR + VLLM_OFFLOAD_RESIDENT_BYTES) * VLLM_OFFLOAD_RAM_MARGIN)
+        : VLLM_RUNNER_RAM_BYTES;
+    const ramFloor = Math.max(VLLM_RAM_FLOOR_BYTES, (memory.totalBytes || 0) * VLLM_RAM_FLOOR_SHARE);
     const estimate = {
         weightsBytes: size, gpuWeightsBytes, cpuWeightsBytes: offloadBytes, kvBytes, gpuBytes, ramBytes,
-        gpuMemoryUtilization, basis: 'snapshot size, KV cache for maxModelLen and a measured vLLM overhead',
+        gpuMemoryUtilization, basis: offloadBytes > 0
+            ? 'snapshot size, KV cache for maxModelLen, a measured vLLM overhead, and RAM for the offload measured with gpt-oss-20b plus 15 %'
+            : 'snapshot size, KV cache for maxModelLen and a measured vLLM overhead',
+        // With offload the controller keeps this much RAM available while the runner runs (memory guard).
+        ...(offloadBytes > 0 ? { ramFloorBytes: Math.round(ramFloor) } : {}),
     };
     const warnings = ramWarning(ramBytes, memory);
     if (offloadBytes > 0) {
@@ -226,6 +248,12 @@ export function admitVllm({ model, source, params, gpu, memory, disk, remainingD
             + `pick a smaller model, or offload weights to RAM with cpuOffloadGb (at least ${needed + (offloadBytes / GIB)} GiB; much slower).`,
         estimate, warnings);
     }
+    const offloadNeeds = `Offloading ${gib(offloadBytes)} needs about ${gib(ramBytes)} of system RAM `
+        + `(${VLLM_OFFLOAD_RAM_FACTOR} x the offload plus 3.0 GiB for vLLM, measured, plus 15 %)`;
+    if (offloadBytes > 0 && memory.totalBytes && ramBytes > memory.totalBytes - ramFloor) {
+        return result('incompatible', `${offloadNeeds}; this machine has ${gib(memory.totalBytes)} and ${gib(ramFloor)} must stay free. `
+            + 'Lower cpuOffloadGb or pick a smaller model.', estimate, warnings);
+    }
     if (memory.totalBytes && ramBytes > memory.totalBytes) {
         return result('incompatible', `Needs about ${gib(ramBytes)} of RAM; this machine has ${gib(memory.totalBytes)}.`, estimate, warnings);
     }
@@ -235,6 +263,11 @@ export function admitVllm({ model, source, params, gpu, memory, disk, remainingD
         || gpuBytes > usable(gpuMemoryUtilization)) {
         return result('insufficient-now', `Needs about ${gib(gpuBytes)} of GPU memory; ${gib(gpu.freeBytes)} is free now`
             + `${otherGpuUsers(gpu)}.`, estimate, warnings);
+    }
+    if (offloadBytes > 0 && memory.availableBytes && ramBytes > memory.availableBytes - ramFloor) {
+        return result('insufficient-now', `${offloadNeeds}; ${gib(memory.availableBytes)} is available now and ${gib(ramFloor)} `
+            + 'must stay free for the desktop and other agents. Close other applications, lower cpuOffloadGb, or pick a smaller model.',
+        estimate, warnings);
     }
     if (memory.availableBytes && ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
         return result('insufficient-now', `Needs about ${gib(ramBytes)} of RAM; ${gib(memory.availableBytes)} is available now.`,

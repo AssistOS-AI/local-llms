@@ -29,7 +29,7 @@ import {
     removeArtifact,
     resolveHuggingFaceArtifact,
 } from './downloader.mjs';
-import { readSnapshot } from './hardware.mjs';
+import { readMemory as readHostMemory, readSnapshot } from './hardware.mjs';
 import { createRunnerInstaller } from './runnerInstaller.mjs';
 import { loadRunnerLock } from './runnerLock.mjs';
 import { createLogBuffer, parseRunnerReport, startRunnerProcess } from './runnerProcess.mjs';
@@ -44,6 +44,10 @@ const PROBE_TIMEOUT_MS = 10_000;
 
 function paramsKey(modelId, runnerId) {
     return `${modelId}|${runnerId}`;
+}
+
+function gib(bytes) {
+    return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
 }
 
 // A stop, cancel or drain that lands between two awaited steps must not start
@@ -93,6 +97,12 @@ export function createController({
     resolveSnapshot = undefined,
     // The agent's own /dev/shm (a private tmpfs), where PyTorch runners keep sockets.
     shmDir = '/dev/shm',
+    // Host-memory guard for deployments whose admission sets a RAM floor
+    // (vLLM with CPU offload): MemAvailable is sampled this often while the
+    // runner loads, and less often once it is ready.
+    readMemory = readHostMemory,
+    memoryGuardLoadMs = 2000,
+    memoryGuardReadyMs = 10_000,
     now = () => new Date(),
 } = {}) {
     const log = createLogBuffer({ file: path.join(dataDir, 'logs', 'runner.log') });
@@ -114,6 +124,9 @@ export function createController({
     // Log sequence number before the current runner started: its report is
     // read only from lines after it, never from a previous runner's output.
     let runnerLogStart = 0;
+    // Set when the memory guard stopped a deployment's runner: its message is
+    // the deployment's error, not "exited unexpectedly".
+    let memoryStop = null;
 
     const stores = createWeightStores({
         dataDir,
@@ -433,9 +446,12 @@ export function createController({
             get running() { return process.running; },
         };
         const current = runner;
+        const cancelGuard = startMemoryGuard(deployment, current);
         process.exited.then((result) => {
+            cancelGuard();
             if (runner !== current) return;
             runner = null;
+            if (memoryStop?.deploymentId === deployment.id) return;
             const live = state.deployment;
             if (live?.id === deployment.id && ['starting', 'loading', 'ready', 'downloading'].includes(live.phase)
                 && !draining && live.phase !== 'stopping') {
@@ -446,6 +462,64 @@ export function createController({
             }
         });
         return runner;
+    }
+
+    // The backstop behind a RAM-floor admission (vLLM with CPU offload, whose
+    // estimate comes from two runs on one machine): while this runner loads and
+    // runs, sample MemAvailable; below the floor, stop it at once.
+    function startMemoryGuard(deployment, current) {
+        const floor = deployment.admission?.estimate?.ramFloorBytes;
+        if (!Number.isFinite(floor) || floor <= 0) return () => {};
+        let timer = null;
+        let cancelled = false;
+        const schedule = () => {
+            if (cancelled) return;
+            const ready = state.deployment?.id === deployment.id && state.deployment.phase === 'ready';
+            timer = setTimeout(tick, ready ? memoryGuardReadyMs : memoryGuardLoadMs);
+            timer.unref?.();
+        };
+        const tick = () => {
+            if (cancelled || runner !== current) return;
+            let available = null;
+            try {
+                available = readMemory().availableBytes;
+            } catch {}
+            if (Number.isFinite(available) && available < floor) {
+                cancelled = true;
+                stopForMemory(deployment, current,
+                    `stopped: host memory below the floor (${gib(available)} available, ${gib(floor)} required)`).catch(() => {});
+                return;
+            }
+            schedule();
+        };
+        schedule();
+        return () => {
+            cancelled = true;
+            clearTimeout(timer);
+        };
+    }
+
+    async function stopForMemory(deployment, current, message) {
+        memoryStop = { deploymentId: deployment.id, message };
+        log.append('controller', message);
+        // The host is short of memory now: SIGKILL follows SIGTERM within the
+        // drain's grace, not a Stop's.
+        try {
+            await current.stop({ graceMs: DRAIN_RUNNER_GRACE_MS });
+        } catch {}
+        // Once the agent drains, the drain settles the state; the log keeps the message.
+        if (draining || queue.closed) return;
+        try {
+            await queue.run(async () => {
+                if (runner === current) runner = null;
+                if (job?.deploymentId === deployment.id) await job.promise.catch(() => {});
+                // A Stop or a replace that came in meanwhile has already settled it.
+                const live = state.deployment;
+                if (live?.id === deployment.id && live.phase !== 'idle') setPhase('error', { error: message, runner: null });
+            });
+        } catch (error) {
+            log.append('controller', `memory guard: the stop was not recorded (${error.message})`);
+        }
     }
 
     function updateProgress(progress) {
@@ -585,7 +659,8 @@ export function createController({
                     runner = null;
                     await stopping.stop({ graceMs: runnerGraceMs() });
                 }
-                setPhase('error', { error: error.message, runner: null });
+                const guarded = memoryStop?.deploymentId === deployment.id ? memoryStop.message : null;
+                setPhase('error', { error: guarded || error.message, runner: null });
             })
             .finally(() => {
                 if (job === current) job = null;
