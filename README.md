@@ -77,11 +77,9 @@ Agents with `cpuSafe: false` (adaptive-local, coding-local) will be extremely sl
 
 ## LM Studio / llmster
 
-LM Studio's headless daemon (`llmster`) is represented as an **experimental** backend. It is NOT a default v1 dependency:
+LM Studio's headless daemon (`llmster`) runs through the GPU agent `local-llm`, not through these legacy agents. There it is an on-demand runner for **internal use only**. It stays off unless the deployment's operator turns it on (`ploinky var LOCAL_LLM_LMSTUDIO internal-use`, then a restart of local-llm). An admin installs it from the pinned download after accepting LM Studio's Terms. It is never part of any image. See `local-llm/docs/specs/DS000-vision-and-scope.md` and `local-llm/docs/specs/DS004-on-demand-runners.md`.
 
-- The `lmstudio_llmster` backend has `experimental: true` in the catalog.
-- The runner script (`scripts/runners/lmstudio-llmster.sh`) checks for the `llmster` binary and exits with guidance if missing.
-- No agent uses it as a default backend.
+The legacy catalog's `lmstudio_llmster` backend entry (`experimental: true`, `scripts/runners/lmstudio-llmster.sh`) is an older placeholder from before that agent. No legacy agent uses it, and the legacy image does not contain llmster.
 
 ## MCP Tool Surfaces
 

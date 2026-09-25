@@ -120,11 +120,11 @@ function installableRunner(record) {
     });
 }
 
-function harness(t, { lock, base }) {
+function harness(t, { lock, base, env = { PATH: '/usr/bin' }, adapt = (runner) => runner }) {
     const dataDir = tempDir(t, 'data');
     const runRoot = path.join(tempDir(t, 'opt'), 'runners');
     const record = {};
-    const runner = installableRunner(record);
+    const runner = adapt(installableRunner(record));
     const started = [];
     const installer = createRunnerInstaller({
         lock,
@@ -138,9 +138,9 @@ function harness(t, { lock, base }) {
         }),
     });
     const stateStore = createStateStore({ dataDir });
-    const make = () => createController({
+    const make = (overrides = {}) => createController({
         dataDir,
-        env: { PATH: '/usr/bin' },
+        env: overrides.env ?? env,
         seedCatalog: SEED,
         stateStore,
         runners: { ...RUNNERS, [runner.id]: runner },
@@ -285,4 +285,52 @@ test('a Run on a runner that is being installed is refused as busy', async (t) =
         { code: 'busy' });
     await h.controller.drain();
     server.release();
+});
+
+// An operator switch (LM Studio, handoff decision L2): a runner whose adapter
+// says it is not enabled on this deployment cannot be installed or run, and
+// the overview says why. The switch is read from the agent's environment, which
+// only the deployment's operator sets; an admin cannot turn it on from the UI.
+function switchedRunner(runner) {
+    return Object.freeze({
+        ...runner,
+        enabled: (env) => (env.FAKE_RUNNER_SWITCH === 'internal-use'
+            ? { enabled: true, reason: null }
+            : { enabled: false, reason: 'Not enabled on this deployment (internal use only).' }),
+    });
+}
+
+test('a runner behind an operator switch is refused until the operator turns it on', async (t) => {
+    const bytes = makeArchive(t);
+    const { base, requests } = await serve(t, bytes);
+    const off = harness(t, { lock: lockFor(bytes, { requiresAcceptance: true }), base, adapt: switchedRunner });
+    await assert.rejects(() => off.controller.installRunner({ runnerId: 'fake-installable', acceptLicence: true, acceptedBy: 'admin@example.com' }),
+        (error) => error.code === 'runner_disabled' && /internal use only/.test(error.message));
+    await assert.rejects(() => off.controller.run({ modelId: 'gpt-oss-20b', runnerId: 'fake-installable', requestId: 'request-switch-1' }),
+        (error) => error.code === 'runner_disabled' && /internal use only/.test(error.message));
+    assert.equal(requests.length, 0, 'nothing was downloaded');
+    assert.equal(off.controller.state.deployment ?? null, null);
+    const overview = await off.controller.overview();
+    const listed = overview.runners.find((runner) => runner.id === 'fake-installable');
+    assert.equal(listed.enabled, false);
+    assert.equal(listed.disabledReason, 'Not enabled on this deployment (internal use only).');
+    const fit = overview.models.find((model) => model.id === 'gpt-oss-20b').runners['fake-installable'];
+    assert.equal(fit.admission.status, 'incompatible');
+    assert.match(fit.admission.reason, /internal use only/);
+    // Other runners are unaffected, and the weights do not list a runner that is off.
+    assert.equal(overview.runners.find((runner) => runner.id === 'llama.cpp').enabled, true);
+    assert.equal(overview.models.find((model) => model.id === 'gpt-oss-20b').weights.gguf.runners.includes('fake-installable'), false);
+
+    const on = harness(t, { lock: lockFor(bytes, { requiresAcceptance: true }), base, adapt: switchedRunner,
+        env: { PATH: '/usr/bin', FAKE_RUNNER_SWITCH: 'internal-use' } });
+    await on.controller.installRunner({ runnerId: 'fake-installable', acceptLicence: true, acceptedBy: 'admin@example.com' });
+    await until(() => on.controller.state.runnerInstalls?.['fake-installable']?.phase === 'installed');
+    assert.equal((await on.controller.overview()).runners.find((runner) => runner.id === 'fake-installable').enabled, true);
+    // Installed, then the operator turns the switch off: Run is refused, and
+    // Uninstall still frees the disk.
+    const later = on.make({ env: { PATH: '/usr/bin' } });
+    await assert.rejects(() => later.run({ modelId: 'gpt-oss-20b', runnerId: 'fake-installable', requestId: 'request-switch-2' }),
+        { code: 'runner_disabled' });
+    const removed = await later.uninstallRunner({ runnerId: 'fake-installable' });
+    assert.ok(removed.freedBytes >= bytes.length);
 });

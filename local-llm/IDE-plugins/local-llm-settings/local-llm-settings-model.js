@@ -134,6 +134,7 @@ export function runnerOptions(overview, model) {
             const entry = model.runners[runner.id];
             let state;
             if (!runner.supported) state = 'not supported';
+            else if (runner.enabled === false) state = 'not enabled on this deployment';
             else if (!runner.installed) state = 'not installed';
             else if (entry.admission?.status === 'ok') state = entry.download?.state === 'complete' ? 'ready to run' : 'will download';
             else state = entry.admission?.status === 'insufficient-now' ? 'not now' : 'does not fit';

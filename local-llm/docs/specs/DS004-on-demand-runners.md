@@ -3,7 +3,7 @@ id: DS004
 title: On-demand Runners
 status: accepted
 owner: local-llm
-summary: Runners installed after the image is built, from a lock shipped in the image, a verified cache in /data and a runnable copy rebuilt in the container.
+summary: Runners installed after the image is built, from a lock shipped in the image, a verified cache in /data and a runnable copy rebuilt in the container; a proprietary entry is never downloaded in CI.
 ---
 
 # DS004 On-demand Runners
@@ -34,6 +34,7 @@ A `python` runner's files are wheels, source archives with `extract` (the direct
 | Step | Rule |
 | --- | --- |
 | Start | `local_llm_runner_install { runnerId, acceptLicence }`, admin only. Nothing installs automatically. One install runs at a time. |
+| Operator switch | A runner whose adapter has one (LM Studio, `LOCAL_LLM_LMSTUDIO=internal-use`, DS001) is refused with `runner_disabled` while it is off, before anything downloads; the dashboard shows the reason and no Install. Uninstall still works, to free the disk. |
 | Licence | A runner whose lock entry sets `requiresAcceptance` is refused with `licence_required` unless `acceptLicence` is true. The acceptance is recorded in the install state and in `installed.json`, with who accepted (the verified caller from the Router-signed invocation, never tool input) and when. The dashboard shows the licence, its source link and the notice before the Install is sent. |
 | Download | Each file goes through the downloader's resume, size and free-disk checks and is verified against its sha256 before it is used (`downloadFile`). The whole install first needs free space for the remaining bytes plus 5 %. A Stop, a drain or a network failure leaves the install `paused`; the next Install resumes the partial files. A server that answers a resumed request with 200 and only part of the file (LM Studio's download host does, with no `Content-Range`) makes the downloader discard the partial and start that file again from zero. |
 | Record | `installed.json` is written only after every file verified. |
@@ -53,6 +54,10 @@ Before the first launch in a container, and at the end of an install, `ensureRun
 Only one build of a runner's copy runs at a time: a caller that arrives while it is being built (an Install finishing while a Run starts) shares that build. A Run on a runner whose install is in progress is refused with `busy`.
 
 Every step runs in its own process group, so a Stop or a drain ends it. `uv` gets a minimal environment (`UV_OFFLINE`, `UV_PYTHON_DOWNLOADS=never`, no agent secrets). Code changed in the runnable copy lasts only as long as the container, like code baked into the image; `ploinky restart` creates a new container, which rebuilds the copy from the verified cache.
+
+### LM Studio's runnable copy
+
+The lock's `lmstudio` entry is llmster 0.0.25-1 with its bundled CUDA 12 engine, one tarball from `llmster.lmstudio.ai` (1,105,623,572 bytes, sha256 `46778639…`, `strip: 0`), under LM Studio's Terms, marked proprietary. The copy is the unpacked tarball, with no post-install step: llmster runs from it directly, without LM Studio's `install.sh` or `bootstrap`. Its home is `home/` inside the copy. On its first start in a container, llmster moves its engines out of the copy into that home, so the two share one lifetime: a rebuild or an uninstall removes both, and nothing of LM Studio's lives in `/data` except the verified tarball in the cache. The LM Studio SDK the adapter loads through is not part of the copy: it is pinned in the image (`/opt/local-llm/lmstudio-sdk`).
 
 ### Uninstall
 

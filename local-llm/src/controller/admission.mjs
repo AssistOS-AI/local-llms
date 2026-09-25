@@ -122,8 +122,12 @@ function otherGpuUsers(gpu) {
 // The llama-server policy: weights split between GPU and RAM by nCpuMoe,
 // KV cache and compute buffers on the GPU. Used by llama.cpp and every
 // runner that serves the same GGUF files with the same memory layout.
-export function admitLlamaServer({ model, source, params, gpu, memory, disk, remainingDownloadBytes = 0 }) {
-    const estimate = estimateLlamaCpp({ model, source, params });
+// `extra` adds a runner's own RAM beside llama-server (LM Studio's daemon).
+export function admitLlamaServer({ model, source, params, gpu, memory, disk, remainingDownloadBytes = 0 }, extra = null) {
+    const base = estimateLlamaCpp({ model, source, params });
+    const estimate = extra
+        ? { ...base, ramBytes: base.ramBytes + extra.ramBytes, basis: `${base.basis}, plus ${extra.basis}` }
+        : base;
     const warnings = ramWarning(estimate.ramBytes, memory);
     if (estimate.gpuBytes > gpu.totalBytes * 0.97) {
         return result('incompatible', `Needs about ${gib(estimate.gpuBytes)} of GPU memory; the GPU has `
@@ -146,6 +150,17 @@ export function admitLlamaServer({ model, source, params, gpu, memory, disk, rem
             + `${gib(disk.freeBytes)} is free.`, estimate, warnings);
     }
     return result('ok', null, estimate, warnings);
+}
+
+// LM Studio runs the same llama-server (its bundled b11026) with the flags the
+// adapter sets through its SDK and checks in the engine's command line, so
+// the llama-server model applies, plus LM Studio's daemon and workers: about
+// 0.6 GB at idle (llmster about 507 MB, a node worker about 103 MB; runners
+// plan §11, research), budgeted at 768 MiB.
+const LMSTUDIO_RAM_BYTES = 768 * MIB;
+
+export function admitLmStudio(input) {
+    return admitLlamaServer(input, { ramBytes: LMSTUDIO_RAM_BYTES, basis: 'LM Studio\'s daemon (768 MiB)' });
 }
 
 // The Ollama policy: Ollama places whole layers itself unless numGpu pins them.

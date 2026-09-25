@@ -26,8 +26,11 @@ const TEXT_MAX = 400;
 // v1 registries keyed sources by runner id. Where several v1 keys held a GGUF
 // file, the first in this order becomes the gguf source.
 const V1_GGUF_KEYS = Object.freeze(['llama.cpp', 'lmstudio', 'vllm']);
-// Runners that no longer exist; their per-runner entries are dropped.
-const REMOVED_RUNNERS = Object.freeze(['lmstudio']);
+// Per-runner entries of v1 runners that never ran. The v1 LM Studio stub never
+// started a model, so a v1 entry's parameters and measurements for it are
+// dropped. LM Studio is a runner again since Phase R7, so a v2 entry keeps its
+// own LM Studio entries; only an entry that still keys sources by runner is v1.
+const V1_STUB_RUNNERS = Object.freeze(['lmstudio']);
 
 function invalid(message, field) {
     return new LocalLlmError('invalid_model', message, { field });
@@ -283,9 +286,11 @@ export function migrateModelEntry(entry) {
         if (legacy) sources.gguf = legacy;
     }
     const migrated = { ...entry, sources };
+    const v1 = Object.keys(entry.sources).some((key) => V1_GGUF_KEYS.includes(key));
+    if (!v1) return migrated;
     for (const field of ['recommended', 'validated']) {
         if (!plainObject(entry[field])) continue;
-        migrated[field] = Object.fromEntries(Object.entries(entry[field]).filter(([runnerId]) => !REMOVED_RUNNERS.includes(runnerId)));
+        migrated[field] = Object.fromEntries(Object.entries(entry[field]).filter(([runnerId]) => !V1_STUB_RUNNERS.includes(runnerId)));
     }
     return migrated;
 }

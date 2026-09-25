@@ -79,6 +79,28 @@ function fakeChild() {
     return child;
 }
 
+// A runner whose output echoes request bodies (LM Studio's llmster) brings
+// a line filter: each stream gets its own, and a line it drops never reaches
+// the log, in memory or in /data/logs/runner.log.
+test('an output filter sees every line of each stream on its own and can drop or shorten it', async () => {
+    const log = createLogBuffer();
+    const child = fakeChild();
+    const made = [];
+    const filter = () => {
+        const seen = [];
+        made.push(seen);
+        return (line) => { seen.push(line); return line.includes('SECRET') ? null : line.toUpperCase(); };
+    };
+    startRunnerProcess({ command: 'runner', args: [], env: {}, log, spawnImpl: () => child, killImpl: () => {}, filter });
+    child.stdout.write('one\ntwo SECRET\nthr');
+    child.stdout.end('ee\n');
+    child.stderr.end('SECRET on stderr\nfour\n');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(log.all().map((entry) => `${entry.stream}:${entry.line}`).sort(), ['stderr:FOUR', 'stdout:ONE', 'stdout:THREE']);
+    assert.equal(made.length, 2, 'one filter per stream');
+    assert.deepEqual(made.flat().sort(), ['SECRET on stderr', 'four', 'one', 'three', 'two SECRET']);
+});
+
 test('runner output split across chunks is logged as whole lines', async () => {
     const log = createLogBuffer();
     const child = fakeChild();
@@ -99,4 +121,12 @@ test('runner output split across chunks is logged as whole lines', async () => {
     const report = parseRunnerReport(log.all());
     assert.equal(report.modelMiB, 4073.34);
     assert.deepEqual(report.offloaded, { layers: 25, of: 25 });
+});
+
+test('a filter factory that throws stops the start before anything is spawned', () => {
+    const log = createLogBuffer();
+    let spawned = false;
+    assert.throws(() => startRunnerProcess({ command: 'runner', args: [], env: {}, log, killImpl: () => {},
+        spawnImpl: () => { spawned = true; return fakeChild(); }, filter: () => { throw new Error('bad filter'); } }), /bad filter/);
+    assert.equal(spawned, false);
 });

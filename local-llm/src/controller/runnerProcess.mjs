@@ -90,37 +90,52 @@ export function parseRunnerReport(lines) {
 
 // Runner output arrives in arbitrary chunks. Only whole lines are logged, so a
 // line split across chunks (or a multi-byte character) still parses; a line
-// longer than the bound is logged in pieces rather than held forever.
+// longer than the bound is logged in pieces rather than held forever. Each
+// piece after the first is emitted as a continuation, so a line filter never
+// mistakes one for a line of its own.
 const MAX_PENDING_LINE = 64 * 1024;
 
 function wholeLines(emit) {
     const decoder = new StringDecoder('utf8');
     let pending = '';
+    let continuing = false;
+    const line = (text) => {
+        emit(text, continuing);
+        continuing = false;
+    };
     return {
         push(chunk) {
             pending += decoder.write(chunk);
-            const newline = pending.lastIndexOf('\n');
-            if (newline >= 0) {
-                emit(pending.slice(0, newline));
+            let newline = pending.indexOf('\n');
+            while (newline >= 0) {
+                line(pending.slice(0, newline));
                 pending = pending.slice(newline + 1);
+                newline = pending.indexOf('\n');
             }
             if (pending.length > MAX_PENDING_LINE) {
-                emit(pending);
+                emit(pending, continuing);
+                continuing = true;
                 pending = '';
             }
         },
         flush() {
             pending += decoder.end();
-            if (pending) emit(pending);
+            if (pending) line(pending);
             pending = '';
         },
     };
 }
 
-export function startRunnerProcess({ command, args, env, cwd = '/', log, spawnImpl = spawn, killImpl = process.kill }) {
+// `filter`, when given, makes one line filter per output stream: it returns the
+// line to log (possibly shortened) or null to drop it. A runner whose output
+// echoes request bodies (LM Studio) uses it to keep them out of the log.
+export function startRunnerProcess({ command, args, env, cwd = '/', log, filter = null, spawnImpl = spawn, killImpl = process.kill }) {
     if (!Array.isArray(args) || args.some((value) => typeof value !== 'string')) {
         throw new Error('Runner arguments must be an array of strings');
     }
+    // One filter per stream, made before anything is spawned: a filter that
+    // cannot be made must not leave a runner nobody controls.
+    const keepers = { stdout: filter ? filter() : null, stderr: filter ? filter() : null };
     // The runner leads its own process group, so a stop reaches every process
     // it started (worker processes, a model server's runner child), not just
     // the one the controller spawned.
@@ -149,7 +164,17 @@ export function startRunnerProcess({ command, args, env, cwd = '/', log, spawnIm
     });
     for (const [name, stream] of [['stdout', child.stdout], ['stderr', child.stderr]]) {
         if (!stream) continue;
-        const lines = wholeLines((text) => log.append(name, text));
+        const keep = keepers[name];
+        const lines = wholeLines((text, continued) => {
+            if (!keep) {
+                log.append(name, text);
+                return;
+            }
+            // The rest of an over-long line is never logged through a filter.
+            if (continued) return;
+            const kept = keep(text.replace(/\r$/, ''));
+            if (typeof kept === 'string' && kept) log.append(name, kept);
+        });
         stream.on('data', (chunk) => lines.push(chunk));
         stream.on('end', () => lines.flush());
     }

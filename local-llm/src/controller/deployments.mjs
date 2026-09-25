@@ -30,7 +30,7 @@ import {
     resolveHuggingFaceArtifact,
 } from './downloader.mjs';
 import { readMemory as readHostMemory, readSnapshot } from './hardware.mjs';
-import { createRunnerInstaller } from './runnerInstaller.mjs';
+import { createRunnerInstaller, runTool } from './runnerInstaller.mjs';
 import { loadRunnerLock } from './runnerLock.mjs';
 import { createLogBuffer, parseRunnerReport, startRunnerProcess } from './runnerProcess.mjs';
 import { createStateStore, reconcileAfterRestart } from './stateStore.mjs';
@@ -197,6 +197,25 @@ export function createController({
         return detected[id];
     }
 
+    // Whether this deployment allows the runner at all (LM Studio, internal
+    // use only: an environment switch the operator sets with `ploinky var`;
+    // DS001 says who else can). Runners without a switch are always enabled.
+    function gateOf(definition) {
+        const gate = typeof definition.enabled === 'function' ? definition.enabled(env) : null;
+        return gate && gate.enabled === false
+            ? { enabled: false, reason: gate.reason || `${definition.displayName} is not enabled on this deployment.` }
+            : { enabled: true, reason: null };
+    }
+
+    function assertEnabled(definition) {
+        const gate = gateOf(definition);
+        if (!gate.enabled) throw new LocalLlmError('runner_disabled', gate.reason, { runner: definition.id });
+    }
+
+    function disabledAdmission(gate) {
+        return { status: 'incompatible', reason: gate.reason, estimate: { isEstimate: true }, warnings: [] };
+    }
+
     // After a runner is installed or removed while the agent runs.
     function redetectRunners() {
         detected = {};
@@ -247,6 +266,8 @@ export function createController({
             return { modelId, runnerId, params: null, context: null,
                 admission: admit({ runner: definition, model, source, params: {}, snapshot: snap }) };
         }
+        const gate = gateOf(definition);
+        if (!gate.enabled) return { modelId, runnerId, params: null, context: null, admission: disabledAdmission(gate) };
         let normalized;
         try {
             normalized = effectiveParams(model, runnerId, params && typeof params === 'object' ? params : undefined);
@@ -268,9 +289,12 @@ export function createController({
         const snap = await snapshot();
         const runnerList = [];
         for (const definition of Object.values(runners)) {
+            const gate = gateOf(definition);
             runnerList.push({
                 ...runnerSummary(definition),
                 ...(await runnerInfo(definition.id)),
+                enabled: gate.enabled,
+                ...(gate.enabled ? {} : { disabledReason: gate.reason }),
                 ...(installable(definition.id) ? { install: await installInfo(definition.id) } : {}),
             });
         }
@@ -283,8 +307,9 @@ export function createController({
                     label: WEIGHT_FORMATS[format]?.label || format,
                     size: source?.size ?? null,
                     download: await weightsState(source),
+                    // The runners that can read them here: not one this deployment's operator left off.
                     runners: Object.values(runners)
-                        .filter((definition) => definition.supported && definition.weightFormat === format)
+                        .filter((definition) => definition.supported && gateOf(definition).enabled && definition.weightFormat === format)
                         .map((definition) => definition.id),
                 };
             }
@@ -299,13 +324,14 @@ export function createController({
                 }
                 const disk = definition.supported ? weights[definition.weightFormat].download : null;
                 const remaining = disk && disk.total ? Math.max(0, disk.total - (disk.bytes || 0)) : 0;
+                const gate = gateOf(definition);
                 perRunner[definition.id] = {
                     format: definition.weightFormat,
                     size: source?.size ?? null,
                     download: disk,
                     params,
                     context: params && definition.describeContext ? definition.describeContext(params) : null,
-                    admission: paramError
+                    admission: !gate.enabled ? disabledAdmission(gate) : paramError
                         ? { status: 'incompatible', reason: paramError, estimate: {}, warnings: [] }
                         : admit({
                             runner: definition, model, source, params: params || {}, snapshot: snap,
@@ -429,13 +455,39 @@ export function createController({
         };
     }
 
-    function launchRunner(deployment, launch, apiKey, port) {
+    // A helper step of a runner's start-up or watchdog (for example LM
+    // Studio's `lms import`): its own process group, ended by `signal`, with
+    // only the environment the adapter gives it. `json` returns the step's
+    // last output line, parsed.
+    function stepRunner(signal) {
+        // `quiet` steps (a watchdog's routine check) are logged only when they fail.
+        return async ({ label, command, args = [], env: stepEnv = {}, cwd = '/', json = false, quiet = false }) => {
+            const result = await runTool({ command, args, env: stepEnv, cwd, signal });
+            if (result.aborted) throw new LocalLlmError('aborted', 'Stopped while starting.');
+            if (result.code !== 0) {
+                const tail = result.output.trim().split('\n').slice(-3).join(' | ').slice(0, 600);
+                throw new LocalLlmError('runner_step_failed', `${label} failed (exit ${result.code ?? result.signal}): ${tail}`);
+            }
+            if (!quiet) log.append('controller', `${label}: done`);
+            if (!json) return { output: result.output };
+            try {
+                return JSON.parse(result.output.trim().split('\n').at(-1));
+            } catch {
+                throw new LocalLlmError('runner_step_failed', `${label} returned no result.`);
+            }
+        };
+    }
+
+    function launchRunner(deployment, launch, apiKey, port, { definition = null, runnerDir = null } = {}) {
         fs.mkdirSync(path.join(dataDir, 'home'), { recursive: true });
         log.addSecret(apiKey);
         runnerLogStart = log.seq;
         lastCompletion = null;
         log.append('controller', `starting ${launch.command} ${launch.args.join(' ')}`);
-        const process = startRunner({ command: launch.command, args: launch.args, env: runnerEnv(launch.env), cwd: launch.cwd || '/', log });
+        const process = startRunner({
+            command: launch.command, args: launch.args, env: runnerEnv(launch.env), cwd: launch.cwd || '/', log,
+            filter: launch.outputFilter || null,
+        });
         runner = {
             pid: process.pid,
             port,
@@ -449,6 +501,14 @@ export function createController({
         const cancelGuard = startMemoryGuard(deployment, current);
         process.exited.then((result) => {
             cancelGuard();
+            current.stopWatchdog?.();
+            // The adapter's clean-up once its process group is gone (LM Studio
+            // deletes its server log and reaps anything left in its copy).
+            try {
+                definition?.afterExit?.({ runnerDir, log: (line) => log.append('controller', line) });
+            } catch (error) {
+                log.append('controller', `clean-up after ${definition.id} failed: ${error.message}`);
+            }
             if (runner !== current) return;
             runner = null;
             if (memoryStop?.deploymentId === deployment.id) return;
@@ -573,7 +633,8 @@ export function createController({
             signal,
             fetch: fetchImpl,
             store: storeFor(deployment.artifact),
-            launch: (spec) => launchRunner(deployment, spec, apiKey, port),
+            launch: (spec) => launchRunner(deployment, spec, apiKey, port, { definition, runnerDir }),
+            exec: stepRunner(signal),
             waitForHttp: (url, options = {}) => waitForHttp(url, { ...options, signal }),
             setPhase: (phase) => setPhase(phase),
             progress: updateProgress,
@@ -619,6 +680,39 @@ export function createController({
             throw new LocalLlmError('runner_exited', 'The runner is not running after its start-up.');
         }
         setPhase('ready', { runner: { pid: runner.pid, port: runner.port, startedAt: now().toISOString(), ...(details || {}) } });
+        startWatchdog(deployment, runner, definition, runnerDir);
+    }
+
+    // An adapter's periodic check while its runner is ready (LM Studio loads
+    // any model a request names, so it unloads anything but ours). A check's
+    // note is logged; a failed check is logged and does not stop the runner.
+    function startWatchdog(deployment, current, definition, runnerDir) {
+        const watchdog = definition.watchdog;
+        if (!watchdog || typeof watchdog.check !== 'function') return;
+        const abort = new AbortController();
+        let timer = null;
+        const tick = async () => {
+            if (abort.signal.aborted || runner !== current || state.deployment?.id !== deployment.id || state.deployment.phase !== 'ready') return;
+            try {
+                const note = await watchdog.check({
+                    deployment: publicDeployment(), modelId: deployment.modelId, port: current.port, runnerDir,
+                    exec: stepRunner(abort.signal), signal: abort.signal,
+                });
+                if (note && !abort.signal.aborted) log.append('controller', `${definition.id} watchdog: ${note}`);
+            } catch (error) {
+                if (!abort.signal.aborted) log.append('controller', `${definition.id} watchdog failed: ${error.message}`);
+            }
+            if (!abort.signal.aborted) {
+                timer = setTimeout(tick, watchdog.intervalMs || 30_000);
+                timer.unref?.();
+            }
+        };
+        timer = setTimeout(tick, watchdog.intervalMs || 30_000);
+        timer.unref?.();
+        current.stopWatchdog = () => {
+            abort.abort();
+            clearTimeout(timer);
+        };
     }
 
     function startJob(deployment, model) {
@@ -703,6 +797,7 @@ export function createController({
                 const result = admit({ runner: definition, model, source, params: {}, snapshot: {} });
                 throw new LocalLlmError('runner_unsupported', result.reason);
             }
+            assertEnabled(definition);
             if (!source) throw new LocalLlmError('no_source', `${model.displayName} has no ${definition.displayName} source.`);
             if (installJob?.runnerId === runnerId) {
                 throw new LocalLlmError('busy', `${definition.displayName} is being installed; run it once the install finishes.`);
@@ -984,6 +1079,7 @@ export function createController({
             if (!installable(runnerId)) {
                 throw new LocalLlmError('not_installable', `No installable runner '${String(runnerId)}' in this image's runner lock.`);
             }
+            assertEnabled(getRunner(runnerId));
             if (draining) throw new LocalLlmError('shutting_down', 'The agent is restarting; install again once it is back.');
             const entry = installer.entryFor(runnerId);
             if (installJob) {

@@ -175,7 +175,12 @@ test('runner labels come from the runners the agent reports', () => {
     assert.equal(runnerLabel('future'), 'Future <runner>');
     assert.equal(runnerLabel('ollama'), 'Ollama');
     assert.equal(runnerLabel('unknown-id'), 'unknown-id');
-    assert.equal(runnerLabel('lmstudio'), 'lmstudio', 'LM Studio is no longer a known runner');
+    // Intended change (runners plan I9): LM Studio is a runner again. It has no
+    // built-in label; like any runner it is named by the overview, which says
+    // it is for internal use only.
+    assert.equal(runnerLabel('lmstudio'), 'lmstudio');
+    rememberRunners([{ id: 'lmstudio', displayName: 'LM Studio (internal use only)' }]);
+    assert.equal(runnerLabel('lmstudio'), 'LM Studio (internal use only)');
 });
 
 test('runner options show every runner with its state, and a Run gets a fresh valid request id', () => {

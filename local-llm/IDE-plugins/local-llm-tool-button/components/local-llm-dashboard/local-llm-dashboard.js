@@ -22,6 +22,7 @@ import {
     estimateHtml,
     hasWeightsOnDisk,
     hardwareCardsHtml,
+    installMessage,
     modelsTableHtml,
     runnersPanelHtml,
     splitRunFields,
@@ -251,12 +252,7 @@ export class LocalLlmDashboard {
         const install = runner?.install;
         if (!install || this.busy) return;
         const licence = install.licence || {};
-        const terms = licence.requiresAcceptance
-            ? ` It is licensed under ${licence.name} (${licence.url}${licence.source ? `; source: ${licence.source}` : ''}). ${licence.notice || ''} Installing accepts these terms on this workspace's behalf, and your acceptance is recorded.`
-            : ` Licence: ${licence.name}.`;
-        const confirmed = await assistOS.UI.showModal('confirm-action-modal', {
-            message: confirmMessage(`Install ${runner.displayName || runner.id} ${install.version}? It downloads ${formatBytes(install.totalBytes)} of pinned files to this workspace.${terms}`),
-        }, true);
+        const confirmed = await assistOS.UI.showModal('confirm-action-modal', { message: confirmMessage(installMessage(runner)) }, true);
         if (!confirmed) return;
         const started = await this.withBusy(`Installing ${runner.displayName || runner.id}…`, async () => {
             const result = await callLocalLlm('local_llm_runner_install', { runnerId, acceptLicence: Boolean(licence.requiresAcceptance) });

@@ -30,7 +30,8 @@
                   "ik_llama.cpp",
                   "ollama",
                   "vllm",
-                  "tabbyapi"
+                  "tabbyapi",
+                  "lmstudio"
                 ]
               },
               "params": {
@@ -110,7 +111,8 @@
               "ik_llama.cpp",
               "ollama",
               "vllm",
-              "tabbyapi"
+              "tabbyapi",
+              "lmstudio"
             ]
           },
           "params": {
@@ -204,7 +206,8 @@
               "ik_llama.cpp",
               "ollama",
               "vllm",
-              "tabbyapi"
+              "tabbyapi",
+              "lmstudio"
             ]
           },
           "format": {

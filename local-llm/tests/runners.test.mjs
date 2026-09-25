@@ -419,7 +419,7 @@ describe('vLLM runner', () => {
 
 describe('runner registry', () => {
     it('resolves known runners and rejects others', () => {
-        assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi']);
+        assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi', 'lmstudio']);
         assert.equal(getRunner('llama.cpp'), llamaCppRunner);
         assert.equal(getRunner('ollama'), ollamaRunner);
         for (const id of ['toString', 'constructor', 'llamacpp', undefined, null]) {
@@ -429,7 +429,7 @@ describe('runner registry', () => {
 
     it('summarizes runners with JSON-serializable, frozen schemas', () => {
         const summaries = runnerSummaries();
-        assert.deepEqual(summaries.map((s) => s.id), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi']);
+        assert.deepEqual(summaries.map((s) => s.id), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi', 'lmstudio']);
         for (const summary of summaries) {
             assert.deepEqual(Object.keys(summary).sort(),
                 ['basicParams', 'displayName', 'id', 'moeParams', 'paramSchema', 'pinnedVersion', 'supported', 'weightFormat']);

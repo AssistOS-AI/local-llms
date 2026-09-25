@@ -7,12 +7,14 @@ import {
     detailInfoHtml,
     estimateHtml,
     hardwareCardsHtml,
+    installMessage,
     modelsTableHtml,
     runnersPanelHtml,
     splitRunFields,
     statusCardHtml,
+    tableRunners,
 } from '../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-view.js';
-import { fieldsFromSchema } from '../IDE-plugins/local-llm-settings/local-llm-settings-model.js';
+import { fieldsFromSchema, rememberRunners, runnerOptions } from '../IDE-plugins/local-llm-settings/local-llm-settings-model.js';
 import { RUNNERS } from '../src/runners/index.mjs';
 
 const ROOT = new URL('..', import.meta.url);
@@ -386,4 +388,55 @@ test('while open and visible, the overview refreshes on a timer; hidden or close
     assert.equal(h.pending.size, 0, 'unload stops the timer');
     await h.fireAll();
     assert.equal(overviews, 2);
+});
+
+// LM Studio (runners plan I9, Phase R7): off unless this deployment's operator
+// turned it on; proprietary, for internal use only, with its Terms shown and
+// accepted before anything downloads.
+const LMSTUDIO_LICENCE = {
+    name: 'LM Studio Terms of Use, version August 23, 2026', url: 'https://lmstudio.ai/app-terms', requiresAcceptance: true, proprietary: true,
+    notice: 'Internal use only: the Terms license it "solely for Your personal and / or internal business purposes".',
+};
+const REASON = 'LM Studio is not enabled on this deployment (internal use only). This deployment\'s operator enables it with "ploinky var LOCAL_LLM_LMSTUDIO internal-use" and a restart of local-llm.';
+
+test('a runner the operator left off says why, offers no Install, and gets no column or Run option', () => {
+    const off = { id: 'lmstudio', displayName: 'LM Studio (internal use only)', supported: true, installed: false, enabled: false, disabledReason: REASON,
+        install: { version: '0.0.25-1', totalBytes: 1105623572, licence: LMSTUDIO_LICENCE, installed: false, runnable: false, state: null } };
+    const html = runnersPanelHtml([off]);
+    assert.doesNotMatch(html, /data-local-action="installRunner lmstudio"/);
+    assert.match(html, /not enabled on this deployment/);
+    assert.match(html, /ploinky var LOCAL_LLM_LMSTUDIO internal-use/);
+    assert.match(html, /href="https:\/\/lmstudio\.ai\/app-terms"/, 'the Terms stay visible');
+    // Installed earlier, then turned off: it can still be uninstalled to free the disk.
+    const installedOff = { ...off, installed: true, install: { ...off.install, installed: true, runnable: true } };
+    assert.match(runnersPanelHtml([installedOff]), /data-local-action="uninstallRunner lmstudio"/);
+    // On, it installs like any on-demand runner.
+    assert.match(runnersPanelHtml([{ ...off, enabled: true, disabledReason: undefined }]), /data-local-action="installRunner lmstudio"/);
+    assert.deepEqual(tableRunners([...RUNNER_LIST, off]).map((runner) => runner.id), ['llama.cpp', 'fake-gguf', 'ollama']);
+    const model = { runners: { 'llama.cpp': { admission: { status: 'ok' }, download: { state: 'complete' } }, lmstudio: { admission: { status: 'incompatible' } } } };
+    // The dashboard learns runner names from the overview.
+    rememberRunners([off]);
+    const options = runnerOptions({ runners: [RUNNER_LIST[0], off] }, model);
+    assert.equal(options.find((option) => option.value === 'lmstudio').label, 'LM Studio (internal use only) · not enabled on this deployment');
+});
+
+test('installing a proprietary runner shows its Terms, the internal-use rule and that the acceptance is recorded', () => {
+    const runner = { id: 'lmstudio', displayName: 'LM Studio (internal use only)',
+        install: { version: '0.0.25-1', totalBytes: 1105623572, licence: LMSTUDIO_LICENCE } };
+    const message = installMessage(runner);
+    assert.match(message, /^Install LM Studio \(internal use only\) 0\.0\.25-1\? It downloads 1\.1 GB of pinned files/);
+    assert.match(message, /proprietary software, for internal use only/);
+    assert.match(message, /LM Studio Terms of Use, version August 23, 2026 \(https:\/\/lmstudio\.ai\/app-terms\)/);
+    assert.match(message, /internal business purposes/);
+    assert.match(message, /accepts these terms on this workspace's behalf, and your acceptance is recorded/);
+    // A notice that already says so is not followed by the same sentence again (seen live in L3).
+    const said = installMessage({ ...runner, install: { ...runner.install, licence: { ...LMSTUDIO_LICENCE,
+        notice: 'Installing downloads it and accepts the Terms on this workspace\'s behalf, and your acceptance is recorded.' } } });
+    assert.equal(said.match(/acceptance is recorded/g).length, 1, said);
+    // An open-source licence that needs acceptance keeps its wording; one that does not just names it.
+    const agpl = installMessage({ id: 'tabbyapi', displayName: 'TabbyAPI', install: { version: 'f07131c', totalBytes: 4e9,
+        licence: { name: 'AGPL-3.0', url: 'https://x.example/L', source: 'https://x.example/S', notice: 'AGPL notice.', requiresAcceptance: true } } });
+    assert.match(agpl, /It is licensed under AGPL-3\.0 \(https:\/\/x\.example\/L; source: https:\/\/x\.example\/S\)\. AGPL notice\./);
+    assert.doesNotMatch(agpl, /proprietary/);
+    assert.match(installMessage({ id: 'vllm', install: { version: '0.30.0', totalBytes: 4e9, licence: { name: 'Apache-2.0' } } }), /Licence: Apache-2\.0\.$/);
 });

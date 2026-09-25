@@ -284,7 +284,8 @@ test('admission refuses before anything is downloaded, and re-checks before laun
 test('overview lists runners, per-runner sizes, download state and admission', async (t) => {
     const h = harness(t);
     const overview = await h.controller.overview();
-    assert.deepEqual(overview.runners.map((runner) => runner.id), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi']);
+    // LM Studio is listed on every deployment; its operator switch decides whether it may install or run.
+    assert.deepEqual(overview.runners.map((runner) => runner.id), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi', 'lmstudio']);
     const gpt = overview.models.find((model) => model.id === 'gpt-oss-20b');
     assert.equal(gpt.runners['llama.cpp'].size, 12109566624);
     assert.equal(gpt.runners.ollama.size, 13793441244);

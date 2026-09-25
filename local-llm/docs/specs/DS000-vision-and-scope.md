@@ -3,7 +3,7 @@ id: DS000
 title: Vision and Scope
 status: accepted
 owner: local-llm
-summary: What local-llm is, how it differs from the legacy agents, and what it deliberately leaves out.
+summary: What local-llm is, how it differs from the legacy agents, its runners (LM Studio for internal use only), and what it deliberately leaves out.
 ---
 
 # DS000 Vision and Scope
@@ -37,16 +37,27 @@ The repository's other twelve agents share the CPU image `assistos/local-llms`, 
 | Ollama `0.34.4` | Supported. Library tags pulled by the Ollama daemon, verified by manifest digest when the catalog pins one. |
 | vLLM `0.30.0` | Supported once an admin installs it from the image's runner lock (DS004). It reads Hugging Face snapshots (`hf`, DS002), such as the seed Qwen3-4B-AWQ, runs eager by default for a faster start, and takes only a model whose weights and KV cache fit the GPU unless the admin offloads weights to RAM (DS003). gpt-oss's tokenizer vocabulary is pinned in the lock and read from the runnable copy, not downloaded at run time (DS004). |
 | TabbyAPI `f07131c` with ExLlamaV3 1.5.1 | Supported once an admin installs it from the image's runner lock after accepting TabbyAPI's AGPL-3.0 notice (DS004). It reads EXL3 snapshots (`exl3`, DS002), such as the seed Qwen3-8B EXL3 4.0 bpw, runs from its source directory in the runnable copy on loopback, and requires its per-start key. |
+| LM Studio's llmster `0.0.25-1` (bundled CUDA 12 engine 2.41.0, llama.cpp b11026) | Internal use only. Off unless the deployment's operator turns it on (below). Once on, an admin installs it from the image's runner lock after accepting LM Studio's Terms (DS004). It reads the same GGUF files as llama.cpp. |
 
 Every runner is an adapter in `src/runners/`: its identity, the weight format it reads, its loopback port and per-start key, its parameter schema and basic form fields, detection, its start-up pipeline (launch and readiness), the model name for chat requests, its admission policy and its log parser. The controller, the tools and the dashboard have no per-runner branches, so a new runner is an adapter plus data.
 
-### LM Studio is not a runner
+### LM Studio (internal use only)
 
-LM Studio was listed as a future runner and has been removed (runners plan, decision R5 = b, accepted 2026-09-24). Its headless daemon, llmster, runs the same llama.cpp underneath, in an older build than this agent pins, behind a closed daemon. Its Terms allow use "solely for Your personal and / or internal business purposes" and forbid distributing it or using it "as an application service provider, or a software-as-a-service", so it could not ship in the public image, and a hosted deployment may fall under the SaaS clause. Its MoE offload and KV-cache settings are not available from its CLI or REST API, and its API authentication is configured only in the GUI. The agent needs none of what it adds on top of llama.cpp to serve `/v1/chat/completions`. The research is in `LOCAL_LLM_RUNNERS_RESEARCH.md` in the workspace.
+LM Studio was first left out (runners plan, decision R5 = b). On 2026-09-25 the user asked for it to be installed on demand (decision I9, Phase R7). Its headless daemon, llmster, is proprietary. LM Studio's Terms (version August 23, 2026) allow use "solely for Your personal and / or internal business purposes" and forbid distributing it or using it "as an application service provider, or a software-as-a-service". So:
+
+| Rule | How |
+| --- | --- |
+| Never in an image | The image's runner lock pins the llmster tarball by URL, size and sha256, and marks its licence proprietary. The publish workflow never downloads it and checks the image contains no LM Studio file. |
+| Off by default | The runner is off unless the deployment's operator sets `LOCAL_LLM_LMSTUDIO=internal-use` (`ploinky var LOCAL_LLM_LMSTUDIO internal-use`, then a restart of local-llm). Otherwise Install and Run are refused with `runner_disabled`, and the dashboard says why. Deployments offered to other people keep it off. The switch prevents accidental use; it is not a boundary against admins. On this platform an Explorer admin can open the admin-only WebTTY Box shell and run the same command, and such an admin already has a shell in the Box. |
+| Terms accepted first | Installing downloads llmster, and downloading counts as accepting the Terms. The Install dialog shows the Terms link, the version date, the internal-use, no-service and published-interfaces clauses, and a note that LM Studio's supported systems list Ubuntu while this agent is a Debian container. The acceptance is recorded with who and when (DS004). |
+| Published interfaces only | The agent controls LM Studio through its `lms` CLI (import), its MIT SDK `@lmstudio/sdk` 2.0.0, which is pinned in the image (load, server), and its OpenAI-compatible HTTP API (chat). It also relies on a few things beyond those. llmster runs straight from the verified tarball rather than through LM Studio's `install.sh`. `HOME` points at a container-local directory. The SDK's experimental `llamaCppArgumentsOverride` sets the exact MoE layer count and threads. The controller reads the engine's command line to check its flags. And it deletes LM Studio's server log and its own imports. |
+| Same engine, measured | Underneath is the same llama-server, an older build (b11026). On the RTX 3060 Laptop it ran gpt-oss-20b at the llama.cpp runner's settings with the same 4,776 MiB of GPU memory, at 35.4 tok/s against 38.4. |
+
+The agent uses none of what LM Studio adds on top of llama.cpp: its native REST API, `/v1/responses`, `/v1/messages`, MCP and plugins stay unused, and only `/v1/chat/completions` is proxied (DS001). Just-in-time loading cannot be turned off headlessly, so the controller unloads any model but its own (DS003).
 
 ### Out of scope
 
-A CPU fallback, a shared host model cache, installing runners on demand, publishing the image, and adding the agent to Explorer's default manifest. Each needs its own decision.
+A CPU fallback and a shared host model cache. Each needs its own decision.
 
 ## Decisions & Questions
 

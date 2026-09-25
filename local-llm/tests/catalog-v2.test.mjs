@@ -35,7 +35,9 @@ test('the seed catalog is schema v2 and keys gpt-oss-20b sources by weight forma
     assert.equal(gpt.sources.gguf.sha256, '27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901');
     assert.equal(gpt.sources.ollama.tag, 'gpt-oss:20b');
     // Parameters and measurements stay per runner.
-    assert.deepEqual(Object.keys(gpt.recommended), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm']);
+    assert.deepEqual(Object.keys(gpt.recommended), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'lmstudio']);
+    // LM Studio gets the llama.cpp runner's gpt-oss placement, with flash attention on (it has no auto).
+    assert.deepEqual(gpt.recommended.lmstudio, { ctxSize: 16384, nGpuLayers: 99, nCpuMoe: 17, parallel: 1, batchSize: 256, ubatchSize: 256, flashAttn: 'on' });
     // Measured in the R1 benchmark at the default threads (physical cores minus 2).
     assert.deepEqual(Object.keys(gpt.validated), ['llama.cpp', 'ik_llama.cpp', 'ollama']);
     assert.match(gpt.validated['ik_llama.cpp'], /12 threads: 5,340 MiB VRAM, 40\.5 tok\/s generation, 386\.6 tok\/s prompt/);
@@ -62,7 +64,7 @@ test('migrating a v1 entry maps llama.cpp to gguf, drops LM Studio and the vLLM 
     };
     const migrated = migrateModelEntry(v1);
     assert.deepEqual(migrated.sources, { gguf: GGUF, ollama: OLLAMA });
-    // Only the removed runner's parameters are dropped.
+    // Only the v1 LM Studio stub's parameters are dropped (that stub never ran).
     assert.deepEqual(migrated.recommended, { 'llama.cpp': { ctxSize: 8192 } });
     assert.deepEqual(migrateModelEntry(migrated), migrated);
     // An entry whose only GGUF came from LM Studio or vLLM keeps it as the gguf source.
@@ -71,6 +73,23 @@ test('migrating a v1 entry maps llama.cpp to gguf, drops LM Studio and the vLLM 
     // Entries that are not objects are returned as they are, for validation to skip.
     assert.equal(migrateModelEntry(null), null);
     assert.equal(validateModel(migrateModelEntry(v1)).sources.gguf.commit, GGUF.commit);
+});
+
+// LM Studio is a runner again (runners plan I9, Phase R7), with parameters of
+// its own. Only a v1 entry, which still keys sources by runner, carries the old
+// stub's parameters, which never ran; a v2 entry's LM Studio parameters stay.
+test('migration keeps the LM Studio parameters and measurements of a v2 entry', () => {
+    const v2 = {
+        id: 'user-qwen', sources: { gguf: GGUF },
+        recommended: { 'llama.cpp': { ctxSize: 8192 }, lmstudio: { contextLength: 8192 } },
+        validated: { lmstudio: 'PONG on CUDA0' },
+    };
+    assert.deepEqual(migrateModelEntry(v2), v2);
+    // A v1 entry still loses the stub's entries, whichever v1 source it had.
+    const v1 = { id: 'user-qwen', sources: { ollama: OLLAMA, 'llama.cpp': GGUF }, recommended: { lmstudio: { contextLength: 4096 } }, validated: { lmstudio: 'stub' } };
+    assert.deepEqual(migrateModelEntry(v1).recommended, {});
+    assert.deepEqual(migrateModelEntry(v1).validated, {});
+    assert.deepEqual(migrateModelEntry(migrateModelEntry(v1)), migrateModelEntry(v1));
 });
 
 // The state file keeps version 1: registry entries are migrated one by one,

@@ -81,6 +81,15 @@
         },
         "vllm": {
           "maxModelLen": 4096
+        },
+        "lmstudio": {
+          "ctxSize": 16384,
+          "nGpuLayers": 99,
+          "nCpuMoe": 17,
+          "parallel": 1,
+          "batchSize": 256,
+          "ubatchSize": 256,
+          "flashAttn": "on"
         }
       },
       "validated": {

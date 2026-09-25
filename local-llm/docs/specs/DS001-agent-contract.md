@@ -3,7 +3,7 @@ id: DS001
 title: Agent Contract
 status: accepted
 owner: local-llm
-summary: Manifest, process model, tools, authorization, the chat endpoint, and drain.
+summary: Manifest, process model, tools, authorization, the chat endpoint, drain, and LM Studio's operator switch and limits.
 ---
 
 # DS001 Agent Contract
@@ -28,6 +28,7 @@ This specification defines how `local-llm` presents itself to Ploinky: the manif
 | `ideSettings` | key `local-llm-settings`, scope `workspace`, plugin `local-llm/local-llm-settings`, `adminOnly: true` | Settings → Agents → Local LLMs. The entry is a launcher: it opens the dashboard below and closes itself. |
 | IDE plugin `local-llm-tool-button` (found in `IDE-plugins/`, not a manifest field) | `file-exp:toolbar`, `locationOrder` 295, `adminOnly: true`, `toolbarModal` `{mode: "component", component: "local-llm-dashboard"}` | The toolbar button, placed after Soul Gateway's. It opens the WebSkel dashboard `local-llm-dashboard` in Explorer's full-screen panel, which has cards for GPU, RAM, disk and the running model, and tabs for Models, Playground and Logs. The dashboard uses Explorer's tokens only, so it follows Explorer's light and dark themes. |
 | `endpoints.chatCompletions` | `node /code/src/chatResponder.mjs`, `supportsStream: true` | The model's only consumer-facing surface |
+| `profiles.default.env` | `HF_TOKEN` and `LOCAL_LLM_LMSTUDIO`, both `required: false` with no default | `HF_TOKEN` authenticates Hugging Face downloads (DS002). `LOCAL_LLM_LMSTUDIO=internal-use` is the operator's switch for LM Studio (below); unset, LM Studio is off. |
 
 The manifest declares no other `containerSecurity` field (and needs a Ploinky that knows `shmSize`, from ploinky 9512fd30), no `llmRuntime` block (so no `runtimePolicy` device entry and no `llmRuntime.enabled`), and no published ports.
 
@@ -37,7 +38,8 @@ The manifest declares no other `containerSecurity` field (and needs a Ploinky th
 main.mjs (controller, PID 1 under AgentEntrypoint.sh)
   ├─ control socket: a Linux abstract socket @local-llm-<random>, new on every start, and a per-start token
   ├─ AgentServer.mjs (MCP on 7000; spawns one short-lived process per tool call)
-  └─ runner: llama.cpp's or ik_llama.cpp's llama-server, or ollama serve, bound to 127.0.0.1 only, in its own process group
+  └─ runner: llama.cpp's or ik_llama.cpp's llama-server, ollama serve, vLLM, TabbyAPI, or LM Studio's llmster
+             (with its engine, a llama-server, and its workers), bound to 127.0.0.1 only, in its own process group
 ```
 
 `main.mjs` owns all state. Tool processes and the chat responder are stateless clients of the control socket (`src/controlSocket.mjs`, one JSON request and one JSON reply per connection).
@@ -67,7 +69,7 @@ AgentServer verifies the Router-signed invocation grant of every tool call (`req
 
 ### Chat endpoint
 
-AgentServer runs `src/chatResponder.mjs` for each `POST /v1/chat/completions` routed to the agent. The responder asks the controller for the ready deployment (`chatTarget`), keeps only OpenAI chat fields from the request, replaces `model` with the deployed model, and forwards to the runner on `127.0.0.1`: llama.cpp with its per-start API key, Ollama without a key (it has none; it listens only on loopback inside the container and the agent-port relay is closed). With no ready model it answers 503 `not_ready`. Streaming requests are piped through unchanged. A request may ask for one choice only (`n` 1, otherwise 400); `max_tokens` and `max_completion_tokens` must be positive integers and are clamped to 8,192, and a request that sets neither is sent with `max_tokens` 8,192; the runner call is aborted after 570 s, inside the endpoint's 600 s command limit, with 504 `runner_timeout`.
+AgentServer runs `src/chatResponder.mjs` for each `POST /v1/chat/completions` routed to the agent. The responder asks the controller for the ready deployment (`chatTarget`), keeps only OpenAI chat fields from the request, replaces `model` with the deployed model, and forwards to the runner on `127.0.0.1`: llama.cpp with its per-start API key, Ollama and LM Studio without a key (Ollama has none, and LM Studio's authentication can only be turned on in its desktop app; both listen only on loopback inside the container, and the agent-port relay is closed). With no ready model it answers 503 `not_ready`. Streaming requests are piped through unchanged. A request may ask for one choice only (`n` 1, otherwise 400); `max_tokens` and `max_completion_tokens` must be positive integers and are clamped to 8,192, and a request that sets neither is sent with `max_tokens` 8,192; the runner call is aborted after 570 s, inside the endpoint's 600 s command limit, with 504 `runner_timeout`.
 
 The Router lists the agent at `/api/router/openai-agent-discovery` because the manifest declares `endpoints.chatCompletions`. The workspace-local Soul Gateway turns it into the model `local-llms/local-llm/default` (AgentServer's fallback `/v1/models` id), and AchillesAgentLib callers in other agents reach it as `soul_gateway/local-llms/local-llm/default`. That is the only way other agents use the model. The manifest's `capabilities.tags: ["local-llm"]` keeps the model out of the gateway's shared `generic-agent` group.
 
@@ -83,6 +85,18 @@ On SIGTERM, SIGINT or SIGHUP the controller:
 4. exits 0, or exits 1 if the whole drain exceeds 30 s. The worst case of steps 1–3 is 25 s, 5 s under that deadline and 10 s under Ploinky's 35 s restart window (`src/drainBudget.mjs`).
 
 If AgentServer exits on its own, the controller stops the runner and exits non-zero, so Ploinky restarts the agent.
+
+### LM Studio
+
+LM Studio (DS000, DS004) is for internal use only, and off unless the operator sets `LOCAL_LLM_LMSTUDIO=internal-use`. While it is off, `local_llm_runner_install` and `local_llm_run` refuse it with `runner_disabled`, and `local_llm_overview` reports `enabled: false` with the reason. Changing the switch needs a restart of local-llm, because the environment is read when the container starts. On this platform an Explorer admin can set it too, through the admin-only WebTTY Box shell, so the switch prevents accidental use; it does not keep admins out.
+
+| Topic | Rule |
+| --- | --- |
+| Processes | The controller starts llmster from the runnable copy in its own process group, with `HOME` inside the copy (container-local, never `/data`). llmster starts its engine and workers in that group, so a stop, a drain or an exit ends them all. Before each start and after each exit, the controller also kills any process whose executable lies under LM Studio's copy. |
+| Helper steps | `lms import --symbolic-link` and the SDK helper (`src/runners/lmStudioLoad.mjs`, the image's `/opt/local-llm/lmstudio-sdk`) each run as a short process in their own process group, with a minimal environment. |
+| Only our model | JIT loading cannot be turned off headlessly: a request to LM Studio's port that names another indexed model loads it. Two things keep LM Studio to our model. The chat responder replaces `model` and forwards only `/v1/chat/completions`, and LM Studio's port is reachable only inside the container. The controller also unloads anything but its own model: at load, and every 30 s while the model is ready (a watchdog; each unload is logged). |
+| Calls home | Every llmster start makes 2–3 short HTTPS connections to lmstudio.ai: version checks for the daemon and `lms`, the feed, the backend list, the extension-pack check and LM Link status. None downloads anything (observed 2026-09-25). They cannot be turned off through a published setting and are accepted. The controller refuses to start LM Studio when llmster has staged an update in its home, and refuses any engine other than the pinned 2.41.0. |
+| Logs | llmster's stdout echoes every request and response. A line filter keeps only lifecycle lines, so no prompt or response reaches the runner log. LM Studio's own server log, in its container-local home, is deleted before each start and after each exit. |
 
 ## Decisions & Questions
 

@@ -16,9 +16,9 @@ import {
 export const ACTIVE_PHASES = new Set(['downloading', 'verifying', 'pulling', 'starting', 'loading', 'ready', 'stopping']);
 const DOWNLOAD_PHASES = new Set(['downloading', 'verifying', 'pulling', 'paused']);
 
-/** The runners that get a column in the Models table: those that can run here. */
+/** The runners that get a column in the Models table: those that can run here, and that this deployment's operator did not leave off. */
 export function tableRunners(runners = []) {
-    return (Array.isArray(runners) ? runners : []).filter((runner) => runner?.supported);
+    return (Array.isArray(runners) ? runners : []).filter((runner) => runner?.supported && runner.enabled !== false);
 }
 
 function labelOf(runnerId, runners = []) {
@@ -282,9 +282,12 @@ export function runnersPanelHtml(runners = []) {
     const busy = runners.some((runner) => runner.install?.installing);
     const cards = runners.map((runner) => {
         const install = runner.install;
-        const status = runner.installed
-            ? `${runner.version || install?.version || ''} · installed`
-            : (install ? 'not installed' : (runner.reason || 'not available'));
+        const off = runner.enabled === false;
+        const status = off
+            ? `${runner.installed ? 'installed · ' : ''}not enabled on this deployment`
+            : runner.installed
+                ? `${runner.version || install?.version || ''} · installed`
+                : (install ? 'not installed' : (runner.reason || 'not available'));
         let body = '';
         let actions = '';
         if (install) {
@@ -301,7 +304,7 @@ export function runnersPanelHtml(runners = []) {
                 ${state.phase === 'error' && state.error ? `<div class="settings-status error">${escapeHtml(state.error)}</div>` : ''}`;
             if (install.installed && !install.installing) {
                 actions = `<button type="button" class="gray-button" data-local-action="uninstallRunner ${escapeHtml(runner.id)}">Uninstall</button>`;
-            } else if (!install.installing && !busy) {
+            } else if (!install.installing && !busy && !off) {
                 actions = `<button type="button" class="general-button" data-local-action="installRunner ${escapeHtml(runner.id)}">Install</button>`;
             }
         }
@@ -310,12 +313,34 @@ export function runnersPanelHtml(runners = []) {
                 <div>
                     <div class="settings-card-title">${escapeHtml(runner.displayName || runner.id)}</div>
                     <div class="settings-card-meta">${escapeHtml(status)}</div>
+                    ${off && runner.disabledReason ? `<div class="settings-card-meta">${escapeHtml(runner.disabledReason)}</div>` : ''}
                     ${body}
                 </div>
                 ${actions}
             </li>`;
     }).join('');
     return `<ul class="local-llm-runner-list" aria-label="Runners">${cards || '<li class="settings-card-meta">No runners.</li>'}</ul>`;
+}
+
+/**
+ * What the Install confirmation says: the download size and the licence. A
+ * licence that needs acceptance is shown with its link and notice; a
+ * proprietary one (LM Studio) also says it is for internal use only.
+ */
+export function installMessage(runner = {}) {
+    const install = runner.install || {};
+    const licence = install.licence || {};
+    const name = runner.displayName || runner.id;
+    const head = `Install ${name} ${install.version}? It downloads ${formatBytes(install.totalBytes)} of pinned files to this workspace.`;
+    if (!licence.requiresAcceptance) return `${head} Licence: ${licence.name}.`;
+    const where = `${licence.url}${licence.source ? `; source: ${licence.source}` : ''}`;
+    const terms = licence.proprietary
+        ? ` ${name} is proprietary software, for internal use only: it is not part of this agent, and each deployment downloads it from its publisher. Its terms: ${licence.name} (${where}).`
+        : ` It is licensed under ${licence.name} (${where}).`;
+    const notice = licence.notice || '';
+    // The lock's notice may already say it; the dialog says it once.
+    const accepts = /acceptance is recorded/.test(notice) ? '' : ' Installing accepts these terms on this workspace\'s behalf, and your acceptance is recorded.';
+    return `${head}${terms} ${notice}${accepts}`.trimEnd();
 }
 
 /** GPU and RAM estimate meters for the run form. */

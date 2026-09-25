@@ -5,6 +5,7 @@ import test from 'node:test';
 import { TOOL_NAMES, TOOL_OPERATIONS, assertAdmin, authInfoFromEnvelope, handleTool } from '../tools/local_llm_tool.mjs';
 import { buildRunnerRequest, completionStats, respond } from '../src/chatResponder.mjs';
 import { GATEWAY_MODEL, runTestPrompt } from '../src/testPrompt.mjs';
+import { LMSTUDIO_SWITCH } from '../src/runners/lmStudio.mjs';
 
 const ROOT = new URL('..', import.meta.url);
 const read = (file) => JSON.parse(fs.readFileSync(new URL(file, ROOT), 'utf8'));
@@ -216,6 +217,16 @@ test('the admin test prompt calls only the active loopback runner, with bounds',
     await assert.rejects(() => runTestPrompt({ prompt: 'x', call: remote, fetchImpl: never }), { code: 'runner_not_local' });
     const notReady = async () => { throw Object.assign(new Error('No local model is ready.'), { code: 'not_ready' }); };
     await assert.rejects(() => runTestPrompt({ prompt: 'x', call: notReady, fetchImpl: never }), { code: 'not_ready' });
+});
+
+// LM Studio's operator switch (handoff decision L2): an optional profile
+// variable with no default, so it is off unless the deployment sets it.
+test('the manifest declares the LM Studio switch as an optional variable that is off by default', () => {
+    const manifest = read('manifest.json');
+    assert.deepEqual(manifest.profiles.default.env, { HF_TOKEN: { required: false }, [LMSTUDIO_SWITCH]: { required: false } });
+    assert.match(manifest.description, /LM Studio/);
+    assert.match(manifest.description, /internal use only/);
+    assert.match(manifest.description, new RegExp(`ploinky var ${LMSTUDIO_SWITCH} internal-use`));
 });
 
 test('the manifest keeps local-llm out of the generic agent tier', () => {

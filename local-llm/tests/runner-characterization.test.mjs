@@ -180,10 +180,12 @@ test('overview: the llama.cpp and Ollama runner entries and the seed model entri
         // Intended change (runners plan, R8): the image pins llama.cpp b11159 and Ollama 0.34.4.
         ['llama.cpp', 'llama.cpp', 'gguf', 'b11159'], ['ollama', 'Ollama', 'ollama', '0.34.4'],
     ]) {
-        // The runner framework adds the form metadata (basicParams, moeParams);
+        // The runner framework adds the form metadata (basicParams, moeParams),
+        // and R7 adds whether the operator allows the runner here (enabled);
         // every field the entry had before is unchanged.
-        const { paramSchema, basicParams: _basic, moeParams: _moe, ...rest } = byId[id];
+        const { paramSchema, basicParams: _basic, moeParams: _moe, enabled, ...rest } = byId[id];
         assert.deepEqual(rest, { id, displayName, weightFormat, pinnedVersion, supported: true, installed: true, version: pinnedVersion, reason: null }, id);
+        assert.equal(enabled, true, id);
         assert.equal(typeof paramSchema.properties, 'object', id);
     }
     const gpt = overview.models.find((model) => model.id === 'gpt-oss-20b');

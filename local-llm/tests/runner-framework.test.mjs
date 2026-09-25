@@ -79,11 +79,11 @@ function harness(t, { runners, detectRunner } = {}) {
         download: async ({ artifact }) => ({ status: 'complete', path: `/data/models/gguf/${artifact.file}`, bytesTransferred: 0 }),
         inspect: async () => ({ state: 'complete', bytes: 1 }),
         remove: async () => 1,
-        startRunner({ command, args, env }) {
+        startRunner({ command, args, env, filter }) {
             let running = true;
             let resolveExit;
             const handle = {
-                pid: 7000 + started.length, command, args, env,
+                pid: 7000 + started.length, command, args, env, filter,
                 exited: new Promise((resolve) => { resolveExit = resolve; }),
                 get running() { return running; },
                 async stop() { running = false; resolveExit({ code: 0, signal: 'SIGTERM', error: null }); return handle.exited; },
@@ -176,14 +176,17 @@ test('a runner that dies right after its readiness probes ends in error, never i
 });
 
 test('ports come from the adapters, one per supported runner, all distinct', () => {
-    assert.deepEqual(defaultPorts(), { 'llama.cpp': 18080, 'ik_llama.cpp': 18081, ollama: 18434, vllm: 18082, tabbyapi: 18083 });
+    assert.deepEqual(defaultPorts(), { 'llama.cpp': 18080, 'ik_llama.cpp': 18081, ollama: 18434, vllm: 18082, tabbyapi: 18083, lmstudio: 18084 });
     assert.throws(() => defaultPorts({ a: { id: 'a', supported: true, port: 18080 }, b: { id: 'b', supported: true, port: 18080 } }),
         /port 18080/);
 });
 
-test('the registry has llama.cpp, ik_llama.cpp, Ollama, vLLM and TabbyAPI; LM Studio is gone', () => {
-    assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi']);
-    assert.equal(fs.existsSync(new URL('../src/runners/lmStudio.mjs', import.meta.url)), false);
+// Intended change (runners plan I9, 2026-09-25): LM Studio is a runner again,
+// installed on demand for internal use only (R5 changed from b to a).
+test('the registry has llama.cpp, ik_llama.cpp, Ollama, vLLM, TabbyAPI and LM Studio', () => {
+    assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi', 'lmstudio']);
+    assert.equal(fs.existsSync(new URL('../src/runners/lmStudio.mjs', import.meta.url)), true);
+    assert.equal(RUNNERS.lmstudio.supported, true);
     const summaries = runnerSummaries();
     assert.deepEqual(summaries.find((summary) => summary.id === 'llama.cpp').basicParams, ['ctxSize', 'nCpuMoe']);
     assert.deepEqual(summaries.find((summary) => summary.id === 'llama.cpp').moeParams, ['nCpuMoe']);
@@ -249,4 +252,74 @@ test('vLLM detection reads the on-demand installer, so it follows an install or 
     assert.equal(noLock.installed, false);
     assert.match(noLock.reason, /runner lock/);
     assert.equal((await vllm.detect()).installed, false);
+});
+
+// Hooks a runner that is a daemon plus helper steps needs (LM Studio): run a
+// helper step in its own process group, filter the runner's output, watch the
+// ready runner, and clean up after it exits. None names a runner.
+test('an adapter can run helper steps, filter its output, watch while ready and clean up after exit', async (t) => {
+    const calls = { exec: [], watch: 0, afterExit: [] };
+    const runner = Object.freeze({
+        ...fakeRunner({}),
+        id: 'fake-daemon',
+        port: 18998,
+        apiKey: false,
+        async start(ctx) {
+            const process = ctx.launch({ command: '/opt/fake/daemon', args: [], env: {}, outputFilter: () => (line) => (line.includes('body') ? null : line) });
+            calls.exec.push(await ctx.exec({ label: 'loading', command: '/bin/sh', args: ['-c', 'echo noise; echo \'{"key":"k1"}\''], env: { PATH: '/usr/bin:/bin' }, json: true }));
+            await assert.rejects(() => ctx.exec({ label: 'a failing step', command: '/bin/sh', args: ['-c', 'echo why >&2; exit 3'], env: { PATH: '/usr/bin:/bin' } }),
+                (error) => error.code === 'runner_step_failed' && /a failing step failed \(exit 3\): why/.test(error.message));
+            await ctx.waitForHttp(`http://127.0.0.1:${ctx.port}/ready`, { process });
+            return {};
+        },
+        watchdog: {
+            intervalMs: 10,
+            async check(ctx) {
+                calls.watch += 1;
+                assert.equal(typeof ctx.exec, 'function');
+                return calls.watch === 1 ? 'unloaded stray-model' : null;
+            },
+        },
+        afterExit(ctx) { calls.afterExit.push(ctx.runnerDir); },
+    });
+    const h = harness(t, { runners: { ...RUNNERS, [runner.id]: runner } });
+    await h.controller.run({ modelId: 'gpt-oss-20b', runnerId: 'fake-daemon', requestId: 'request-daemon-1' });
+    await until(() => h.controller.state.deployment?.phase === 'ready');
+    assert.deepEqual(calls.exec, [{ key: 'k1' }]);
+    const filter = h.started[0].filter();
+    assert.equal(filter('a body line'), null);
+    assert.equal(filter('lifecycle'), 'lifecycle');
+    await until(() => calls.watch >= 3);
+    const lines = (await h.controller.status()).logs.map((entry) => entry.line);
+    assert.ok(lines.some((line) => /loading: done/.test(line)), lines.join('\n'));
+    assert.ok(lines.some((line) => /watchdog: unloaded stray-model/.test(line)), lines.join('\n'));
+    await h.controller.stop();
+    const after = calls.watch;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(calls.watch, after, 'the watchdog stops with the runner');
+    await until(() => calls.afterExit.length === 1);
+    assert.deepEqual(calls.afterExit, [null]);
+});
+
+test('a quiet helper step is not logged when it succeeds', async (t) => {
+    const runner = Object.freeze({
+        ...fakeRunner({}),
+        id: 'fake-quiet',
+        port: 18997,
+        apiKey: false,
+        async start(ctx) {
+            const process = ctx.launch({ command: '/opt/fake/daemon', args: [], env: {} });
+            await ctx.exec({ label: 'a routine check', command: '/bin/sh', args: ['-c', 'true'], env: { PATH: '/usr/bin:/bin' }, quiet: true });
+            await ctx.exec({ label: 'a loud step', command: '/bin/sh', args: ['-c', 'true'], env: { PATH: '/usr/bin:/bin' } });
+            await ctx.waitForHttp(`http://127.0.0.1:${ctx.port}/ready`, { process });
+            return {};
+        },
+    });
+    const h = harness(t, { runners: { ...RUNNERS, [runner.id]: runner } });
+    await h.controller.run({ modelId: 'gpt-oss-20b', runnerId: 'fake-quiet', requestId: 'request-quiet-1' });
+    await until(() => h.controller.state.deployment?.phase === 'ready');
+    const lines = (await h.controller.status()).logs.map((entry) => entry.line);
+    assert.equal(lines.some((line) => /a routine check/.test(line)), false);
+    assert.ok(lines.some((line) => /a loud step: done/.test(line)));
+    await h.controller.stop();
 });
