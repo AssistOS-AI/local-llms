@@ -138,12 +138,13 @@ const DEDICATED = Object.freeze({
  * `honours` the signal rejects when it aborts, as readSnapshot does; one that
  * does not keeps going and answers normally.
  */
-function harness(t, { slowRead, delayMs = 8000, honours = true, unreaped = () => [] }) {
+function harness(t, { slowRead, delayMs = 8000, honours = true, unreaped = () => [], settle = undefined }) {
     const dataDir = tempDir(t, 'local-llm-stop-');
     const weights = path.join(dataDir, 'weights.gguf');
     fs.writeFileSync(weights, 'x');
     const reads = [];
     const started = [];
+    const downloads = [];
     const controller = createController({
         dataDir,
         env: { PATH: '/usr/bin' },
@@ -165,8 +166,9 @@ function harness(t, { slowRead, delayMs = 8000, honours = true, unreaped = () =>
             });
         },
         unreapedQueries: unreaped,
+        ...(settle ? { settleStoppedQueries: settle } : {}),
         inspect: async () => ({ state: 'absent', bytes: 0 }),
-        download: async () => ({ status: 'complete', path: weights, bytesTransferred: 0 }),
+        download: async ({ artifact }) => { downloads.push(artifact); return { status: 'complete', path: weights, bytesTransferred: 0 }; },
         remove: async () => 0,
         sharedModelsRoot: null,
         imageContract: null,
@@ -186,7 +188,7 @@ function harness(t, { slowRead, delayMs = 8000, honours = true, unreaped = () =>
         pollMs: 1,
         stopGraceMs: 20,
     });
-    return { controller, reads, started, dataDir };
+    return { controller, reads, started, downloads, dataDir };
 }
 
 // A Run's snapshots: the profile (1), admission (2), after the download (3), and the last before launch (4).
@@ -268,4 +270,104 @@ test('a drain stops queries outside the job too, and a command that meets the dr
     // A query that did not exit after its kill is named in the log.
     const lines = (await h.controller.status()).logs.map((entry) => entry.line);
     assert.ok(lines.some((line) => /nvidia-smi \(pid 424242\) was killed but has not exited/.test(line)));
+});
+
+test('the drain waits for stopped queries to settle before it reports the ones that did not exit', async (t) => {
+    let settled = false;
+    const h = harness(t, {
+        slowRead: 1,
+        // A query is recorded as not exiting only when its bounded wait ends.
+        settle: () => new Promise((resolve) => setTimeout(() => { settled = true; resolve(); }, 200)),
+        unreaped: () => (settled ? [515151] : []),
+    });
+    const overview = h.controller.overview().catch((error) => error);
+    await until(() => h.reads.length === 1, 'the overview snapshot to start');
+    await h.controller.drain();
+    assert.equal((await overview).code, 'shutting_down');
+    const lines = (await h.controller.status()).logs.map((entry) => entry.line);
+    assert.ok(lines.some((line) => /nvidia-smi \(pid 515151\) was killed but has not exited/.test(line)));
+});
+
+// ----------------------------------- a Run that has not started its job yet
+
+// A Run's first two snapshots belong to its command, before anything is recorded:
+// the profile (1, while none is committed) and admission (2).
+for (const [read, label] of [[1, 'profile'], [2, 'admission']]) {
+    for (const op of ['stop', 'cancelDownload']) {
+        for (const honours of [true, false]) {
+            test(`${op} during the pending Run's ${label} snapshot${honours ? '' : ' (which ignores its signal)'} stops it at once; nothing is recorded, downloaded or started, and the same request can be sent again`, async (t) => {
+                const h = harness(t, { slowRead: read, honours });
+                const running = h.controller.run({ requestId: 'request-pending-01', modelId: 'gpt-oss-20b', runnerId: 'llama.cpp' })
+                    .then((value) => ({ value }), (error) => ({ error }));
+                await until(() => h.reads.length === read, `snapshot ${read} to start`);
+                const began = Date.now();
+                const answer = await h.controller[op]();
+                assert.ok(Date.now() - began < 500, `${op} took ${Date.now() - began} ms against an 8 s snapshot`);
+                assert.equal(h.reads[read - 1].signal.aborted, true, 'the held snapshot was told to stop');
+                const outcome = await running;
+                assert.equal(outcome.error?.code, 'cancelled', `the Run reports cancelled, not ${outcome.error?.code ?? 'accepted'}`);
+                // A Stop or Cancel that stopped a pending Run succeeds, and leaves no deployment.
+                assert.equal(answer.deployment, null);
+                assert.equal(h.controller.state.deployment, null);
+                assert.deepEqual(h.controller.state.requests, {});
+                assert.deepEqual(h.controller.state.params, {});
+                assert.equal(h.downloads.length, 0);
+                assert.equal(h.started.length, 0);
+                // Nothing was recorded, so the same request is a new Run, not a duplicate.
+                const retried = await h.controller.run({ requestId: 'request-pending-01', modelId: 'gpt-oss-20b', runnerId: 'llama.cpp' });
+                assert.equal(retried.accepted, true);
+                assert.equal(retried.duplicate, undefined);
+                await until(() => h.controller.state.deployment?.phase === 'ready', 'the retried Run to be ready');
+                assert.equal(h.downloads.length, 1);
+                assert.equal(h.started.length, 1);
+                await h.controller.stop();
+            });
+        }
+    }
+    test(`without a stop, a slow ${label} snapshot is waited for and the Run is accepted (the snapshot is on the Run's path)`, async (t) => {
+        const h = harness(t, { slowRead: read, delayMs: 300 });
+        const began = Date.now();
+        const accepted = await h.controller.run({ requestId: 'request-pending-ok', modelId: 'gpt-oss-20b', runnerId: 'llama.cpp' });
+        assert.ok(Date.now() - began >= 290, 'the Run waited for the slow snapshot');
+        assert.equal(accepted.accepted, true);
+        assert.equal(h.reads[read - 1].signal.aborted, false);
+        await until(() => h.controller.state.deployment?.phase === 'ready', 'ready');
+        await h.controller.stop();
+    });
+}
+
+test('a snapshot stopped while only the free-disk read is pending answers at once; the late read is handled', async (t) => {
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    t.after(() => process.off('unhandledRejection', onUnhandled));
+    let release;
+    const statfsGate = new Promise((resolve, reject) => { release = reject; });
+    let queries = 0;
+    const answers = {
+        '--query-gpu=name,memory.total,memory.used,memory.free,driver_version': 'RTX, 6144, 0, 6144, 580.1\n',
+        '--query-gpu=pci.device_id,compute_cap,addressing_mode,utilization.gpu,power.draw,temperature.gpu': '0x123410DE, 8.6, HMM, 0, 5, 30\n',
+    };
+    const stop = new AbortController();
+    const reading = readSnapshot({
+        dataDir: '/nowhere',
+        signal: stop.signal,
+        execFileImpl: (command, args, options, callback) => {
+            queries += 1;
+            queueMicrotask(() => callback(null, answers[args[0]] ?? '', ''));
+            return null;
+        },
+        statfs: () => statfsGate,
+    }).then((value) => ({ value }), (error) => ({ error }));
+    await until(() => queries === 3, 'the three GPU queries');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const began = Date.now();
+    stop.abort();
+    const outcome = await reading;
+    assert.ok(Date.now() - began < 100, 'the stop did not wait for statfs');
+    assert.equal(outcome.error?.code, 'ABORT_ERR');
+    // The free-disk read fails after the stop: handled, never unhandled.
+    release(new Error('late statfs failure'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(unhandled, []);
 });

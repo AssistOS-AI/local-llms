@@ -21,14 +21,50 @@ const QUERY_TIMEOUT_MS = 10_000;
 
 // Stopped queries that had not exited when their wait ended, by pid, until they exit.
 const unreaped = new Set();
+// Stopped queries still inside their wait (at most HARDWARE_QUERY_REAP_MS each).
+const stopping = new Set();
 
 /** The pids of stopped hardware queries that have not exited yet (a drain logs them). */
 export function unreapedQueries() {
     return [...unreaped];
 }
 
+/**
+ * Settles once every query stopped so far has exited or been recorded as not
+ * exiting: at most HARDWARE_QUERY_REAP_MS after its stop. A snapshot answers
+ * a stop without waiting for this, so the drain waits here before it reports.
+ */
+export function stoppedQueriesSettled() {
+    return Promise.all([...stopping]).then(() => undefined);
+}
+
 function stoppedError() {
     return Object.assign(new Error('The hardware query was stopped.'), { name: 'AbortError', code: 'ABORT_ERR' });
+}
+
+/**
+ * `promise`'s outcome, or an AbortError as soon as `signal` aborts. The work
+ * behind `promise` may not be cancellable (statfs): after a stop its late
+ * result or failure is handled and dropped, never used and never unhandled.
+ */
+export function untilStopped(promise, signal) {
+    if (!signal) return promise;
+    return new Promise((resolve, reject) => {
+        const onAbort = () => reject(stoppedError());
+        if (signal.aborted) {
+            promise.catch(() => {});
+            onAbort();
+            return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+        promise.then((value) => {
+            signal.removeEventListener('abort', onAbort);
+            resolve(value);
+        }, (error) => {
+            signal.removeEventListener('abort', onAbort);
+            reject(error);
+        });
+    });
 }
 
 // One query. A stop (`signal`) kills it at once with SIGKILL (a read-only
@@ -44,14 +80,19 @@ function run(execFileImpl, command, args, { timeoutMs = QUERY_TIMEOUT_MS, signal
         let settled = false;
         let reapTimer = null;
         let child = null;
+        let reaped = null;
         const finish = (result) => {
             if (settled) return;
             settled = true;
             clearTimeout(reapTimer);
             signal?.removeEventListener('abort', onAbort);
+            reaped?.();
             resolve(signal?.aborted ? { ok: false, aborted: true, stdout: '', stderr: '', error: stoppedError() } : result);
         };
         function onAbort() {
+            const wait = new Promise((done) => { reaped = done; });
+            stopping.add(wait);
+            void wait.then(() => stopping.delete(wait));
             try {
                 child?.kill('SIGKILL');
             } catch {}
@@ -350,11 +391,17 @@ export async function readDisk(dataDir, { statfs = (target) => fs.promises.statf
     return { freeBytes: Number(stats.bavail) * Number(stats.bsize), totalBytes: Number(stats.blocks) * Number(stats.bsize) };
 }
 
+/**
+ * The resources a model competes for. A stop (`signal`) throws an AbortError:
+ * the GPU queries are killed (readGpu), and the free-disk read, which cannot
+ * be cancelled, is not waited for; its late answer is dropped.
+ */
 export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signal } = {}) {
-    const [gpu, disk] = await Promise.all([
-        readGpu({ execFileImpl, signal }),
-        readDisk(dataDir, { statfs }).catch((error) => ({ freeBytes: null, totalBytes: null, error: error.message })),
-    ]);
+    if (signal?.aborted) throw stoppedError();
+    // Read alongside the GPU queries; it never rejects.
+    const pendingDisk = readDisk(dataDir, { statfs }).catch((error) => ({ freeBytes: null, totalBytes: null, error: error.message }));
+    const gpu = await readGpu({ execFileImpl, signal });
+    const disk = await untilStopped(pendingDisk, signal);
     return {
         at: new Date().toISOString(),
         gpu,

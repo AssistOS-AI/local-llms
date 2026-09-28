@@ -31,7 +31,14 @@ import {
     verifyArtifact,
     verifySnapshotFile,
 } from './downloader.mjs';
-import { readMemory as readHostMemory, readMemoryPressure, readSnapshot, unreapedQueries as hardwareUnreaped } from './hardware.mjs';
+import {
+    readMemory as readHostMemory,
+    readMemoryPressure,
+    readSnapshot,
+    stoppedQueriesSettled,
+    unreapedQueries as hardwareUnreaped,
+    untilStopped,
+} from './hardware.mjs';
 import { UNIFIED, profileOf } from './profiles.mjs';
 import { createRunnerInstaller, runTool } from './runnerInstaller.mjs';
 import { loadRunnerLock } from './runnerLock.mjs';
@@ -122,8 +129,10 @@ export function createController({
     runners = RUNNERS,
     // A snapshot's queries stop when `signal` aborts (a Stop, a Cancel or the drain).
     snapshot = ({ signal } = {}) => readSnapshot({ dataDir, signal }),
-    // Stopped hardware queries that have not exited yet (logged by the drain).
+    // Stopped hardware queries that have not exited yet (logged by the drain),
+    // and a promise that settles once every stopped query has exited or been recorded.
     unreapedQueries = hardwareUnreaped,
+    settleStoppedQueries = stoppedQueriesSettled,
     download = downloadArtifact,
     inspect = inspectArtifact,
     remove = removeArtifact,
@@ -269,21 +278,24 @@ export function createController({
         return profile;
     }
 
-    // A fresh snapshot that stops with the drain and, for a job, with the job.
-    // A stopped snapshot is never used: after a stop nothing is admitted or
-    // launched, even from a snapshot that ignored the stop.
+    // A fresh snapshot that stops with the drain and, for a pending Run or a
+    // job, with it. A stop answers at once, whatever stage the snapshot is in
+    // (a query, the free-disk read) and even if the snapshot ignores its signal;
+    // its late answer or failure is handled and never used, so after a stop
+    // nothing is admitted or launched from it.
     async function takeSnapshot(signal = null) {
         const stop = signal ? AbortSignal.any([hardwareStop.signal, signal]) : hardwareStop.signal;
         let snap;
         try {
-            snap = await snapshot({ signal: stop });
+            snap = await untilStopped(Promise.resolve().then(() => snapshot({ signal: stop })), stop);
         } catch (error) {
             if (!stop.aborted) throw error;
         }
-        if (signal?.aborted) throw new LocalLlmError('aborted', 'Stopped while starting.');
+        // The drain first: a Run that meets it in a snapshot refuses as shutting down (DS001).
         if (hardwareStop.signal.aborted) {
             throw new LocalLlmError('shutting_down', 'The agent is restarting; run the model again once it is back.');
         }
+        if (signal?.aborted) throw new LocalLlmError('aborted', 'Stopped while starting.');
         return snap;
     }
 
@@ -300,13 +312,14 @@ export function createController({
 
     // A Run's profile, or its refusal. Nothing is recorded when it is refused,
     // so the same request can be sent again once the GPU can be read.
-    async function requireProfile() {
+    async function requireProfile(signal = null) {
         if (profile) return profile;
         let snap = null;
         try {
-            snap = await takeSnapshot();
+            snap = await takeSnapshot(signal);
         } catch (error) {
-            if (error.code === 'shutting_down') throw error;
+            // A stop is not a missing GPU.
+            if (error.code === 'shutting_down' || error.code === 'aborted') throw error;
         }
         if (commitProfile(snap)) return profile;
         const gpuReason = snap?.gpu?.reason ? `${String(snap.gpu.reason).replace(/\.$/, '')}. ` : '';
@@ -1127,91 +1140,110 @@ export function createController({
             if (state.requests[requestId]) {
                 return { duplicate: true, deployment: publicDeployment() };
             }
-            await requireProfile();
-            const model = findModel(modelId);
-            const definition = getRunner(runnerId);
-            const source = sourceFor(model, definition);
-            if (!definition.supported) {
-                const result = admit({ runner: definition, model, source, params: {}, snapshot: {} });
-                throw new LocalLlmError('runner_unsupported', result.reason);
-            }
-            // Before anything is downloaded: a runner this image does not have (DS005).
-            const availability = availabilityOf(definition);
-            if (!availability.available) throw new LocalLlmError('runner_unavailable', availability.reason, { runner: runnerId });
-            assertEnabled(definition);
-            if (!source) throw new LocalLlmError('no_source', `${model.displayName} has no ${definition.displayName} source.`);
-            if (installJob?.runnerId === runnerId) {
-                throw new LocalLlmError('busy', `${definition.displayName} is being installed; run it once the install finishes.`);
-            }
-            if (installable(runnerId) && !(await installer.describe(runnerId)).installed) {
-                throw new LocalLlmError('runner_not_installed', `${definition.displayName} is not installed; install it first.`);
-            }
-            const store = storeFor(source);
-            if (!store.isPinned(source)) {
-                throw new LocalLlmError('unpinned', 'The model source is not pinned to a commit; update the model entry.');
-            }
-            const normalized = effectiveParams(model, runnerId, params);
-            const current = state.deployment;
-            if (current && (ACTIVE_PHASES.has(current.phase) || job)) {
-                if (!replace) {
-                    throw new LocalLlmError('busy', `${current.modelId} on ${current.runnerId} is ${current.phase}; `
-                        + 'stop it first or run with replace.');
-                }
-                await stopEverything('replace');
-            }
-            const disk = await weightsState(source);
-            // Planning walks /shared: Stop, Cancel and drain abort it before they queue behind this Run (F5).
+            // Until its job starts, a Run can be stopped: Stop, Cancel and drain abort `planning` before
+            // they queue behind it (F5), which ends a hardware snapshot or the /shared walk in progress.
+            // The Run then fails with `cancelled` and records nothing, so the same request can be sent again.
             const planAbort = new AbortController();
             planning = planAbort;
-            const stopped = () => new LocalLlmError('cancelled', 'The Run was stopped while it was looking for the model files.');
-            let acquisition;
             try {
-                acquisition = await acquisitionOf(source, null, planAbort.signal);
+                return await admitRun(planAbort.signal, { requestId, modelId, runnerId, params, replace });
             } catch (error) {
-                if (planAbort.signal.aborted) throw stopped();
+                // A drain met in a snapshot keeps its answer; any other stop of a pending Run is `cancelled`.
+                if (error.code === 'shutting_down') throw error;
+                if (planAbort.signal.aborted) throw new LocalLlmError('cancelled', 'The Run was stopped before it started.');
                 throw error;
             } finally {
                 if (planning === planAbort) planning = null;
             }
-            // A walk with nothing left to read (an empty or missing root) returns normally after an abort.
-            if (planAbort.signal.aborted) throw stopped();
-            const admission = admitHere({
-                definition, model, source, params: normalized, snap: await takeSnapshot(), remainingDownloadBytes: acquisition.bytesNeeded,
-            });
-            if (admission.status !== 'ok') {
-                throw new LocalLlmError(`admission_${admission.status.replace('-', '_')}`, admission.reason, { admission });
-            }
-            state.params[paramsKey(model.id, runnerId)] = normalized;
-            const at = now().toISOString();
-            // The job holds this immutable copy: later registry edits cannot redirect it.
-            if (draining) {
-                throw new LocalLlmError('shutting_down', 'The agent is restarting; run the model again once it is back.');
-            }
-            state.deployment = {
-                id: crypto.randomUUID(),
-                requestId,
-                modelId: model.id,
-                runnerId,
-                // Launch, the last admission and the memory guard use this profile.
-                profile,
-                params: normalized,
-                artifact: structuredClone(source),
-                phase: store.fetchedBy === 'runner' ? 'starting' : 'downloading',
-                admission,
-                acquisition: acquisition.files.map(({ file, method, bytesNeeded }) => ({ file, method, bytesNeeded })),
-                download: { bytes: disk?.bytes || 0, total: disk?.total ?? null, rate: 0, etaSeconds: null, transferred: 0 },
-                error: null,
-                pausedReason: null,
-                runner: null,
-                logSeqStart: log.seq,
-                createdAt: at,
-                updatedAt: at,
-            };
-            state.requests[requestId] = { deploymentId: state.deployment.id, at };
-            save();
-            startJob(state.deployment, model);
-            return { accepted: true, deployment: publicDeployment() };
         });
+    }
+
+    // A Run from its profile to its job's start. `signal` is the pending Run's:
+    // after every step that waits it is checked, and the last check comes
+    // right before anything is recorded; from there to the job's start nothing waits.
+    async function admitRun(signal, { requestId, modelId, runnerId, params, replace }) {
+        const checkpoint = () => {
+            if (signal.aborted) throw new LocalLlmError('aborted', 'Stopped before the Run started.');
+        };
+        await requireProfile(signal);
+        checkpoint();
+        const model = findModel(modelId);
+        const definition = getRunner(runnerId);
+        const source = sourceFor(model, definition);
+        if (!definition.supported) {
+            const result = admit({ runner: definition, model, source, params: {}, snapshot: {} });
+            throw new LocalLlmError('runner_unsupported', result.reason);
+        }
+        // Before anything is downloaded: a runner this image does not have (DS005).
+        const availability = availabilityOf(definition);
+        if (!availability.available) throw new LocalLlmError('runner_unavailable', availability.reason, { runner: runnerId });
+        assertEnabled(definition);
+        if (!source) throw new LocalLlmError('no_source', `${model.displayName} has no ${definition.displayName} source.`);
+        if (installJob?.runnerId === runnerId) {
+            throw new LocalLlmError('busy', `${definition.displayName} is being installed; run it once the install finishes.`);
+        }
+        if (installable(runnerId) && !(await installer.describe(runnerId)).installed) {
+            throw new LocalLlmError('runner_not_installed', `${definition.displayName} is not installed; install it first.`);
+        }
+        checkpoint();
+        const store = storeFor(source);
+        if (!store.isPinned(source)) {
+            throw new LocalLlmError('unpinned', 'The model source is not pinned to a commit; update the model entry.');
+        }
+        const normalized = effectiveParams(model, runnerId, params);
+        const current = state.deployment;
+        if (current && (ACTIVE_PHASES.has(current.phase) || job)) {
+            if (!replace) {
+                throw new LocalLlmError('busy', `${current.modelId} on ${current.runnerId} is ${current.phase}; `
+                    + 'stop it first or run with replace.');
+            }
+            await stopEverything('replace');
+            checkpoint();
+        }
+        const disk = await weightsState(source);
+        checkpoint();
+        // Planning walks /shared; a walk with nothing left to read (an empty or missing root) returns normally after an abort.
+        const acquisition = await acquisitionOf(source, null, signal);
+        checkpoint();
+        const snap = await takeSnapshot(signal);
+        // The last check: from here to the job's start nothing waits, so a Stop or Cancel cannot fall in between.
+        checkpoint();
+        const admission = admitHere({
+            definition, model, source, params: normalized, snap, remainingDownloadBytes: acquisition.bytesNeeded,
+        });
+        if (admission.status !== 'ok') {
+            throw new LocalLlmError(`admission_${admission.status.replace('-', '_')}`, admission.reason, { admission });
+        }
+        state.params[paramsKey(model.id, runnerId)] = normalized;
+        const at = now().toISOString();
+        // The job holds this immutable copy: later registry edits cannot redirect it.
+        if (draining) {
+            throw new LocalLlmError('shutting_down', 'The agent is restarting; run the model again once it is back.');
+        }
+        state.deployment = {
+            id: crypto.randomUUID(),
+            requestId,
+            modelId: model.id,
+            runnerId,
+            // Launch, the last admission and the memory guard use this profile.
+            profile,
+            params: normalized,
+            artifact: structuredClone(source),
+            phase: store.fetchedBy === 'runner' ? 'starting' : 'downloading',
+            admission,
+            acquisition: acquisition.files.map(({ file, method, bytesNeeded }) => ({ file, method, bytesNeeded })),
+            download: { bytes: disk?.bytes || 0, total: disk?.total ?? null, rate: 0, etaSeconds: null, transferred: 0 },
+            error: null,
+            pausedReason: null,
+            runner: null,
+            logSeqStart: log.seq,
+            createdAt: at,
+            updatedAt: at,
+        };
+        state.requests[requestId] = { deploymentId: state.deployment.id, at };
+        save();
+        startJob(state.deployment, model);
+        return { accepted: true, deployment: publicDeployment() };
     }
 
     function stop() {
@@ -1548,6 +1580,8 @@ export function createController({
             await stopping.stop({ graceMs: runnerGraceMs() });
         }
         // A stopped query that has not exited (a hung driver) is left to the host, never forgotten.
+        // Every query was stopped when the drain began, so this waits at most HARDWARE_QUERY_REAP_MS from then.
+        await settleStoppedQueries();
         for (const pid of unreapedQueries()) {
             log.append('controller', `nvidia-smi (pid ${pid}) was killed but has not exited; the drain goes on without it`);
         }
