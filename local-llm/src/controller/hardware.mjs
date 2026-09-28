@@ -19,6 +19,11 @@ function run(execFileImpl, command, args, timeoutMs = 10_000) {
     });
 }
 
+// A memory figure in MiB, or NaN when nvidia-smi gives none ("[N/A]", "Not Supported", empty).
+function mib(text) {
+    return /^\d+(?:\.\d+)?$/.test(text) ? Number(text) * MIB : Number.NaN;
+}
+
 function csvRows(text) {
     return text.split('\n').map((line) => line.trim()).filter(Boolean)
         .map((line) => line.split(',').map((cell) => cell.trim()));
@@ -47,6 +52,20 @@ export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI,
     const [first] = csvRows(query.stdout);
     if (!first || first.length < 5) return { available: false, reason: 'nvidia-smi reported no GPU' };
     const [name, total, used, free, driver] = first;
+    const memory = { totalBytes: mib(total), usedBytes: mib(used), freeBytes: mib(free) };
+    if (!Object.values(memory).every(Number.isFinite)) {
+        // Integrated GPUs that share system memory (NVIDIA GB10 in DGX Spark)
+        // report no memory figures. Admission sizes every runner from them, so
+        // the GPU is unknown and every Run is refused rather than admitted blind.
+        return {
+            available: false,
+            name,
+            driverVersion: driver,
+            reason: `nvidia-smi reports no memory figures for ${name} (total ${total}, used ${used}, free ${free}), `
+                + 'so this agent cannot size models for it and refuses every Run. '
+                + 'GPUs that share system memory, such as the one in NVIDIA DGX Spark, are not supported yet.',
+        };
+    }
     const apps = await run(execFileImpl, nvidiaSmi, [
         '--query-compute-apps=pid,process_name,used_memory',
         '--format=csv,noheader,nounits',
@@ -60,9 +79,7 @@ export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI,
         available: true,
         name,
         driverVersion: driver,
-        totalBytes: Number(total) * MIB,
-        usedBytes: Number(used) * MIB,
-        freeBytes: Number(free) * MIB,
+        ...memory,
         processes,
     };
 }

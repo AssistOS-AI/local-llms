@@ -31,6 +31,8 @@ The declaration asks for that CDI device and nothing else. Ploinky attaches it o
 | Total and available RAM | `/proc/meminfo` |
 | Free disk under `/data` | `statfs` |
 
+Admission sizes every runner from the GPU's total and free memory, so the snapshot requires all three memory figures to be numbers. A GPU that reports any of them as something else, such as `[N/A]` or `Not Supported`, is reported unavailable with a reason that names the GPU and the values it gave, and every Run is refused as `incompatible` with it, before anything is downloaded. Integrated GPUs that share system memory report no figures: the NVIDIA GB10 in DGX Spark (driver 580) answers `NVIDIA GB10, [N/A], [N/A], [N/A], 580.159.03`. Without this rule every memory comparison was false and any model was admitted, whatever its size. This release does not support such GPUs; a GPU that reports numbers gives the same snapshot as before.
+
 ### Admission
 
 `admit()` in `src/controller/admission.mjs` returns one of three answers, each with a reason and an estimate labelled `isEstimate: true`:

@@ -281,6 +281,27 @@ test('admission refuses before anything is downloaded, and re-checks before laun
     assert.equal(late.runners.started.length, 0);
 });
 
+test('a GPU that reports no memory figures refuses every Run before anything is downloaded', async (t) => {
+    const reason = 'nvidia-smi reports no memory figures for NVIDIA GB10 (total [N/A], used [N/A], free [N/A]), '
+        + 'so this agent cannot size models for it and refuses every Run. '
+        + 'GPUs that share system memory, such as the one in NVIDIA DGX Spark, are not supported yet.';
+    const h = harness(t, {
+        snap: {
+            ...snapshot(),
+            gpu: { available: false, name: 'NVIDIA GB10', driverVersion: '580.159.03', reason },
+            memory: { totalBytes: 119 * GIB, availableBytes: 106 * GIB },
+        },
+    });
+    for (const [index, runnerId] of ['llama.cpp', 'ollama', 'vllm'].entries()) {
+        await assert.rejects(
+            () => h.controller.run({ modelId: 'gpt-oss-20b', runnerId, requestId: `request-000${index}` }),
+            (error) => error.code === 'admission_incompatible' && error.message.includes(reason),
+        );
+    }
+    assert.equal(h.calls.download.length, 0);
+    assert.equal(h.runners.started.length, 0);
+});
+
 test('overview lists runners, per-runner sizes, download state and admission', async (t) => {
     const h = harness(t);
     const overview = await h.controller.overview();
