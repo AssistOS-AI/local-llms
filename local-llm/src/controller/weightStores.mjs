@@ -41,7 +41,11 @@ export function createWeightStores({
     downloadSnapshot = downloadSnapshotFile,
     inspectSnapshot = inspectSnapshotFile,
     resolveSnapshot = resolveHuggingFaceSnapshot,
+    // The workspace's shared model directory (C12): a pinned file found there
+    // is adopted, by hard link or copy and then verified, instead of downloaded.
+    sharedModelsRoot = null,
 }) {
+    const adoptFrom = sharedModelsRoot ? [sharedModelsRoot] : [];
     const ggufRoot = path.join(dataDir, 'models', 'gguf');
     const ollamaModels = path.join(dataDir, 'models', 'ollama');
     const hfRoot = path.join(dataDir, 'models', 'hf');
@@ -77,6 +81,7 @@ export function createWeightStores({
             let transferred = 0;
             let first = null;
             const files = [];
+            const adopted = [];
             for (const file of filesOf(artifact)) {
                 const offset = done;
                 const result = await download({
@@ -84,6 +89,7 @@ export function createWeightStores({
                     root: ggufRoot,
                     token: env.HF_TOKEN || '',
                     baseUrl: hfBaseUrl,
+                    adoptFrom,
                     onProgress: (progress) => onProgress?.({
                         ...progress,
                         bytes: offset + (progress.bytes || 0),
@@ -94,10 +100,11 @@ export function createWeightStores({
                 });
                 first ??= result.path;
                 files.push(result.path);
+                if (result.adopted) adopted.push({ file: file.file, ...result.adopted });
                 done += file.size;
                 transferred += result.bytesTransferred || 0;
             }
-            return { path: first, files, bytes: artifact.size, bytesTransferred: transferred };
+            return { path: first, files, bytes: artifact.size, bytesTransferred: transferred, adopted };
         },
         async remove(source) {
             if (!source.commit) return 0;
@@ -226,7 +233,11 @@ export function createWeightStores({
         for (const entry of entries) {
             const full = path.join(dir, entry.name);
             if (entry.isDirectory()) total += await treeBytes(full);
-            else if (entry.isFile()) total += (await fs.promises.lstat(full)).size;
+            else if (entry.isFile()) {
+                // A hard link adopted from /shared frees nothing while the shared copy remains.
+                const stats = await fs.promises.lstat(full);
+                if (stats.nlink <= 1) total += stats.size;
+            }
         }
         return total;
     }
@@ -259,6 +270,7 @@ export function createWeightStores({
                     artifact: snapshotFile(source, file),
                     token: env.HF_TOKEN || '',
                     baseUrl: hfBaseUrl,
+                    adoptFrom,
                     signal,
                     onProgress: (progress) => onProgress({
                         ...progress,

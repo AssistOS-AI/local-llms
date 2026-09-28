@@ -25,6 +25,18 @@ Every entry is validated by `validateModel` (`src/controller/catalog.mjs`). Ids 
 
 Earlier schemas are not migrated (catalog v3 dropped the v1 and v2 migration on purpose), and state this controller cannot read is reported, never misread. A registry entry that is not valid v3 stays in the state file, is not offered, is listed with its reason in the overview's `unsupportedModels` and logged once at start, and can be removed with `local_llm_model_remove` (its downloaded weights, if any, stay on disk). Parameters saved for a model that no longer validate (another profile, a removed parameter) give way to the defaults, with one log line; a recorded deployment whose parameters no longer validate shows no context instead of an error. The state file stays at version 1; a state file of any other version is kept aside as `controller.json.unsupported-<time>` instead of being overwritten.
 
+### Reusing a model file already in the workspace
+
+Before a controller download (a GGUF file, each shard of a split GGUF, each file of a Hugging Face snapshot), the agent looks for the pinned bytes, in this order:
+
+1. **Its own store** (`/data/models/...`): a file whose verification record matches the pinned identity is used as it is, unless its recorded stat changed (below).
+2. **The workspace's shared model directory, `/shared/models`** (on the host `<workspace>/.data/shared/models`, which Ploinky mounts into every agent; `LOCAL_LLM_SHARED_MODELS` overrides it for tests). It is walked without following symbolic links, at most 8 levels and 20,000 entries deep, and only regular files of exactly the pinned size are candidates; names never decide. A candidate is hard-linked into the agent's store (copied when a link is impossible, as across filesystems), and then **the agent's own link or copy is hashed** against the pinned sha256 (or git blob id). Only a match is kept; a mismatch is discarded and the next candidate, then the download, is tried. The shared file itself is never changed. The deployment log names each adopted file and how.
+3. **The download** from Hugging Face, as before.
+
+Only what the agent can see is searched: inside the Box, agent volumes stay inside the workspace, so reusing a file across workspaces means an operator hard-links it into `<workspace>/.data/shared/models`. Ollama tags keep Ollama's own store.
+
+A hard link shares its inode with a path other agents can write through `/shared`. So every verified file's record keeps the device, inode, size, mtime and ctime it was verified at, and before each Run a file whose stat differs is hashed again: kept if its bytes still match, otherwise removed and fetched again. A file verified before these stats were recorded is hashed once. Delete weights removes only the agent's own link or copy; space counts as freed only for a file whose last link it removed.
+
 ### Split GGUF
 
 A large model can be published as a split GGUF: `<prefix>-00001-of-0000N.gguf` … `<prefix>-0000N-of-0000N.gguf` in one directory of the repository (Qwen3.5-122B-A10B MXFP4_MOE is three shards). It is still the `gguf` weight format, read by the same runners. The source's `file` is the first shard, which llama.cpp opens (it finds the others next to it), and `shards` lists every shard in canonical order, each pinned by `size` and `sha256`; `size` is their sum and there is no top-level `sha256`. A seed entry must pin every shard; a user entry may name only the first shard, and `local_llm_model_add` resolves the commit from it and every shard at that commit. Naming any other shard, or a split of more than 64 shards, is refused before anything is resolved.

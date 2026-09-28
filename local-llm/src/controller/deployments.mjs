@@ -148,6 +148,9 @@ export function createController({
     imageContract = readImageContract(),
     fileExists = (file) => fs.existsSync(file),
     dropCache = dropPageCache,
+    // The workspace's shared model directory (C12, DS002): Ploinky mounts
+    // <workspace>/.data/shared at /shared in every agent.
+    sharedModelsRoot = env.LOCAL_LLM_SHARED_MODELS || '/shared/models',
     // The CUDA driver's JIT cache, in the container's own filesystem (DS004).
     cudaCachePath = path.join(env.LOCAL_LLM_RUN_ROOT || '/opt/runners', '.cuda-cache'),
     now = () => new Date(),
@@ -204,6 +207,7 @@ export function createController({
         ...(downloadSnapshot ? { downloadSnapshot } : {}),
         ...(inspectSnapshot ? { inspectSnapshot } : {}),
         ...(resolveSnapshot ? { resolveSnapshot } : {}),
+        sharedModelsRoot,
     });
 
     // A drain has a fixed time budget (drainBudget.mjs); a Stop gives the
@@ -861,6 +865,9 @@ export function createController({
                 transferred: fetched.bytesTransferred,
             };
             weights = { path: fetched.path };
+            for (const entry of fetched.adopted || []) {
+                log.append('controller', `adopted ${entry.file} from ${entry.from} (${entry.method}, verified) instead of downloading it`);
+            }
             // Every file of the download (each shard of a split GGUF); a snapshot directory is skipped.
             for (const file of fetched.files || [fetched.path]) {
                 try {
