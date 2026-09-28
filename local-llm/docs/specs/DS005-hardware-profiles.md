@@ -79,6 +79,10 @@ On unified memory every runner is watched from its start to its exit: MemAvailab
 
 The guard is a backstop, not protection. A load commits memory in bursts of 7–10 GiB per 250 ms, faster than any sampling can follow, and other users of the machine allocate from the same pool at any time. Admission, sized to the whole known allocation, is the control; the kernel OOM killer, which picks the runner first (`oom_score_adj` 1000, DS003), is the last resort. Memory cgroups do not bound GPU allocations here.
 
+### Dashboard
+
+On unified memory the Local LLMs dashboard shows one "Unified memory available" card (MemAvailable of MemTotal, the GPU's users and the page cache, with a meter of what is in use) and the disk card, instead of the GPU and RAM cards, and the run form shows one shared-memory estimate against the pool. No missing value reaches a card. A runner the image lacks, or one without parameters for the profile, cannot be run from the form, which shows why.
+
 ## Decisions & Questions
 
 ### Question #1: Why a known-unified device list beside the addressing mode?

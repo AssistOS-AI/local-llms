@@ -497,9 +497,12 @@ export class LocalLlmDashboard {
         const note = this.runForm?.querySelector('[data-run-runner-note]');
         const submit = this.runForm?.querySelector('[data-run-submit]');
         if (!basic || !advanced || !model || !runner) return;
-        const runnable = runner.supported && runner.installed;
+        // A runner this image lacks, or with no parameters for the hardware profile, cannot run here.
+        const runnable = runner.supported && runner.installed && Boolean(runner.paramSchema);
         if (note) {
-            const reason = !runner.supported || !runner.installed ? runner.reason : '';
+            const reason = !runner.supported ? (runner.unsupportedReason || runner.reason)
+                : !runner.installed ? runner.reason
+                    : !runner.paramSchema ? 'not available on this hardware profile' : '';
             note.textContent = [
                 runner.version ? `${runnerLabel(runner.id)} ${runner.version}` : runnerLabel(runner.id),
                 reason,

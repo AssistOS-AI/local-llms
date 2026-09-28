@@ -58,10 +58,27 @@ function statCard(name, title, value, meta = '', extra = '') {
         </div>`;
 }
 
-/** The GPU, RAM and disk cards. `gpu` may come from a fresher status poll. */
+/** The GPU, RAM and disk cards, or on a GPU that shares system memory, one unified-memory card and disk. `gpu` may come from a fresher status poll. */
 export function hardwareCardsHtml(hardware = {}, gpuOverride = null) {
     const gpu = gpuOverride?.available ? { ...(hardware.gpu || {}), ...gpuOverride } : (hardware.gpu || {});
     const cards = [];
+    const memory = hardware.memory || {};
+    if (gpu.available && gpu.memoryModel === 'unified') {
+        // One pool: the GPU and everything else share system memory (DS005).
+        const users = Array.isArray(gpu.processes) && gpu.processes.length
+            ? `GPU in use by ${gpu.processes.map((process) => process.name).join(', ')}`
+            : 'no process is using the GPU';
+        const used = Number.isFinite(memory.totalBytes) && Number.isFinite(memory.availableBytes)
+            ? memory.totalBytes - memory.availableBytes : null;
+        const cache = Number.isFinite(memory.cachedBytes) ? ` · page cache ${formatMiB(memory.cachedBytes)}` : '';
+        cards.push(statCard('unified', 'Unified memory available', `${formatMiB(memory.availableBytes)} of ${formatMiB(memory.totalBytes)}`,
+            `${gpu.name || 'GPU'} shares system memory · ${users}${cache}`,
+            meter({ label: 'Unified memory in use', value: used, max: memory.totalBytes, text: `${formatMiB(used)} in use` })));
+        const disk = hardware.disk || {};
+        cards.push(statCard('disk', 'Disk free', formatBytes(disk.freeBytes),
+            Number.isFinite(disk.totalBytes) ? `of ${formatBytes(disk.totalBytes)}, for model weights` : 'for model weights'));
+        return cards.join('');
+    }
     if (gpu.available) {
         const users = Array.isArray(gpu.processes) && gpu.processes.length
             ? `in use by ${gpu.processes.map((process) => process.name).join(', ')}`
@@ -72,7 +89,6 @@ export function hardwareCardsHtml(hardware = {}, gpuOverride = null) {
     } else {
         cards.push(statCard('gpu', 'GPU', 'Not available', gpu.reason || 'No GPU is attached to this agent.'));
     }
-    const memory = hardware.memory || {};
     cards.push(statCard('ram', 'RAM available', formatMiB(memory.availableBytes),
         Number.isFinite(memory.totalBytes) ? `of ${formatMiB(memory.totalBytes)}` : ''));
     const disk = hardware.disk || {};
@@ -350,6 +366,15 @@ export function estimateHtml({ admission = null, context = null, error = '' } = 
     const gpu = hardware.gpu || {};
     const memory = hardware.memory || {};
     const parts = [];
+    if (Number.isFinite(estimate.unifiedBytes) && Number.isFinite(memory.totalBytes)) {
+        // Unified memory: one estimate against the shared pool (DS005).
+        const available = Number.isFinite(memory.availableBytes) ? `, ${formatMiB(memory.availableBytes)} available now` : '';
+        parts.push(`
+            <div class="local-llm-estimate-row">
+                <span class="settings-card-meta">Shared memory about ${escapeHtml(formatMiB(estimate.unifiedBytes))} of ${escapeHtml(formatMiB(memory.totalBytes))}${escapeHtml(available)}</span>
+                ${meter({ label: 'Estimated shared memory', value: estimate.unifiedBytes, max: memory.totalBytes, text: `Shared memory about ${formatMiB(estimate.unifiedBytes)}` })}
+            </div>`);
+    }
     if (Number.isFinite(estimate.gpuBytes) && gpu.available) {
         parts.push(`
             <div class="local-llm-estimate-row">

@@ -237,6 +237,26 @@ test('the summary cards show live GPU use, and the status card names what runs a
     assert.match(estimateHtml({ error: 'Context size must be a whole number.' }), /settings-status error/);
 });
 
+test('on unified memory one card shows the shared pool, and the run form one shared-memory estimate', () => {
+    const hardware = {
+        gpu: { available: true, memoryModel: 'unified', name: 'NVIDIA GB10', totalBytes: null, usedBytes: null, freeBytes: null,
+            processes: [{ name: '/opt/llama.cpp/llama-server', usedBytes: 11875 * 2 ** 20 }] },
+        memory: { totalBytes: 122502 * 2 ** 20, availableBytes: 96000 * 2 ** 20, freeBytes: 80000 * 2 ** 20, cachedBytes: 14000 * 2 ** 20 },
+        disk: { freeBytes: 434e9, totalBytes: 916e9 },
+    };
+    const cards = hardwareCardsHtml(hardware);
+    assert.match(cards, /Unified memory available/);
+    assert.match(cards, /96,000 MiB of 122,502 MiB/);
+    assert.match(cards, /NVIDIA GB10 shares system memory · GPU in use by \/opt\/llama\.cpp\/llama-server · page cache 14,000 MiB/);
+    const total = 122502 * 2 ** 20;
+    assert.ok(cards.includes(`<meter class="local-llm-meter" min="0" max="${total}" value="${total - 96000 * 2 ** 20}"`));
+    assert.doesNotMatch(cards, /GPU memory|RAM available|—|NaN|null/, 'no GPU or RAM card, and no missing value reaches a card');
+    assert.match(cards, /Disk free/);
+    const estimate = estimateHtml({ admission: { status: 'ok', estimate: { unifiedBytes: 84 * 2 ** 30, basis: 'measured envelope' } } }, hardware);
+    assert.match(estimate, /Shared memory about 86,016 MiB of 122,502 MiB, 96,000 MiB available now/);
+    assert.doesNotMatch(estimate, /GPU about|RAM about/);
+});
+
 // Fake timers and a fake local-llm client for the dashboard's polling.
 function pollingHarness(t, callTool, { document } = {}) {
     const saved = {
