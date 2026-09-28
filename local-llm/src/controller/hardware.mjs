@@ -2,6 +2,11 @@
 // the other processes holding it), system RAM and free disk under /data.
 // Re-read immediately before every launch, because the host Ollama service
 // and other granted workspaces share the same GPU.
+//
+// The GPU's memory model decides the hardware profile (DS005): `dedicated`
+// when nvidia-smi reports its memory in MiB, `unified` when the GPU shares
+// system memory (it reports no memory figures and ATS or HMM addressing, or
+// it is on the known-unified list), and anything else is unknown and refused.
 
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
@@ -22,6 +27,51 @@ function run(execFileImpl, command, args, timeoutMs = 10_000) {
 // A memory figure in MiB, or NaN when nvidia-smi gives none ("[N/A]", "Not Supported", empty).
 function mib(text) {
     return /^\d+(?:\.\d+)?$/.test(text) ? Number(text) * MIB : Number.NaN;
+}
+
+// An optional telemetry figure: a number, or null when nvidia-smi gives none.
+function optionalNumber(text) {
+    return typeof text === 'string' && /^\d+(?:\.\d+)?$/.test(text) ? Number(text) : null;
+}
+
+// GPUs that share system memory whatever their driver reports (PCI device id
+// as nvidia-smi prints it): NVIDIA GB10 (DGX Spark).
+export const KNOWN_UNIFIED_DEVICE_IDS = Object.freeze(['0x2E1210DE']);
+const UNIFIED_ADDRESSING = Object.freeze(['ATS', 'HMM']);
+// The second, optional query (DS005). The first query stays exactly as it was,
+// so an older driver that does not know a field here loses only these values.
+export const DEVICE_QUERY_FIELDS = 'pci.device_id,compute_cap,addressing_mode,utilization.gpu,power.draw,temperature.gpu';
+
+async function readDevice(execFileImpl, nvidiaSmi) {
+    const query = await run(execFileImpl, nvidiaSmi, [`--query-gpu=${DEVICE_QUERY_FIELDS}`, '--format=csv,noheader,nounits']);
+    if (!query.ok) return null;
+    const [row] = csvRows(query.stdout);
+    if (!row || row.length < 6) return null;
+    const [pciDeviceId, computeCap, addressingMode, utilization, powerDraw, temperature] = row;
+    return {
+        device: {
+            pciDeviceId: /^0x[0-9A-Fa-f]{8}$/.test(pciDeviceId) ? pciDeviceId.toUpperCase().replace(/^0X/, '0x') : null,
+            computeCapability: /^\d+\.\d+$/.test(computeCap) ? computeCap : null,
+            addressingMode: /^[A-Za-z]+$/.test(addressingMode) ? addressingMode : null,
+        },
+        telemetry: {
+            utilizationPercent: optionalNumber(utilization),
+            powerWatts: optionalNumber(powerDraw),
+            temperatureC: optionalNumber(temperature),
+        },
+    };
+}
+
+/**
+ * The memory model of a GPU from its memory figures and device facts:
+ * `dedicated`, `unified` or `unknown`. Never inferred from the CPU
+ * architecture: GH200 reports ATS with numeric HBM and is dedicated.
+ */
+export function memoryModelOf({ memoryNumeric, device }) {
+    const knownUnified = KNOWN_UNIFIED_DEVICE_IDS.includes(device?.pciDeviceId);
+    if (knownUnified) return 'unified';
+    if (memoryNumeric) return 'dedicated';
+    return UNIFIED_ADDRESSING.includes(device?.addressingMode) ? 'unified' : 'unknown';
 }
 
 function csvRows(text) {
@@ -53,17 +103,21 @@ export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI,
     if (!first || first.length < 5) return { available: false, reason: 'nvidia-smi reported no GPU' };
     const [name, total, used, free, driver] = first;
     const memory = { totalBytes: mib(total), usedBytes: mib(used), freeBytes: mib(free) };
-    if (!Object.values(memory).every(Number.isFinite)) {
-        // Integrated GPUs that share system memory (NVIDIA GB10 in DGX Spark)
-        // report no memory figures. Admission sizes every runner from them, so
-        // the GPU is unknown and every Run is refused rather than admitted blind.
+    const memoryNumeric = Object.values(memory).every(Number.isFinite);
+    const facts = await readDevice(execFileImpl, nvidiaSmi);
+    const memoryModel = memoryModelOf({ memoryNumeric, device: facts?.device });
+    if (memoryModel === 'unknown') {
+        // Admission sizes every runner from the memory figures, so a GPU that
+        // gives none and is not known to share system memory is unknown, and
+        // every Run is refused rather than admitted blind.
         return {
             available: false,
             name,
             driverVersion: driver,
+            ...(facts || {}),
             reason: `nvidia-smi reports no memory figures for ${name} (total ${total}, used ${used}, free ${free}), `
                 + 'so this agent cannot size models for it and refuses every Run. '
-                + 'GPUs that share system memory, such as the one in NVIDIA DGX Spark, are not supported yet.',
+                + 'GPUs that share system memory are supported only when the driver reports ATS or HMM addressing.',
         };
     }
     const apps = await run(execFileImpl, nvidiaSmi, [
@@ -75,12 +129,29 @@ export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI,
             pid: Number(pid), name: processName, usedBytes: Number(usedMemory) * MIB,
         }))
         : [];
+    if (memoryModel === 'unified') {
+        // No GPU memory figures: the pool is system memory, read from
+        // /proc/meminfo by the snapshot (never from nvidia-smi or cudaMemGetInfo).
+        return {
+            available: true,
+            name,
+            driverVersion: driver,
+            memoryModel,
+            totalBytes: null,
+            usedBytes: null,
+            freeBytes: null,
+            processes,
+            ...facts,
+        };
+    }
     return {
         available: true,
         name,
         driverVersion: driver,
         ...memory,
         processes,
+        memoryModel,
+        ...(facts || {}),
     };
 }
 
@@ -90,7 +161,24 @@ export function readMemory({ fsApi = fs } = {}) {
         const match = new RegExp(`^${key}:\\s+(\\d+) kB$`, 'm').exec(text);
         return match ? Number(match[1]) * 1024 : null;
     };
-    return { totalBytes: value('MemTotal'), availableBytes: value('MemAvailable'), swapFreeBytes: value('SwapFree') };
+    return {
+        totalBytes: value('MemTotal'),
+        availableBytes: value('MemAvailable'),
+        swapFreeBytes: value('SwapFree'),
+        // For display on unified memory: the page cache the GPU can reclaim.
+        freeBytes: value('MemFree'),
+        cachedBytes: value('Cached'),
+    };
+}
+
+/**
+ * Memory pressure from /proc/pressure/memory: the `full` avg10 share, or null
+ * when the kernel has no PSI. Recorded by the unified memory guard (DS005).
+ */
+export function readMemoryPressure({ fsApi = fs } = {}) {
+    const text = readText(fsApi, '/proc/pressure/memory');
+    const match = text && /^full avg10=(\d+(?:\.\d+)?)/m.exec(text);
+    return match ? Number(match[1]) : null;
 }
 
 function readText(fsApi, file) {
@@ -167,6 +255,31 @@ export function physicalCoreCount({ fsApi = fs, availableParallelism = () => os.
 /** The llama-server runners' default CPU threads: physical cores minus 2 (runners plan, I2). */
 export function defaultThreads(cores) {
     return Math.max(1, cores - 2);
+}
+
+/**
+ * The CPUs of the highest-capacity class this process may run on, when sysfs
+ * `cpu_capacity` shows cores of different capacity (DGX Spark: 10 Cortex-X925
+ * at 997-1024 and 10 Cortex-A725 at 718-731); null when every allowed CPU has
+ * the same capacity or the kernel does not report it. A CPU within 10 % of the
+ * highest capacity belongs to the class. Used by the unified profile only.
+ */
+export function performanceCoreCount({ fsApi = fs } = {}) {
+    const status = readText(fsApi, '/proc/self/status');
+    const allowedMatch = status && /^Cpus_allowed_list:\s*(\S+)\s*$/m.exec(status);
+    const allowed = allowedMatch ? parseCpuList(allowedMatch[1]) : null;
+    if (!allowed) return null;
+    const capacities = [];
+    for (const cpu of allowed) {
+        const text = readText(fsApi, `/sys/devices/system/cpu/cpu${cpu}/cpu_capacity`);
+        const value = text === null ? Number.NaN : Number(text.trim());
+        if (!Number.isFinite(value) || value <= 0) return null;
+        capacities.push(value);
+    }
+    const highest = Math.max(...capacities);
+    const lowest = Math.min(...capacities);
+    if (lowest >= highest * 0.9) return null;
+    return capacities.filter((value) => value >= highest * 0.9).length;
 }
 
 export async function readDisk(dataDir, { statfs = (target) => fs.promises.statfs(target) } = {}) {

@@ -357,6 +357,11 @@ export function admit({ runner, model, source, params, snapshot, remainingDownlo
     if (!gpu?.available) {
         return result('incompatible', gpu?.reason || 'No GPU is available to this agent.', {});
     }
+    // A GPU that shares system memory has no GPU memory figures; only a runner
+    // with a unified-memory policy can size a model for it (DS005).
+    if (gpu.memoryModel === 'unified' && typeof runner.admitUnified !== 'function') {
+        return result('incompatible', `${runner.displayName} is not available on a GPU that shares system memory (${gpu.name}) in this release.`, {});
+    }
     return runner.admit({
         model, source, params, gpu, memory: snapshot.memory || {}, disk: snapshot.disk, remainingDownloadBytes,
     });

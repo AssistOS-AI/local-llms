@@ -27,11 +27,12 @@ The declaration asks for that CDI device and nothing else. Ploinky attaches it o
 | Value | Source |
 | --- | --- |
 | GPU name, total, used and free memory, driver | `nvidia-smi --query-gpu` (path `/usr/local/nvidia/bin/nvidia-smi`, overridable by `LOCAL_LLM_NVIDIA_SMI` for tests) |
+| PCI device id, compute capability, addressing mode, utilization, power, temperature | a second, optional `nvidia-smi --query-gpu` (DS005) |
 | Other GPU users | `nvidia-smi --query-compute-apps` |
 | Total and available RAM | `/proc/meminfo` |
 | Free disk under `/data` | `statfs` |
 
-Admission sizes every runner from the GPU's total and free memory, so the snapshot requires all three memory figures to be numbers. A GPU that reports any of them as something else, such as `[N/A]` or `Not Supported`, is reported unavailable with a reason that names the GPU and the values it gave, and every Run is refused as `incompatible` with it, before anything is downloaded. Integrated GPUs that share system memory report no figures: the NVIDIA GB10 in DGX Spark (driver 580) answers `NVIDIA GB10, [N/A], [N/A], [N/A], 580.159.03`. Without this rule every memory comparison was false and any model was admitted, whatever its size. This release does not support such GPUs; a GPU that reports numbers gives the same snapshot as before.
+Admission sizes every runner from the GPU's total and free memory. A GPU that gives no memory figures and is not known to share system memory is reported unavailable with a reason that names the GPU and the values it gave, and every Run is refused as `incompatible` with it, before anything is downloaded. Without this rule every memory comparison was false and any model was admitted, whatever its size. A GPU that shares system memory (NVIDIA GB10 in DGX Spark) is detected as such and uses the unified profile (DS005); a GPU that reports numbers gives the same values as before.
 
 ### Admission
 
