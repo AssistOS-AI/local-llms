@@ -164,7 +164,7 @@ for (const [label, firstSnapshot] of [
         );
         // Nothing was recorded or started, so the same request may be sent again.
         assert.equal(h.controller.state.deployment, null);
-        assert.deepEqual(h.controller.state.requests, {});
+        assert.deepEqual(Object.keys(h.controller.state.requests), []);
         assert.deepEqual(h.controller.state.params, {});
         assert.equal(h.calls.download, 0);
         assert.equal(h.started.length, 0);

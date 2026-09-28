@@ -54,16 +54,27 @@ Every tool is declared in `mcp-config.json` with `command: "node"`, `args: ["/co
 | --- | --- |
 | `local_llm_overview` | `overview`: the hardware profile (DS005), hardware, runners (with `supported: false` and the reason for a runner this image does not include), the models offered in the profile with per-runner download state and admission, current deployment |
 | `local_llm_status` | `status`: deployment phase, progress and log lines after `sinceSeq`, the hardware profile and, on unified memory, the memory guard's lowest MemAvailable, highest pressure and sample count |
-| `local_llm_run` | `run`: `requestId`, `modelId`, `runnerId`, `params` (validated against the runner's schema for the profile), `replace`; while no snapshot has shown a usable GPU, so no hardware profile is decided, it is refused with `admission_incompatible` and records nothing, so the same request can be sent again (DS005); a runner the image does not include is refused with `runner_unavailable` before anything downloads |
-| `local_llm_stop` | `stop`; also stops a Run that has not started its job yet (below) |
-| `local_llm_download_cancel` | `cancelDownload`: keeps the partial file; also stops a Run that has not started its job yet (below), and then succeeds; `not_downloading` when nothing is transferring or being looked up |
-
-A Run is pending from the moment its command starts until its job starts: it reads its hardware snapshots (the profile's while none is committed, and admission's) and looks for its files (DS002). Stop, Cancel and the drain stop a pending Run before they queue behind it. The snapshot or lookup in progress ends at once: a snapshot answers without waiting for its nvidia-smi query, which is killed, or for its free-disk read, which cannot be cancelled and whose late answer is dropped. The Run then fails with `cancelled`, or with `shutting_down` when the drain met it in a snapshot. It records nothing (no deployment, request id or saved parameters) and starts no download or runner, so the same request can be sent again. The Stop or Cancel that stopped it succeeds. The Run checks for a stop after every step that waits, and last just before it records anything; from there to its job's start nothing waits.
+| `local_llm_run` | `run`: `requestId`, `modelId`, `runnerId`, `params` (validated against the runner's schema for the profile), `replace`; a retry of an accepted `requestId` is answered as a duplicate. Every id the pattern allows, `__proto__`, `constructor` and `toString` included, is an ordinary key of the accepted-request records: fresh until accepted, recorded and persisted as data, never read from or written through a prototype. While no snapshot has shown a usable GPU, so no hardware profile is decided, it is refused with `admission_incompatible` and records nothing, so the same request can be sent again (DS005); a runner the image does not include is refused with `runner_unavailable` before anything downloads |
+| `local_llm_stop` | `stop`; also cancels every Run submitted before it that has not started its job (below) |
+| `local_llm_download_cancel` | `cancelDownload`: keeps the partial file; also cancels every Run submitted before it that has not started its job (below), and then succeeds; `not_downloading` when nothing is transferring and no Run was cancelled |
 | `local_llm_weights_delete` | `deleteWeights` |
 | `local_llm_model_add` / `_update` / `_remove` | registry edits; seed entries are read-only; an entry that carries a unified envelope (`unified`) or any `validated` label is refused with `invalid_model`, because only the trusted seed catalog may certify measurements (DS005) |
 | `local_llm_test_prompt` | an admin smoke chat against the active runner on loopback; the one inference-routing exception (Question #3) |
 | `local_llm_runner_install` | `installRunner`: `runnerId`, `acceptLicence`; installs an on-demand runner from the image's runner lock (DS004). Who accepted a licence comes from the Router-signed invocation, never from tool input. |
 | `local_llm_runner_uninstall` | `uninstallRunner`: `runnerId`; refused while that runner runs a model |
+
+**Stopping Runs that have not started.** Commands run one at a time, in the order they are submitted. A Run is pending from the moment it is submitted until its job starts: it may wait in the command queue behind other commands, and its own command then reads its hardware snapshots (the profile's while none is committed, and admission's) and looks for its files (DS002). A Stop or Cancel invalidates every Run submitted before it, both the one whose command is running and those still waiting in the queue. A Run submitted after the Stop or Cancel is new intent and goes ahead.
+
+- **The running Run's step ends at once.** The snapshot or lookup in progress stops. A snapshot answers without waiting for its nvidia-smi query, which is killed, or for its free-disk read, which cannot be cancelled and whose late answer is dropped.
+- **A queued Run reads and records nothing.** When its turn comes it fails at once.
+- **Outcome.**
+  - Every invalidated Run fails with `cancelled`, or with `shutting_down` when the drain met it in a snapshot.
+  - It records nothing (no deployment, request id or saved parameters) and starts no download or runner, so the same request can be sent again.
+  - A Stop succeeds. A Cancel that invalidated at least one Run of new work (a request id not already accepted) succeeds even when nothing is downloading. A queued retry of an accepted request is not new work: it is answered as a duplicate, never cancelled, and does not make a Cancel succeed.
+  - A second Stop or Cancel right after finds nothing left of those Runs.
+- **Answers that come first.** A request id that was already accepted is answered as a duplicate, as always, even if its retry was queued before a Stop. Busy and replace keep their meaning for Runs that go ahead.
+- **Checks.** A Run checks for a Stop or Cancel after every step that waits, and last just before it records anything; from there to its job's start nothing waits.
+- **The drain** stops the running Run the same way. A Run still queued at a drain gets its turn and refuses with `shutting_down` at its first snapshot, which the drain has already stopped, or at its last check, unless an earlier check refuses it first; it records nothing and starts nothing. A Run submitted after the drain began is refused at once with `shutting_down`.
 
 ### Authorization
 
