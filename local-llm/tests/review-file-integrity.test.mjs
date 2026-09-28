@@ -526,3 +526,115 @@ test('F2 control: the same tight disk with no partial is still refused for the w
         (err) => err.code === 'admission_insufficient_now');
     assert.equal(s.requests.length, 0);
 });
+
+// ------------------------------------ F2: free space that changes between readings
+
+const COPY_NEED = Math.ceil(SIZE * 1.05);
+const RESUME_NEED = Math.ceil((SIZE - PARTIAL) * 1.05);
+
+// A statfs that returns `values` in turn, then the last one; `reads` records each reading.
+function readings(values) {
+    const reads = [];
+    const statfs = async () => {
+        const free = values[Math.min(reads.length, values.length - 1)];
+        reads.push(free);
+        return { bavail: free, bsize: 1 };
+    };
+    return { reads, statfs };
+}
+
+// Counts reads per /shared file (by the kernel's path of each opened candidate).
+function readsPerSharedFile(s) {
+    const reads = new Map();
+    const fsApi = { ...fs, promises: { ...fs.promises, open: async (file, flags, mode) => {
+        const handle = await fs.promises.open(file, flags, mode);
+        if (flags & O_DIRECTORY) return handle;
+        const real = await fs.promises.readlink(`/proc/self/fd/${handle.fd}`);
+        if (!real.startsWith(`${fs.realpathSync(s.shared)}${path.sep}`)) return handle;
+        reads.set(real, reads.get(real) ?? 0);
+        return { fd: handle.fd, stat: () => handle.stat(), close: () => handle.close(),
+            read: (...args) => { reads.set(real, reads.get(real) + 1); return handle.read(...args); } };
+    } } };
+    return { reads, fsApi };
+}
+
+test('F2 changing space: a copy that fits by its one reading is made, however later readings change', async (t) => {
+    // The first reading fits the copy; every later one fits only the resume.
+    const s = setup(t);
+    seedPartial(s.paths, ARTIFACT, PARTIAL);
+    const source = s.place(ARTIFACT.file);
+    const { reads, statfs } = readings([COPY_NEED, RESUME_NEED]);
+    let readsAtCopy = null;
+    const result = await s.get({ statfs, progressIntervalMs: 0, onProgress: (p) => {
+        if (p.phase === 'copying' && readsAtCopy === null) readsAtCopy = reads.length;
+    } });
+    assert.equal(readsAtCopy, 1, 'one reading decided the copy');
+    assert.deepEqual(result.provenance, { file: ARTIFACT.file, source, method: 'copy', bytes: SIZE });
+    assert.equal(s.requests.length, 0);
+    assert.equal(fileSha(s.paths.file), ARTIFACT.sha256);
+    assert.equal(fs.existsSync(s.paths.partial), false, 'the partial went only once the copy was published');
+});
+
+test('F2 changing space: space that shrinks between candidates resumes at the next one, without reading it', async (t) => {
+    const s = setup(t);
+    const inode = seedPartial(s.paths, ARTIFACT, PARTIAL);
+    // The pinned name goes first: a same-size decoy with other bytes; then the valid file under another name.
+    const wrong = Buffer.from(PAYLOAD);
+    wrong[5] ^= 0xff;
+    const decoy = s.place(ARTIFACT.file, wrong);
+    const valid = s.place('other/valid.bin');
+    const { reads: statReads, statfs } = readings([COPY_NEED, RESUME_NEED]);
+    const { reads, fsApi } = readsPerSharedFile(s);
+    const result = await s.get({ statfs, fsApi });
+    assert.ok(reads.get(fs.realpathSync(decoy)) > 0, 'the decoy was copied and hashed');
+    assert.equal(reads.get(fs.realpathSync(valid)) ?? 0, 0, 'the second candidate was not read');
+    assert.ok(result.notes.some((note) => note.includes('do not match')), result.notes.join('; '));
+    assert.ok(result.notes.some((note) => note.includes(`${valid} does not fit`)), result.notes.join('; '));
+    assert.equal(result.provenance.method, 'download');
+    assert.deepEqual(s.requests.map((request) => request.range), [`bytes=${PARTIAL}-`]);
+    assert.equal(fs.statSync(s.paths.file).ino, inode, 'the partial was completed in place');
+    assert.equal(fileSha(s.paths.file), ARTIFACT.sha256);
+    assert.deepEqual(statReads.slice(0, 2), [COPY_NEED, RESUME_NEED], 'one reading per candidate');
+    assert.deepEqual(stagingLeft(s.paths), []);
+});
+
+test('F2 changing space: with no partial, a copy that fits by its reading is made; one that does not is refused with that reading', async (t) => {
+    const fits = setup(t);
+    fits.place(ARTIFACT.file);
+    const first = readings([COPY_NEED, 10]);
+    const copied = await fits.get({ statfs: first.statfs });
+    assert.equal(copied.provenance.method, 'copy');
+    assert.equal(first.reads.length, 1);
+
+    const low = setup(t);
+    low.place(ARTIFACT.file);
+    const second = readings([COPY_NEED - 1, COPY_NEED]);
+    const { reads, fsApi } = readsPerSharedFile(low);
+    await assert.rejects(low.get({ statfs: second.statfs, fsApi }), (err) => err.code === 'INSUFFICIENT_SPACE'
+        && err.message.includes('private copy') && err.details.required === COPY_NEED && err.details.available === COPY_NEED - 1);
+    assert.equal(second.reads.length, 1, 'the refusal gives the figures of the one reading that decided');
+    assert.equal([...reads.values()].reduce((sum, count) => sum + count, 0), 0, 'no candidate byte was read');
+    assert.deepEqual(stagingLeft(low.paths), []);
+    assert.equal(low.requests.length, 0);
+});
+
+test('F2 changing space: a full disk while copying beside a partial still pauses, keeping the partial', async (t) => {
+    const s = setup(t);
+    seedPartial(s.paths, ARTIFACT, PARTIAL);
+    s.place(ARTIFACT.file);
+    let hit = 0;
+    const fsApi = { ...fs, promises: { ...fs.promises, open: async (file, flags, mode) => {
+        const handle = await fs.promises.open(file, flags, mode);
+        if (!String(file).includes('.copy-')) return handle;
+        return { fd: handle.fd, stat: () => handle.stat(), close: () => handle.close(), sync: () => handle.sync(),
+            read: (...args) => handle.read(...args),
+            write: async () => { hit += 1; throw Object.assign(new Error('no space'), { code: 'ENOSPC' }); } };
+    } } };
+    await assert.rejects(s.get({ fsApi, statfs: async () => ({ bavail: COPY_NEED, bsize: 1 }) }),
+        (err) => err.code === 'PAUSED_ENOSPC' && err.retryable === true);
+    assert.equal(hit, 1, 'the staging write hook fired');
+    assert.deepEqual(stagingLeft(s.paths), []);
+    assert.equal(fs.statSync(s.paths.partial).size, PARTIAL);
+    assert.ok(fs.existsSync(s.paths.identity));
+    assert.equal(s.requests.length, 0);
+});

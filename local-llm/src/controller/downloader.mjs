@@ -421,12 +421,16 @@ async function freeSpace({ fsApi, statfs, dir, remaining }) {
     return { available, required, fits: available >= required };
 }
 
+function insufficientSpace({ required, available }, what) {
+    return new DownloadError('INSUFFICIENT_SPACE', `Not enough free space for ${what}`, {
+        details: { required, available },
+    });
+}
+
 async function assertFreeSpace({ fsApi, statfs, dir, remaining, what = 'the model weights' }) {
-    const { available, required, fits } = await freeSpace({ fsApi, statfs, dir, remaining });
-    if (!fits) {
-        throw new DownloadError('INSUFFICIENT_SPACE', `Not enough free space for ${what}`, {
-            details: { required, available },
-        });
+    const space = await freeSpace({ fsApi, statfs, dir, remaining });
+    if (!space.fits) {
+        throw insufficientSpace(space, what);
     }
 }
 
@@ -512,7 +516,9 @@ async function useOwnFile(ctx) {
  * existing partial and its identity record stay untouched until a verified
  * copy is published (R5). A copy that does not fit beside a partial that can
  * be resumed is not made: the partial is resumed instead, as the plan says
- * (F2). Otherwise space, write and read failures are errors (R6).
+ * (F2). One free-space measurement per candidate decides between the two, and
+ * gives a refusal its figures, so two readings cannot disagree. Otherwise
+ * space, write and read failures are errors (R6).
  */
 async function adoptCopy(ctx, candidates) {
     const { fsApi, paths, artifact, label } = ctx;
@@ -530,16 +536,16 @@ async function adoptCopy(ctx, candidates) {
         try {
             if (opened.stat.size !== artifact.size) continue;
             hashed += 1;
-            const space = { fsApi, statfs: ctx.statfs, dir: path.dirname(paths.partial), remaining: artifact.size };
-            if (!(await freeSpace(space)).fits) {
+            const space = await freeSpace({ fsApi, statfs: ctx.statfs, dir: path.dirname(paths.partial), remaining: artifact.size });
+            if (!space.fits) {
                 const have = await partialBytes(fsApi, paths, artifact, ctx.identityKeys);
                 if (have) {
                     ctx.notes.push(`${label}: a private copy of ${candidate.path} does not fit on the disk; `
                         + `resuming the partial download (${have} of ${artifact.size} bytes) instead`);
                     return null;
                 }
+                throw insufficientSpace(space, 'a private copy of the model file');
             }
-            await assertFreeSpace({ ...space, what: 'a private copy of the model file' });
             await ensureDirUnder(fsApi, paths.root, path.dirname(paths.partial));
             staging = `${paths.partial}.copy-${crypto.randomBytes(6).toString('hex')}`;
             const copied = await copyToStaging(fsApi, {
