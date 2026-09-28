@@ -12,12 +12,37 @@ import path from 'node:path';
 export const STATE_VERSION = 1;
 const MAX_REQUEST_RECORDS = 200;
 
+// Accepted Run requests by request id. Every id the request pattern allows is
+// an ordinary key, `__proto__`, `constructor` and `toString` included: the map
+// has no prototype, a record counts only as the map's own property, and it is
+// written as a data property, never through a setter.
+function defineRecord(map, requestId, record) {
+    Object.defineProperty(map, requestId, { value: record, enumerable: true, writable: true, configurable: true });
+}
+
+/** A request map holding the own entries of `entries` (as loaded from the state file). */
+export function requestMap(entries = {}) {
+    const map = Object.create(null);
+    for (const [requestId, record] of Object.entries(entries)) defineRecord(map, requestId, record);
+    return map;
+}
+
+/** The accepted record of `requestId`, or null: only an own entry counts. */
+export function acceptedRequest(requests, requestId) {
+    return typeof requestId === 'string' && requests && Object.hasOwn(requests, requestId) ? requests[requestId] : null;
+}
+
+/** Record an accepted request, whatever its id. */
+export function recordRequest(requests, requestId, record) {
+    defineRecord(requests, requestId, record);
+}
+
 export function emptyState() {
     return {
         version: STATE_VERSION,
         deployment: null,
         params: {},
-        requests: {},
+        requests: requestMap(),
         registry: [],
         // Blob digests each Ollama tag's pulls have touched, so partial
         // downloads are counted and deleted per tag.
@@ -46,7 +71,7 @@ function normalizeState(value) {
     const state = emptyState();
     if (value.deployment && typeof value.deployment === 'object') state.deployment = value.deployment;
     if (value.params && typeof value.params === 'object' && !Array.isArray(value.params)) state.params = value.params;
-    if (value.requests && typeof value.requests === 'object' && !Array.isArray(value.requests)) state.requests = value.requests;
+    if (value.requests && typeof value.requests === 'object' && !Array.isArray(value.requests)) state.requests = requestMap(value.requests);
     if (Array.isArray(value.registry)) state.registry = value.registry;
     if (value.ollamaPulls && typeof value.ollamaPulls === 'object' && !Array.isArray(value.ollamaPulls)) {
         state.ollamaPulls = value.ollamaPulls;
@@ -79,6 +104,7 @@ export function createStateStore({ dataDir, fsApi = fs } = {}) {
     }
 
     function save(state) {
+        // Own entries only; Object.fromEntries defines each as a data property, so a `__proto__` id stays a key.
         const requests = Object.entries(state.requests || {})
             .sort(([, left], [, right]) => String(right.at || '').localeCompare(String(left.at || '')))
             .slice(0, MAX_REQUEST_RECORDS);

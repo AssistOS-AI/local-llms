@@ -309,7 +309,7 @@ for (const [read, label] of [[1, 'profile'], [2, 'admission']]) {
                 // A Stop or Cancel that stopped a pending Run succeeds, and leaves no deployment.
                 assert.equal(answer.deployment, null);
                 assert.equal(h.controller.state.deployment, null);
-                assert.deepEqual(h.controller.state.requests, {});
+                assert.deepEqual(Object.keys(h.controller.state.requests), []);
                 assert.deepEqual(h.controller.state.params, {});
                 assert.equal(h.downloads.length, 0);
                 assert.equal(h.started.length, 0);

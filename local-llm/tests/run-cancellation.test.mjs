@@ -146,7 +146,7 @@ test('a cancelled queued Run leaves no request id, parameters or deployment, so 
     assert.equal(outcome(await b), 'cancelled');
     await stopping;
     assert.equal(h.controller.state.deployment, null);
-    assert.deepEqual(h.controller.state.requests, {});
+    assert.deepEqual(Object.keys(h.controller.state.requests), []);
     assert.deepEqual(h.controller.state.params, {});
     assert.equal(h.downloads.length, 0);
     assert.equal(h.started.length, 0);
@@ -183,7 +183,7 @@ test('a Cancel while a Run waits behind another command cancels it and succeeds;
     assert.equal(cancelled.error, undefined, 'the Cancel stopped a queued Run, so it succeeds');
     assert.equal(cancelled.value.deployment, null);
     assert.equal(h.downloads.length, 0);
-    assert.deepEqual(h.controller.state.requests, {});
+    assert.deepEqual(Object.keys(h.controller.state.requests), []);
     // With nothing submitted and nothing downloading, a Cancel is still not_downloading.
     assert.equal((await settle(h.controller.cancelDownload())).error, 'not_downloading');
 });

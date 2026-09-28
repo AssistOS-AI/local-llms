@@ -43,7 +43,7 @@ import { UNIFIED, profileOf } from './profiles.mjs';
 import { createRunnerInstaller, runTool } from './runnerInstaller.mjs';
 import { loadRunnerLock } from './runnerLock.mjs';
 import { createLogBuffer, parseRunnerReport, startRunnerProcess } from './runnerProcess.mjs';
-import { createStateStore, reconcileAfterRestart } from './stateStore.mjs';
+import { acceptedRequest, createStateStore, reconcileAfterRestart, recordRequest } from './stateStore.mjs';
 import { createWeightStores } from './weightStores.mjs';
 import { walkShared } from './workspaceReuse.mjs';
 import { DRAIN_QUEUE_WAIT_MS, DRAIN_RUNNER_GRACE_MS } from '../drainBudget.mjs';
@@ -1150,7 +1150,7 @@ export function createController({
                 throw new LocalLlmError('invalid_request', 'requestId must be 8-128 letters, digits, dash or underscore.');
             }
             // The browser client may retry a timed-out call: the same request is a no-op.
-            if (state.requests[requestId]) {
+            if (acceptedRequest(state.requests, requestId)) {
                 return { duplicate: true, deployment: publicDeployment() };
             }
             // Submitted before a Stop or Cancel: nothing is read or recorded.
@@ -1184,7 +1184,7 @@ export function createController({
     // duplicate, never cancelled, so it is not new work.
     function invalidateSubmittedRuns() {
         const pending = [...submittedRuns].some(({ requestId }) => typeof requestId === 'string'
-            && REQUEST_ID_RE.test(requestId) && !state.requests[requestId]);
+            && REQUEST_ID_RE.test(requestId) && !acceptedRequest(state.requests, requestId));
         stopGeneration += 1;
         submittedRuns.clear();
         planning?.abort();
@@ -1273,7 +1273,7 @@ export function createController({
             createdAt: at,
             updatedAt: at,
         };
-        state.requests[requestId] = { deploymentId: state.deployment.id, at };
+        recordRequest(state.requests, requestId, { deploymentId: state.deployment.id, at });
         save();
         startJob(state.deployment, model);
         return { accepted: true, deployment: publicDeployment() };
