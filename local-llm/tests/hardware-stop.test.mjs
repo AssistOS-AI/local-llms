@@ -240,6 +240,22 @@ test('without a stop, a slow final snapshot is waited for and the runner starts'
     await h.controller.stop();
 });
 
+test('a Run command in its slow admission snapshot is stopped when the drain starts, not after the command wait', async (t) => {
+    // Snapshot 1 decides the profile; snapshot 2 is the Run's admission, inside the command queue.
+    const h = harness(t, { slowRead: 2 });
+    const running = h.controller.run({ requestId: 'request-drain-admit', modelId: 'gpt-oss-20b', runnerId: 'llama.cpp' });
+    await until(() => h.reads.length === 2, 'the admission snapshot to start');
+    const began = Date.now();
+    await h.controller.drain();
+    const elapsed = Date.now() - began;
+    // The command wait is 1 s; a query stopped only after it would make the drain take that long.
+    assert.ok(elapsed < 500, `the drain took ${elapsed} ms`);
+    await assert.rejects(running, { code: 'shutting_down' });
+    assert.equal(h.reads[1].signal.aborted, true);
+    assert.equal(h.controller.state.deployment, null, 'nothing was recorded');
+    assert.equal(h.started.length, 0);
+});
+
 test('a drain stops queries outside the job too, and a command that meets the drain refuses as shutting down', async (t) => {
     const h = harness(t, { slowRead: 1, unreaped: () => [424242] });
     const overview = h.controller.overview();
