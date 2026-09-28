@@ -254,6 +254,10 @@ test('a runner the image lacks is not available on this platform, and Run refuse
     const gpt = overview.models.find((model) => model.id === 'gpt-oss-20b');
     assert.deepEqual(gpt.weights.gguf.runners, ['llama.cpp']);
     assert.match(gpt.runners.ollama.admission.reason, /not available on this platform/);
+    // Availability comes before the operator switch: LM Studio is off here and also absent from the image.
+    assert.match(gpt.runners.lmstudio.admission.reason, /not available on this platform/);
+    await assert.rejects(() => h.controller.run({ modelId: 'gpt-oss-20b', runnerId: 'lmstudio', requestId: 'request-0003' }),
+        (error) => error.code === 'runner_unavailable');
 });
 
 test('a GPU the image\'s runners were not built for is refused before any download', async (t) => {

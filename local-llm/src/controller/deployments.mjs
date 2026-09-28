@@ -463,7 +463,9 @@ export function createController({
                     download: disk,
                     params,
                     context: params && definition.describeContext ? definition.describeContext(params, { model, profile }) : null,
-                    admission: !gate.enabled ? disabledAdmission(gate) : paramError
+                    admission: !availabilityOf(definition).available
+                        ? admitHere({ definition, model, source, params: {}, snap })
+                        : !gate.enabled ? disabledAdmission(gate) : paramError
                         ? { status: 'incompatible', reason: paramError, estimate: {}, warnings: [] }
                         : admitHere({ definition, model, source, params: params || {}, snap, remainingDownloadBytes: remaining }),
                 };
