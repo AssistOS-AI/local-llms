@@ -1,7 +1,0 @@
-{
-  "name": "local-llms-agent",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "description": "Ploinky local LLM agent dependency marker; Ploinky merges global AgentServer dependencies for this agent."
-}

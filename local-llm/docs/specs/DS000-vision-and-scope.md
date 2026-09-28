@@ -3,7 +3,7 @@ id: DS000
 title: Vision and Scope
 status: accepted
 owner: local-llm
-summary: What local-llm is, how it differs from the legacy agents, its runners (LM Studio for internal use only), and what it deliberately leaves out.
+summary: What local-llm is, the retired shared-image agents and the services that went with them, its runners (LM Studio for internal use only), and what it deliberately leaves out.
 ---
 
 # DS000 Vision and Scope
@@ -14,9 +14,20 @@ summary: What local-llm is, how it differs from the legacy agents, its runners (
 
 ## Core Content
 
-### Relation to the legacy agents
+### The retired shared-image agents
 
-The repository's other twelve agents share the CPU image `assistos/local-llms`, contain no application source and start one fixed model each (repository DS001, DS002). `local-llm` is a separate agent with its own image (`container-image-builds/images/local-llm`), its own Node.js source under `local-llm/src/`, and its own tests under `local-llm/tests/`. The legacy agents, their image and their dispatcher are unchanged. The repository-level statement that agent directories hold no source code describes the legacy agents only.
+Until 2026-09-28 the repository also held twelve legacy agents that shared the CPU image `assistos/local-llms`, contained no application source and started one fixed model each: `local-llms-manager` (model registration and profile lifecycle) and eleven model agents, `language-translation`, `relevance`, `function-selection`, `function-invocation`, `tool-composition-local`, `base-local`, `local`, `planning-local`, `validated-planning-local`, `adaptive-local` and `coding-local`. They were retired with their image definition (`Dockerfile`), `scripts/`, `catalog/`, `tests/validate.mjs`, their specifications (repository `docs/specs` DS000–DS011) and their HTML documentation (owner's decision 10 of the multi-arch plan). Their last revision is commit [`03697765`](https://github.com/AssistOS-AI/local-llms/tree/03697765a35d92adf4c7db1be9616c0b5a64cb63), where the code and specifications remain readable. local-llm replaces none of them with a compatibility layer.
+
+What disappears with them:
+
+| Service | Was | Replacement |
+| --- | --- | --- |
+| Translation | `language-translation`: a transformers seq2seq service (facebook/m2m100_418M) with its own translation API | none |
+| Relevance scoring and reranking | `relevance`: a cross-encoder / sentence-transformers scoring API (Qwen/Qwen3-Reranker-0.6B) | none |
+| CPU-only chat models | the ten role agents, each an Ollama or llama.cpp model on the CPU in the shared image | none: local-llm needs an NVIDIA GPU and has no CPU fallback |
+| Model and profile management | `local-llms-manager`'s registration, startup-script and profile tools | local-llm's own catalog, registry and tools (DS001, DS002) |
+
+A workspace that enabled a legacy agent loses it at its next repository update: Ploinky can no longer find the agent's manifest. No stored data is deleted by this: models the legacy agents downloaded stay under the workspace's `.ploinky/data/local-llms/`, and local-llm's own models and state under its `/data` are untouched. The `assistos/local-llms` image is no longer built from this repository; already published tags are not removed.
 
 ### Goals
 
@@ -59,13 +70,13 @@ The agent uses none of what LM Studio adds on top of llama.cpp: its native REST 
 
 ### Out of scope
 
-A CPU fallback and a shared host model cache. Each needs its own decision.
+A CPU fallback, translation and reranking services (retired above), and a shared host model cache. Each needs its own decision.
 
 ## Decisions & Questions
 
 ### Question #1: Why a separate agent instead of extending the shared image?
 
-Response: The shared image is CPU-only and arm64-first, starts one fixed model per agent, and its dispatcher is shell. GPU runners, on-demand weights, admission and a Settings UI need a long-running controller with state; keeping the legacy agents unchanged avoids regressions for their users.
+Response: The shared image was CPU-only and arm64-first, started one fixed model per agent, and its dispatcher was shell. GPU runners, on-demand weights, admission and a Settings UI need a long-running controller with state, so local-llm began as a separate agent beside the legacy ones, and the legacy agents were later retired (above).
 
 ## Conclusion
 

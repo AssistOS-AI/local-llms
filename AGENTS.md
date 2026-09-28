@@ -2,45 +2,30 @@
 
 ## Scope
 
-This repository provides twelve Ploinky agents that run local large language models as MCP servers inside a shared Docker image (`assistos/local-llms`). One manager agent handles model registration and profile lifecycle; eleven model-serving agents cover translation, relevance scoring, function routing, general chat, planning, and coding.
-
-It also holds `local-llm/`, a separate GPU-backed agent with its own image (`container-image-builds/images/local-llm`), its own Node.js source and tests, and its own specifications (`local-llm/docs/specs/matrix.md`, numbered independently of `docs/specs/`). The rules below about the shared image, shell-only runtime logic and the DS000–DS011 sequence apply to the twelve shared-image agents; `local-llm/` is tested from the repository root with `node --test 'local-llm/tests/*.test.mjs'` (or `npm --prefix local-llm test`); a bare directory argument does not work on Node 24.
+This repository provides one Ploinky agent, `local-llm/`: it runs open-weight LLMs on the machine's NVIDIA GPU, with runners chosen per model (llama.cpp, ik_llama.cpp, Ollama, vLLM, TabbyAPI, and LM Studio for internal use only), on x86 hosts with a GPU of their own and on NVIDIA DGX Spark (arm64, unified memory). Its image is built in `container-image-builds/images/local-llm` (amd64 `Dockerfile`, arm64 `Dockerfile.arm64`, published as one multi-arch index). The twelve shared-image agents the repository held before were retired; `local-llm/docs/specs/DS000-vision-and-scope.md` says what went with them.
 
 ## Mandatory Reading Order
 
 1. `CLAUDE.md` — Git policy and repository-level instructions.
-2. `docs/specs/DS001-coding-style.md` — Coding style, source layout, language rules, and test organization.
-3. `docs/specs/matrix.md` (via `docs/specsLoader.html?spec=matrix.md`) — Full specification index.
-4. `docs/index.html` — HTML documentation with architecture, agent table, and runtime details.
+2. `local-llm/docs/specs/DS006-coding-style.md` — Coding style, source layout, language rules, and test organization.
+3. `local-llm/docs/specs/matrix.md` — Full specification index (DS000–DS006).
 
 ## Repository Rules
 
-- **DS specifications are the source of truth.** When source code changes, both the HTML documentation and the DS specifications must be updated to reflect the change.
-- **Coding style authority** is `docs/specs/DS001-coding-style.md`. Shell scripts use POSIX `sh` with `set -e`. Python services are single-file Flask apps. Tests use `node:test`. All JSON uses 2-space indentation.
+- **DS specifications are the source of truth.** When source code changes, the DS specifications under `local-llm/docs/specs/` must be updated in the same change. There is no separate HTML documentation.
+- **Coding style authority** is `local-llm/docs/specs/DS006-coding-style.md`. The agent is Node.js ESM; tests use `node:test`; all JSON uses 2-space indentation.
 - **All documentation, specifications, and comments must be written in English.**
-- **DS numbering must remain gap-free.** The current sequence runs DS000 through DS011.
+- **DS numbering must remain gap-free.** The sequence runs DS000 through DS006.
 - **Decisions & Questions** in DS files use numbered question subchapters. Rationale lives inside the affected DS files rather than in a separate decision log.
 - **Git policy**: No `codex/` branch prefixes. No AI assistant co-author trailers. Commits appear human-authored.
-- **Test command**: `node --test tests/validate.mjs` (123 tests, no Docker or network required).
-- **Additional checks**: `sh -n scripts/*.sh scripts/runners/*.sh` and `python3 -m py_compile scripts/services/*.py`.
-
-## Runtime Defaults
-
-- **Shared image**: `assistos/local-llms:latest`
-- **Start command**: `/opt/local-llms/scripts/start-agent.sh`
-- **Volume mount**: `.ploinky/data/local-llms` → `/data/local-llms`
-- **Default startup**: Manager enables `function-selection` and `function-invocation` with `no-wait`.
+- **Test command**, from the repository root: `node --test 'local-llm/tests/*.test.mjs'` (or `npm --prefix local-llm test`). A bare directory argument does not work on Node 24. No Docker, GPU or network is required.
 
 ## Key Paths
 
-- `Dockerfile` — Shared Docker image build.
-- `catalog/backends.json` — Backend definitions (ports, probes, storage).
-- `catalog/agents/*.json` — Per-agent model catalog with schemas under `catalog/schemas/`.
-- `scripts/start-agent.sh` — Startup orchestration (resource check → runner → readiness → AgentServer).
-- `scripts/dispatcher.sh` — MCP tool dispatcher (envelope unwrap, validation, routing, registry).
-- `scripts/runners/*.sh` — Per-backend runner scripts.
-- `scripts/services/*.py` — Python Flask services (translation, reranker).
-- `tests/validate.mjs` — Structural and behavioral test suite.
-- `docs/index.html` — HTML documentation entry point.
-- `docs/specs/matrix.md` — Specification matrix.
-- `docs/specsLoader.html` — Specs viewer.
+- `local-llm/manifest.json` — the agent's manifest (image pin, GPU declaration, chat endpoint).
+- `local-llm/src/` — controller, runner adapters, chat responder.
+- `local-llm/catalog/models.json` — seed model catalog (schema `local-llm.catalog/v3`).
+- `local-llm/IDE-plugins/` — the Local LLMs dashboard and Settings.
+- `local-llm/tests/` — tests.
+- `local-llm/docs/specs/` — specifications.
+- `docs/handoff-local-llms.md` — short handoff for a new session.

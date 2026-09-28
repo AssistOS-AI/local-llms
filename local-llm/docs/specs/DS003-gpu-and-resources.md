@@ -10,7 +10,7 @@ summary: Manifest-declared GPU access and the operator override, admission, runn
 
 ## Introduction
 
-This specification defines how `local-llm` reaches the GPU, how it decides whether a model fits before downloading anything, and how the runner processes are isolated. It replaces the operator-flag approach of repository DS010 with a grant that Ploinky enforces.
+This specification defines how `local-llm` reaches the GPU, how it decides whether a model fits before downloading anything, and how the runner processes are isolated. It replaces the operator-flag approach of the retired repository DS010 ([at `03697765`](https://github.com/AssistOS-AI/local-llms/blob/03697765a35d92adf4c7db1be9616c0b5a64cb63/docs/specs/DS010-gpu-resource-policy.md)) with a grant that Ploinky enforces.
 
 ## Core Content
 
@@ -71,6 +71,8 @@ Estimates for llama.cpp come from the model's measured memory profile when the c
 | Reaped on stop and drain | Each runner leads its own process group. Stop sends SIGTERM to the group, then SIGKILL after the grace period; when the runner exits, anything left in its group is killed, so helper processes a runner starts never outlive it |
 
 ### Reuse from repository DS010
+
+The retired repository specification is kept at commit [`03697765`](https://github.com/AssistOS-AI/local-llms/blob/03697765a35d92adf4c7db1be9616c0b5a64cb63/docs/specs/DS010-gpu-resource-policy.md); the table records what local-llm took from it.
 
 | DS010 rule | local-llm |
 | --- | --- |

@@ -10,7 +10,7 @@ summary: Catalog, registry, on-demand download, the deployment state machine, an
 
 ## Introduction
 
-This specification defines how a model moves from a catalog entry to a running deployment and back, and what survives a restart. It reuses the catalog-plus-registry split of repository DS008 and replaces its download and start rules.
+This specification defines how a model moves from a catalog entry to a running deployment and back, and what survives a restart. It reuses the catalog-plus-registry split of the retired repository DS008 ([at `03697765`](https://github.com/AssistOS-AI/local-llms/blob/03697765a35d92adf4c7db1be9616c0b5a64cb63/docs/specs/DS008-model-lifecycle.md)) and replaces its download and start rules.
 
 ## Core Content
 
@@ -64,6 +64,8 @@ The job takes an immutable copy of the model source when it starts. A registry e
 State is written atomically to `/data/state/controller.json`. After a restart, `downloading`, `verifying` and `pulling` become `paused`, and `starting`, `loading`, `ready` and `stopping` become `idle`, because the runner process did not survive. Nothing resumes automatically; the next explicit Run resumes a paused download with `Range`.
 
 ### Reuse from repository DS008
+
+The retired repository specification is kept at commit [`03697765`](https://github.com/AssistOS-AI/local-llms/blob/03697765a35d92adf4c7db1be9616c0b5a64cb63/docs/specs/DS008-model-lifecycle.md); the table records what local-llm took from it.
 
 | DS008 rule | local-llm |
 | --- | --- |
