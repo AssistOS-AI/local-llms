@@ -238,3 +238,34 @@ test('duplicates, busy and replace keep their meaning across a Stop', async (t) 
     assert.equal(h.downloads.length, 2, 'no download for duplicates');
     assert.equal(h.started.length, 2);
 });
+
+test('a queued duplicate of an accepted request is not new work: a Cancel with nothing else pending stays not_downloading', async (t) => {
+    const h = harness(t);
+    assert.equal(outcome(await run(h, 'request-accepted-x')), 'accepted');
+    await until(() => h.controller.state.deployment?.phase === 'ready', 'ready');
+    h.removal.gate = deferred();
+    const deleting = settle(h.controller.deleteWeights(OTHER_WEIGHTS));
+    await h.removal.entered.promise;
+    const queuedDuplicate = run(h, 'request-accepted-x');
+    const cancelling = settle(h.controller.cancelDownload());
+    h.removal.gate.resolve();
+    await deleting;
+    assert.equal(outcome(await queuedDuplicate), 'duplicate');
+    assert.equal((await cancelling).error, 'not_downloading', 'the duplicate was not cancelled work, and nothing downloads');
+    // The ready runner is untouched.
+    assert.equal(h.controller.state.deployment.phase, 'ready');
+    assert.equal(h.started[0].stopped, undefined);
+    // Control: with a new Run queued instead, the same Cancel succeeds and cancels it.
+    h.removal.gate = deferred();
+    h.removal.entered = deferred();
+    const deletingAgain = settle(h.controller.deleteWeights(OTHER_WEIGHTS));
+    await h.removal.entered.promise;
+    const queuedNew = run(h, 'request-new-y', { replace: true });
+    const cancellingNew = settle(h.controller.cancelDownload());
+    h.removal.gate.resolve();
+    await deletingAgain;
+    assert.equal(outcome(await queuedNew), 'cancelled');
+    assert.equal((await cancellingNew).error, undefined);
+    assert.equal(h.controller.state.deployment.requestId, 'request-accepted-x');
+    assert.equal(h.started.length, 1);
+});

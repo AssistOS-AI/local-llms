@@ -193,10 +193,10 @@ export function createController({
     let planning = null;
     // Stop and Cancel invalidate every Run submitted before them, queued or
     // running (DS001): a Run keeps the generation it was submitted in, and each
-    // Stop or Cancel starts a new one. `submittedRuns` counts the current
+    // Stop or Cancel starts a new one. `submittedRuns` holds the current
     // generation's Runs that have not finished their command yet.
     let stopGeneration = 0;
-    let submittedRuns = 0;
+    const submittedRuns = new Set();
     // Every hardware snapshot stops when the agent drains (DS001).
     const hardwareStop = new AbortController();
     // One runner install at a time, beside the deployment job.
@@ -1141,7 +1141,8 @@ export function createController({
         // The Run's generation is taken when it is submitted, before it waits in the queue:
         // a Stop or Cancel invoked after this, even while the Run still waits, invalidates it.
         const generation = stopGeneration;
-        submittedRuns += 1;
+        const submission = { requestId };
+        submittedRuns.add(submission);
         const stale = () => generation !== stopGeneration;
         const cancelled = () => new LocalLlmError('cancelled', 'The Run was stopped before it started.');
         const command = queue.run(async () => {
@@ -1171,17 +1172,21 @@ export function createController({
             }
         });
         const settled = () => {
-            if (!stale()) submittedRuns -= 1;
+            submittedRuns.delete(submission);
         };
         command.then(settled, settled);
         return command;
     }
 
-    // A Stop or Cancel invalidates every Run submitted so far; it reports whether any was still pending or queued.
+    // A Stop or Cancel invalidates every Run submitted so far. It reports
+    // whether that cancelled new work: a Run whose request id is valid and not
+    // already accepted. A queued retry of an accepted request is answered as a
+    // duplicate, never cancelled, so it is not new work.
     function invalidateSubmittedRuns() {
-        const pending = submittedRuns > 0;
+        const pending = [...submittedRuns].some(({ requestId }) => typeof requestId === 'string'
+            && REQUEST_ID_RE.test(requestId) && !state.requests[requestId]);
         stopGeneration += 1;
-        submittedRuns = 0;
+        submittedRuns.clear();
         planning?.abort();
         return pending;
     }

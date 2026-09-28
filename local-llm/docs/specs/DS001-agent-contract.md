@@ -70,7 +70,7 @@ Every tool is declared in `mcp-config.json` with `command: "node"`, `args: ["/co
 - **Outcome.**
   - Every invalidated Run fails with `cancelled`, or with `shutting_down` when the drain met it in a snapshot.
   - It records nothing (no deployment, request id or saved parameters) and starts no download or runner, so the same request can be sent again.
-  - A Stop succeeds. A Cancel that invalidated at least one Run succeeds even when nothing is downloading.
+  - A Stop succeeds. A Cancel that invalidated at least one Run of new work (a request id not already accepted) succeeds even when nothing is downloading. A queued retry of an accepted request is not new work: it is answered as a duplicate, never cancelled, and does not make a Cancel succeed.
   - A second Stop or Cancel right after finds nothing left of those Runs.
 - **Answers that come first.** A request id that was already accepted is answered as a duplicate, as always, even if its retry was queued before a Stop. Busy and replace keep their meaning for Runs that go ahead.
 - **Checks.** A Run checks for a Stop or Cancel after every step that waits, and last just before it records anything; from there to its job's start nothing waits.
