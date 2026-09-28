@@ -23,7 +23,7 @@ import {
     verifyArtifact,
 } from '../src/controller/downloader.mjs';
 import { createWeightStores } from '../src/controller/weightStores.mjs';
-import { walkShared } from '../src/controller/workspaceReuse.mjs';
+import { anchorStore, createBound, walkShared } from '../src/controller/workspaceReuse.mjs';
 
 const SIZE = 256 * 1024 + 7;
 const CHUNK = 64 * 1024;
@@ -636,5 +636,87 @@ test('F2 changing space: a full disk while copying beside a partial still pauses
     assert.deepEqual(stagingLeft(s.paths), []);
     assert.equal(fs.statSync(s.paths.partial).size, PARTIAL);
     assert.ok(fs.existsSync(s.paths.identity));
+    assert.equal(s.requests.length, 0);
+});
+
+// ------------------------------------------- staging descriptors on failure paths
+
+// An fs that records every descriptor it opens, with `readlink` answering
+// lookups (a throw, another path, or the real one).
+function stagingOpens(readlink) {
+    const opened = [];
+    const fsApi = { ...fs, promises: { ...fs.promises,
+        open: async (...args) => { const handle = await fs.promises.open(...args); opened.push(handle); return handle; },
+        readlink: (target) => readlink(target),
+    } };
+    return { opened, fsApi };
+}
+const isOpen = (handle) => handle.stat().then(() => true, () => false);
+
+test('createBound closes its new descriptor when /proc/self/fd cannot be read, and still fails closed', async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-createbound-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const anchor = await anchorStore(fs, dir);
+    let hook = 0;
+    const { opened, fsApi } = stagingOpens(async () => { hook += 1; throw Object.assign(new Error('injected /proc EIO'), { code: 'EIO' }); });
+    await assert.rejects(createBound(fsApi, anchor, path.join(dir, 'staged')),
+        (err) => err.code === 'UNSAFE_PATH' && err.message.includes('/proc/self/fd'));
+    assert.equal(hook, 1, 'the readlink hook fired');
+    assert.equal(opened.length, 1);
+    assert.equal(await isOpen(opened[0]), false, 'the descriptor was closed');
+});
+
+test('createBound closes its new descriptor when it is not bound to the asked path; a bound one is returned open', async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-createbound-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const anchor = await anchorStore(fs, dir);
+    const elsewhere = stagingOpens(async () => path.join(anchor.real, 'somewhere-else'));
+    await assert.rejects(createBound(elsewhere.fsApi, anchor, path.join(dir, 'staged-a')),
+        (err) => err.code === 'UNSAFE_PATH' && err.message.includes('symbolic link'));
+    assert.equal(await isOpen(elsewhere.opened[0]), false);
+
+    // Normal ownership: the bound descriptor is returned open, readable and writable, for the caller to close.
+    const bound = stagingOpens((target) => fs.promises.readlink(target));
+    const handle = await createBound(bound.fsApi, anchor, path.join(dir, 'staged-b'));
+    try {
+        assert.equal(handle, bound.opened[0]);
+        await handle.write(Buffer.from('abc'), 0, 3, 0);
+        const back = Buffer.alloc(3);
+        await handle.read(back, 0, 3, 0);
+        assert.equal(back.toString(), 'abc');
+    } finally {
+        await handle.close();
+    }
+});
+
+test('a copy whose staging descriptor cannot be confirmed fails closed, leaks no descriptor, and keeps the partial', async (t) => {
+    const s = setup(t);
+    seedPartial(s.paths, ARTIFACT, PARTIAL);
+    s.place(ARTIFACT.file);
+    const staging = [];
+    let hook = 0;
+    const fsApi = { ...fs, promises: { ...fs.promises,
+        open: async (file, flags, mode) => {
+            const handle = await fs.promises.open(file, flags, mode);
+            if (String(file).includes('.copy-')) staging.push(handle);
+            return handle;
+        },
+        // Only the staging descriptor's lookup fails; every other open is confirmed as usual.
+        readlink: async (target) => {
+            if (staging.some((handle) => target === `/proc/self/fd/${handle.fd}`)) {
+                hook += 1;
+                throw Object.assign(new Error('injected /proc EIO'), { code: 'EIO' });
+            }
+            return fs.promises.readlink(target);
+        },
+    } };
+    await assert.rejects(s.get({ fsApi }), (err) => err.code === 'UNSAFE_PATH');
+    assert.equal(hook, 1, 'the staging readlink hook fired');
+    assert.equal(staging.length, 1);
+    assert.equal(await isOpen(staging[0]), false, 'the staging descriptor was closed');
+    assert.deepEqual(stagingLeft(s.paths), [], 'the staging file was removed');
+    assert.equal(fs.statSync(s.paths.partial).size, PARTIAL);
+    assert.ok(fs.existsSync(s.paths.identity));
+    assert.equal(fs.existsSync(s.paths.meta), false);
     assert.equal(s.requests.length, 0);
 });

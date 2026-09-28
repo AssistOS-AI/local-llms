@@ -240,15 +240,21 @@ export async function openBound(fsApi, anchor, file, { signal } = {}) {
 /**
  * Create a new file (never an existing one or a link), bound to `file` under
  * the anchored store, open for writing and for reading back what was written.
+ * The descriptor is the caller's only when it is returned; on any failure,
+ * including an unreadable /proc/self/fd, it is closed here.
  */
 export async function createBound(fsApi, anchor, file) {
     const expected = boundPath(anchor, file);
     const handle = await fsApi.promises.open(file, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK, 0o644);
-    if (!(await confirmBound(fsApi, handle, expected))) {
+    try {
+        if (!(await confirmBound(fsApi, handle, expected))) {
+            throw unsafePath('A model staging file was created through a symbolic link');
+        }
+        return handle;
+    } catch (error) {
         await handle.close().catch(() => {});
-        throw unsafePath('A model staging file was created through a symbolic link');
+        throw error;
     }
-    return handle;
 }
 
 /** A download's partial file: appended to and read back through one bound descriptor. */
