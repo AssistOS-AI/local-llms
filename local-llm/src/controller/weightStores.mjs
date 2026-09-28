@@ -1,6 +1,7 @@
 // Where each kind of weights lives and how it is pinned, inspected, fetched
 // and deleted. A source's `type` selects its store: `huggingface` is one GGUF
-// file that the controller downloads before the runner starts; `ollama` is a
+// file, or every shard of a split GGUF, that the controller downloads before
+// the runner starts; `ollama` is a
 // library tag that the Ollama runner pulls itself once it is running;
 // `hf-snapshot` is a directory of files (safetensors for vLLM, EXL3 for
 // TabbyAPI) that the controller downloads file by file.
@@ -22,6 +23,7 @@ import {
     resolveHuggingFaceSnapshot,
     snapshotPaths,
 } from './downloader.mjs';
+import { splitGgufFiles, splitGgufName } from './catalog.mjs';
 import { deleteOllamaModel, deleteOllamaPartials, partialPullBytes, readOllamaManifest } from './ollamaStore.mjs';
 
 export function createWeightStores({
@@ -44,50 +46,96 @@ export function createWeightStores({
     const ollamaModels = path.join(dataDir, 'models', 'ollama');
     const hfRoot = path.join(dataDir, 'models', 'hf');
 
+    // One file, or every shard of a split GGUF (DS002), each as the downloader's artifact.
+    const filesOf = (source) => (source.shards
+        ? source.shards.map((shard) => ({ ...source, shards: undefined, file: shard.file, size: shard.size, sha256: shard.sha256 }))
+        : [source]);
+
     const huggingface = Object.freeze({
         type: 'huggingface',
         fetchedBy: 'controller',
-        key: (source) => `gguf:${source.repo}@${source.commit}/${source.file}`,
-        isPinned: (source) => Boolean(source.commit),
+        // A split GGUF is one artifact: its commit, first shard and shard count.
+        key: (source) => `gguf:${source.repo}@${source.commit}/${source.file}${source.shards ? `#${source.shards.length}` : ''}`,
+        isPinned: (source) => Boolean(source.commit) && (!splitGgufName(source.file) || Array.isArray(source.shards)),
         async state(source) {
-            if (!source.commit) return { state: 'unpinned', bytes: 0, total: null };
-            const inspected = await inspect({ root: ggufRoot, artifact: source });
-            return { ...inspected, total: source.size };
+            if (!huggingface.isPinned(source)) return { state: 'unpinned', bytes: 0, total: null };
+            if (!source.shards) {
+                const inspected = await inspect({ root: ggufRoot, artifact: source });
+                return { ...inspected, total: source.size };
+            }
+            // The set is complete only when every shard is; bytes are counted over the set.
+            const shards = [];
+            for (const file of filesOf(source)) shards.push(await inspect({ root: ggufRoot, artifact: file }));
+            const bytes = shards.reduce((sum, shard) => sum + (shard.bytes || 0), 0);
+            const all = (value) => shards.every((shard) => shard.state === value);
+            const stateOf = all('complete') ? 'complete' : all('absent') ? 'absent' : 'partial';
+            return { state: stateOf, bytes, total: source.size, ...(source.shards ? { shards: shards.length } : {}) };
         },
         async fetch({ artifact, signal, onProgress }) {
-            const result = await download({
-                artifact,
-                root: ggufRoot,
-                token: env.HF_TOKEN || '',
-                baseUrl: hfBaseUrl,
-                onProgress,
-                signal,
-            });
-            return { path: result.path, bytes: artifact.size, bytesTransferred: result.bytesTransferred };
+            // Shard by shard into one directory; progress counts the whole set.
+            let done = 0;
+            let transferred = 0;
+            let first = null;
+            const files = [];
+            for (const file of filesOf(artifact)) {
+                const offset = done;
+                const result = await download({
+                    artifact: file,
+                    root: ggufRoot,
+                    token: env.HF_TOKEN || '',
+                    baseUrl: hfBaseUrl,
+                    onProgress: (progress) => onProgress?.({
+                        ...progress,
+                        bytes: offset + (progress.bytes || 0),
+                        total: artifact.size,
+                        transferred: transferred + (progress.transferred || 0),
+                    }),
+                    signal,
+                });
+                first ??= result.path;
+                files.push(result.path);
+                done += file.size;
+                transferred += result.bytesTransferred || 0;
+            }
+            return { path: first, files, bytes: artifact.size, bytesTransferred: transferred };
         },
         async remove(source) {
-            return source.commit ? remove({ root: ggufRoot, artifact: source }) : 0;
+            if (!source.commit) return 0;
+            let freed = 0;
+            for (const file of filesOf(source)) freed += await remove({ root: ggufRoot, artifact: file });
+            return freed;
         },
         // Pinning reads Hugging Face metadata only; no weights are downloaded.
         async pin(source) {
-            if (source.commit) return source;
-            const resolved = await resolveHf({
+            if (huggingface.isPinned(source)) return source;
+            const resolve = (file, revision) => resolveHf({
                 repo: source.repo,
-                file: source.file,
-                revision: source.revision || 'main',
+                file,
+                revision,
                 token: env.HF_TOKEN || '',
                 baseUrl: hfBaseUrl,
             });
-            return { ...source, commit: resolved.commit, size: resolved.size, sha256: resolved.sha256 };
+            const resolved = await resolve(source.file, source.revision || 'main');
+            const files = splitGgufFiles(source.file);
+            if (!files) return { ...source, commit: resolved.commit, size: resolved.size, sha256: resolved.sha256 };
+            // Every shard at the same commit.
+            const shards = [{ file: source.file, size: resolved.size, sha256: resolved.sha256 }];
+            for (const file of files.slice(1)) {
+                const next = await resolve(file, resolved.commit);
+                shards.push({ file, size: next.size, sha256: next.sha256 });
+            }
+            return { ...source, commit: resolved.commit, size: shards.reduce((sum, shard) => sum + shard.size, 0), shards };
         },
         // An update keeps the pinned commit while repository, file and
         // revision are unchanged; it never silently re-resolves a branch.
         carryPin(next, previous) {
             if (next.commit || previous?.type !== 'huggingface' || !previous.commit) return next;
             if (next.repo !== previous.repo || next.file !== previous.file || next.revision !== previous.revision) return next;
-            return { ...next, commit: previous.commit, size: previous.size, sha256: previous.sha256 };
+            return previous.shards
+                ? { ...next, commit: previous.commit, size: previous.size, shards: previous.shards }
+                : { ...next, commit: previous.commit, size: previous.size, sha256: previous.sha256 };
         },
-        paths: (source) => artifactPaths({ root: ggufRoot, artifact: source }),
+        paths: (source) => artifactPaths({ root: ggufRoot, artifact: filesOf(source)[0] }),
     });
 
     function manifestOrNull(tag) {

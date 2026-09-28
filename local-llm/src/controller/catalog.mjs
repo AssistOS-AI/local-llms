@@ -64,22 +64,83 @@ function onlyKeys(value, allowed, field) {
     }
 }
 
+// llama.cpp's split GGUF names: <prefix>-<k>-of-<n>.gguf, k and n five digits.
+const SPLIT_GGUF_RE = /^(.+)-(\d{5})-of-(\d{5})\.gguf$/;
+const MAX_SHARDS = 64;
+
+/** The shard number and count of a split GGUF file name, or null for a single file. */
+export function splitGgufName(file) {
+    const match = SPLIT_GGUF_RE.exec(String(file || ''));
+    if (!match) return null;
+    const index = Number(match[2]);
+    const count = Number(match[3]);
+    return count > 1 && index >= 1 && index <= count ? { prefix: match[1], index, count } : null;
+}
+
+/** Every shard's file name of a split GGUF, in canonical order, from its first shard's name. */
+export function splitGgufFiles(firstFile) {
+    const split = splitGgufName(firstFile);
+    if (!split || split.index !== 1) return null;
+    const pad = (value) => String(value).padStart(5, '0');
+    return Array.from({ length: split.count }, (_, i) => `${split.prefix}-${pad(i + 1)}-of-${pad(split.count)}.gguf`);
+}
+
+// A split GGUF (DS002): still the gguf weight format; `file` is the first
+// shard, which llama.cpp opens, and `shards` pins every shard by size and
+// sha256, in canonical order, in one directory. `size` is their sum.
+function validateShards(value, field) {
+    const expected = splitGgufFiles(value.file);
+    if (!expected) throw invalid(`${field}.file must be the first shard (…-00001-of-0000N.gguf) when shards are given`, `${field}.file`);
+    if (expected.length > MAX_SHARDS) throw invalid(`${field} has more than ${MAX_SHARDS} shards`, `${field}.shards`);
+    if (!Array.isArray(value.shards) || value.shards.length !== expected.length) {
+        throw invalid(`${field}.shards must list all ${expected.length} shards`, `${field}.shards`);
+    }
+    const shards = value.shards.map((shard, index) => {
+        const at = `${field}.shards[${index}]`;
+        if (!plainObject(shard)) throw invalid(`${at} must be an object`, at);
+        onlyKeys(shard, ['file', 'size', 'sha256'], at);
+        if (shard.file !== expected[index]) throw invalid(`${at}.file must be ${expected[index]}`, `${at}.file`);
+        if (!Number.isSafeInteger(shard.size) || shard.size <= 0) throw invalid(`${at}.size must be the file size in bytes`, `${at}.size`);
+        if (!SHA256_RE.test(String(shard.sha256 || ''))) throw invalid(`${at}.sha256 must be the LFS sha256`, `${at}.sha256`);
+        return Object.freeze({ file: shard.file, size: shard.size, sha256: shard.sha256 });
+    });
+    const size = shards.reduce((sum, shard) => sum + shard.size, 0);
+    if (value.size !== undefined && value.size !== size) throw invalid(`${field}.size must equal the sum of the shard sizes (${size})`, `${field}.size`);
+    return { shards: Object.freeze(shards), size };
+}
+
 export function validateHuggingFaceSource(value, field, { requirePin = false } = {}) {
     if (!plainObject(value)) throw invalid(`${field} must be an object`, field);
     if (value.type !== 'huggingface') throw invalid(`${field}.type must be huggingface`, `${field}.type`);
-    onlyKeys(value, ['type', 'repo', 'file', 'revision', 'commit', 'size', 'sha256', 'quantization'], field);
+    onlyKeys(value, ['type', 'repo', 'file', 'revision', 'commit', 'size', 'sha256', 'shards', 'quantization'], field);
     if (typeof value.repo !== 'string' || !HF_REPO_RE.test(value.repo)) {
         throw invalid(`${field}.repo must be a Hugging Face repository id (owner/name)`, `${field}.repo`);
     }
     const segments = typeof value.file === 'string' ? value.file.split('/') : [];
     if (!segments.length || segments.length > 4 || !segments.every((segment) => HF_FILE_SEGMENT_RE.test(segment))
         || !value.file.endsWith('.gguf')) {
-        throw invalid(`${field}.file must be a single .gguf file in the repository`, `${field}.file`);
+        throw invalid(`${field}.file must be a .gguf file in the repository (the first shard of a split GGUF)`, `${field}.file`);
     }
     const revision = value.revision ?? 'main';
     if (typeof revision !== 'string' || !HF_REVISION_RE.test(revision) || revision.includes('..')) {
         throw invalid(`${field}.revision is invalid`, `${field}.revision`);
     }
+    const split = splitGgufName(value.file);
+    if (split && split.index !== 1) {
+        throw invalid(`${field}.file names shard ${split.index} of ${split.count}; name the first shard of a split GGUF`, `${field}.file`);
+    }
+    const quantization = value.quantization ? { quantization: optionalText(value.quantization, `${field}.quantization`, 64) } : {};
+    if (split) {
+        // Pinned: the commit and every shard. Unpinned (a user entry before Add
+        // model resolves it): the first shard's name only.
+        const pinnedSplit = value.commit !== undefined || value.shards !== undefined || value.size !== undefined;
+        if (value.sha256 !== undefined) throw invalid(`${field}.sha256 is per shard for a split GGUF`, `${field}.sha256`);
+        if (!requirePin && !pinnedSplit) return Object.freeze({ type: 'huggingface', repo: value.repo, file: value.file, revision, ...quantization });
+        if (!COMMIT_RE.test(String(value.commit || ''))) throw invalid(`${field}.commit must be a 40-hex commit`, `${field}.commit`);
+        const { shards, size } = validateShards(value, field);
+        return Object.freeze({ type: 'huggingface', repo: value.repo, file: value.file, revision, commit: value.commit, size, shards, ...quantization });
+    }
+    if (value.shards !== undefined) throw invalid(`${field}.shards is only for a split GGUF (…-00001-of-0000N.gguf)`, `${field}.shards`);
     const pinned = value.commit !== undefined || value.size !== undefined || value.sha256 !== undefined;
     if (requirePin || pinned) {
         if (!COMMIT_RE.test(String(value.commit || ''))) throw invalid(`${field}.commit must be a 40-hex commit`, `${field}.commit`);
@@ -92,7 +153,7 @@ export function validateHuggingFaceSource(value, field, { requirePin = false } =
         file: value.file,
         revision,
         ...(pinned || requirePin ? { commit: value.commit, size: value.size, sha256: value.sha256 } : {}),
-        ...(value.quantization ? { quantization: optionalText(value.quantization, `${field}.quantization`, 64) } : {}),
+        ...quantization,
     });
 }
 

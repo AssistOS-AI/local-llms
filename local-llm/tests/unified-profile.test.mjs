@@ -381,3 +381,17 @@ test('state this controller cannot read is reported, never misread: old registry
     });
     assert.deepEqual((await controller.overview()).unsupportedModels, []);
 });
+
+test('a split GGUF downloads every shard, drops each from the page cache, and launches the first', async (t) => {
+    const first = 'Q-00001-of-00003.gguf';
+    const shards = [1, 2, 3].map((k) => ({ file: `Q-0000${k}-of-00003.gguf`, size: 10 * GIB, sha256: String(k).repeat(64) }));
+    const split = validateModel({ ...structuredClone(MEASURED), id: 'split-moe',
+        sources: { gguf: { type: 'huggingface', repo: 'org/split', file: first, revision: 'main', commit: 'd'.repeat(40), shards } } }, { seed: true });
+    const h = harness(t, { seed: [split] });
+    await h.controller.run({ modelId: 'split-moe', runnerId: 'llama.cpp', requestId: 'request-0001' });
+    await until(() => h.controller.state.deployment?.phase === 'ready');
+    assert.deepEqual(h.calls.download.map((artifact) => artifact.file), shards.map((shard) => shard.file));
+    assert.equal(h.calls.dropped.length, 3);
+    assert.equal(h.controller.state.deployment.artifact.size, 30 * GIB);
+    await h.controller.stop();
+});

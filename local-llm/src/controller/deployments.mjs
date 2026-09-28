@@ -845,10 +845,11 @@ export function createController({
                 transferred: fetched.bytesTransferred,
             };
             weights = { path: fetched.path };
-            if (store.fetchedFile !== false) {
+            // Every file of the download (each shard of a split GGUF); a snapshot directory is skipped.
+            for (const file of fetched.files || [fetched.path]) {
                 try {
-                    if (fs.statSync(fetched.path).isFile() && !dropCache(fetched.path)) {
-                        log.append('controller', 'could not drop the download from the page cache (dd iflag=nocache)');
+                    if (fs.statSync(file).isFile() && !dropCache(file)) {
+                        log.append('controller', `could not drop ${path.basename(file)} from the page cache (dd iflag=nocache)`);
                     }
                 } catch {}
             }

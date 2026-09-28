@@ -42,7 +42,7 @@ test('user model entries are validated before they are accepted', () => {
     assert.throws(() => validateModel({ id: 'Bad Id', sources: { ollama: { type: 'ollama', tag: 'x:1' } } }), /id must be/);
     assert.throws(() => validateModel({
         id: 'multi', sources: { gguf: { type: 'huggingface', repo: 'a/b', file: '../x.gguf' } },
-    }), /single \.gguf/);
+    }), /must be a \.gguf file in the repository/);
     assert.throws(() => validateModel({
         id: 'shell', sources: { ollama: { type: 'ollama', tag: 'x; rm -rf /' } },
     }), /Ollama library tag/);

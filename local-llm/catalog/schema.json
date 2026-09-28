@@ -270,6 +270,34 @@
         },
         "quantization": {
           "type": "string"
+        },
+        "shards": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 64,
+          "description": "A split GGUF: every shard in canonical order (<prefix>-0000k-of-0000N.gguf, one directory), each pinned by size and sha256. `file` is then the first shard, `size` their sum, and there is no top-level sha256.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "file",
+              "size",
+              "sha256"
+            ],
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
         }
       }
     },
