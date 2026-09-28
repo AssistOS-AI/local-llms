@@ -227,15 +227,18 @@ export function createController({
         stateStore.save(state);
     }
 
+    // The profile is fixed by the first snapshot that shows a usable GPU; a
+    // transient failure (a cold nvidia-smi, a GPU not attached yet) leaves it
+    // undecided, and without a usable GPU every Run is refused anyway.
     async function currentProfile() {
         if (!profile) {
             let snap = null;
             try {
                 snap = await snapshot();
             } catch {}
-            if (!profile) {
+            if (!profile && snap?.gpu?.available) {
                 profile = profileOf(snap);
-                log.append('controller', `hardware profile: ${profile}${snap?.gpu?.name ? ` (${snap.gpu.name})` : ''}`);
+                log.append('controller', `hardware profile: ${profile}${snap.gpu.name ? ` (${snap.gpu.name})` : ''}`);
             }
         }
         return profile;
@@ -282,6 +285,14 @@ export function createController({
 
     function findModel(modelId) {
         const model = catalog().find((entry) => entry.id === modelId);
+        if (!model) throw new LocalLlmError('unknown_model', `No model '${modelId}' in the catalog.`);
+        return model;
+    }
+
+    // Any model's entry, whatever profiles it is offered in (Delete weights
+    // must be able to free what another profile downloaded).
+    function findAnyModel(modelId) {
+        const model = mergeCatalog(seedCatalog, state.registry).find((entry) => entry.id === modelId);
         if (!model) throw new LocalLlmError('unknown_model', `No model '${modelId}' in the catalog.`);
         return model;
     }
@@ -500,6 +511,7 @@ export function createController({
     }
 
     async function status({ sinceSeq = 0 } = {}) {
+        await currentProfile();
         const deployment = publicDeployment();
         const lines = log.since(Number(sinceSeq) || 0);
         let gpu = null;
@@ -702,7 +714,9 @@ export function createController({
             stopForMemory(deployment, current, message, { kill: unified }).catch(() => {});
         };
         const tick = () => {
-            if (cancelled || runner !== current) return;
+            // Unified: watched until the process exits, through a graceful Stop
+            // or Replace too (the exit cancels the guard). Dedicated: while current.
+            if (cancelled || (!unified && runner !== current)) return;
             let available = null;
             try {
                 available = readMemory().availableBytes;
@@ -1089,7 +1103,8 @@ export function createController({
 
     function deleteWeights({ modelId, runnerId, format } = {}) {
         return queue.run(async () => {
-            const model = findModel(modelId);
+            await currentProfile();
+            const model = findAnyModel(modelId);
             const weightFormat = weightsFormat({ runnerId, format });
             const source = model.sources[weightFormat];
             if (!source) throw new LocalLlmError('no_source', `${model.displayName} has no ${weightFormat} weights.`);
@@ -1116,8 +1131,10 @@ export function createController({
         return { ...entry, sources };
     }
 
+    // Against every seed and every stored entry, whatever the profile or schema:
+    // a user entry never reuses a seed id or another entry's id.
     function assertNewModelId(id) {
-        if (catalog().some((model) => model.id === id)) {
+        if (seedCatalog.some((model) => model.id === id) || state.registry.some((entry) => entry?.id === id)) {
             throw new LocalLlmError('duplicate_model', `A model with id '${id}' already exists.`);
         }
     }

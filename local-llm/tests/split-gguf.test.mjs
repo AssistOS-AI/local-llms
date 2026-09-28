@@ -46,6 +46,8 @@ test('a split source pins every shard in canonical order; its size is their sum'
     refuse({ ...SOURCE, shards: [SHARDS[0], { ...SHARDS[1], sha256: 'x' }, SHARDS[2]] }, /shards\[1\]\.sha256/);
     refuse({ ...SOURCE, sha256: '4'.repeat(64) }, /sha256 is per shard/);
     refuse({ ...SOURCE, file: SHARDS[1].file }, /names shard 2 of 3; name the first shard/);
+    // A shard count past the limit is refused before Add model resolves anything.
+    refuse({ type: 'huggingface', repo: REPO, file: 'x-00001-of-99999.gguf' }, /names 99999 shards; at most 64 are supported/);
     refuse({ ...SOURCE, file: 'single.gguf' }, /shards is only for a split GGUF/);
     refuse({ ...SOURCE, commit: undefined }, /commit must be a 40-hex commit/);
     // A seed must pin its shards; a user entry may name the first shard only, for Add model to resolve.

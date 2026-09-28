@@ -126,6 +126,8 @@ export function validateHuggingFaceSource(value, field, { requirePin = false } =
         throw invalid(`${field}.revision is invalid`, `${field}.revision`);
     }
     const split = splitGgufName(value.file);
+    // Bounded before anything is resolved: pinning asks Hugging Face once per shard.
+    if (split && split.count > MAX_SHARDS) throw invalid(`${field}.file names ${split.count} shards; at most ${MAX_SHARDS} are supported`, `${field}.file`);
     if (split && split.index !== 1) {
         throw invalid(`${field}.file names shard ${split.index} of ${split.count}; name the first shard of a split GGUF`, `${field}.file`);
     }

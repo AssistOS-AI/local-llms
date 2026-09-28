@@ -399,3 +399,45 @@ test('a split GGUF downloads every shard, drops each from the page cache, and la
     assert.equal(h.controller.state.deployment.artifact.size, 30 * GIB);
     await h.controller.stop();
 });
+
+test('the profile waits for a snapshot with a usable GPU; a transient failure does not lock it to dedicated', async (t) => {
+    let first = true;
+    const h = harness(t, { snap: () => {
+        if (first) { first = false; return { gpu: { available: false, reason: 'nvidia-smi failed: timeout' }, memory: { totalBytes: TOTAL, availableBytes: 100 * GIB }, disk: { freeBytes: 400 * GIB } }; }
+        return unifiedSnapshot();
+    } });
+    const early = await h.controller.status();
+    assert.equal(early.profile, null);
+    const overview = await h.controller.overview();
+    assert.equal(overview.profile, 'unified');
+    assert.ok(overview.models.some((model) => model.id === 'big-moe'));
+});
+
+test('the unified guard keeps watching a runner through a graceful Stop until it exits', async (t) => {
+    let available = 100 * GIB;
+    const h = harness(t, { readMemory: () => ({ totalBytes: TOTAL, availableBytes: available }) });
+    await h.controller.run({ modelId: 'big-moe', runnerId: 'llama.cpp', requestId: 'request-0001' });
+    await until(() => h.controller.state.deployment?.phase === 'ready');
+    const [process] = h.started;
+    // A runner that ignores SIGTERM: like the real one, its stop() settles only when the process exits.
+    process.stop = () => process.exited;
+    const stopping = h.controller.stop();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(process.stopped, undefined, 'still running during the graceful stop');
+    available = UNIFIED.floorBytes - GIB;
+    await until(() => process.stopped === 'SIGKILL');
+    await stopping;
+});
+
+test('a user model never reuses a seed id or a stored entry\'s id, whatever the profile; Delete weights finds any model', async (t) => {
+    const dedicated = { gpu: { available: true, memoryModel: 'dedicated', name: 'RTX', totalBytes: 6144 * MIB, usedBytes: 0, freeBytes: 6000 * MIB, processes: [] },
+        memory: { totalBytes: 31 * GIB, availableBytes: 24 * GIB }, disk: { freeBytes: 300 * GIB } };
+    const h = harness(t, { snap: dedicated });
+    await h.controller.overview();
+    // big-moe is a unified-only seed: not offered here, still reserved.
+    await assert.rejects(() => h.controller.addModel({ id: 'big-moe', sources: { gguf: { type: 'huggingface', repo: 'x/y', file: 'z.gguf' } } }),
+        { code: 'duplicate_model' });
+    // Its weights can still be deleted on this host.
+    const deleted = await h.controller.deleteWeights({ modelId: 'big-moe', runnerId: 'llama.cpp' });
+    assert.equal(typeof deleted.freedBytes, 'number');
+});

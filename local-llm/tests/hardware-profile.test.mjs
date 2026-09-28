@@ -207,6 +207,9 @@ test('performance cores: the highest-capacity class of the allowed CPUs, only wh
     assert.equal(performanceCoreCount({ fsApi: fakeFs(spark) }), 10);
     // An affinity to part of the machine counts only the allowed CPUs.
     assert.equal(performanceCoreCount({ fsApi: fakeFs({ ...spark, '/proc/self/status': 'Cpus_allowed_list:\t0-7\n' }) }), 3);
+    // A cgroup CPU quota of 4 CPUs caps it.
+    assert.equal(performanceCoreCount({ fsApi: fakeFs({ ...spark, '/sys/fs/cgroup/cpu.max': '400000 100000\n' }) }), 4);
+    assert.equal(performanceCoreCount({ fsApi: fakeFs({ ...spark, '/sys/fs/cgroup/cpu.max': 'max 100000\n' }) }), 10);
     const uniform = { '/proc/self/status': 'Cpus_allowed_list:\t0-3\n' };
     for (let cpu = 0; cpu < 4; cpu += 1) uniform[`/sys/devices/system/cpu/cpu${cpu}/cpu_capacity`] = '1024\n';
     assert.equal(performanceCoreCount({ fsApi: fakeFs(uniform) }), null);

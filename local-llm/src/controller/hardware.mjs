@@ -279,7 +279,14 @@ export function performanceCoreCount({ fsApi = fs } = {}) {
     const highest = Math.max(...capacities);
     const lowest = Math.min(...capacities);
     if (lowest >= highest * 0.9) return null;
-    return capacities.filter((value) => value >= highest * 0.9).length;
+    let count = capacities.filter((value) => value >= highest * 0.9).length;
+    // A cgroup v2 CPU quota caps it, as for the physical cores.
+    const quota = readText(fsApi, '/sys/fs/cgroup/cpu.max');
+    const quotaMatch = quota && /^(\d+)\s+(\d+)\s*$/.exec(quota.trim());
+    if (quotaMatch && Number(quotaMatch[2]) > 0) {
+        count = Math.min(count, Math.max(1, Math.ceil(Number(quotaMatch[1]) / Number(quotaMatch[2]))));
+    }
+    return count;
 }
 
 export async function readDisk(dataDir, { statfs = (target) => fs.promises.statfs(target) } = {}) {
