@@ -13,7 +13,10 @@
 // blocking (a FIFO or device cannot hold the open), must be a regular file,
 // and must be, according to /proc/self/fd, exactly the path that was asked
 // for under the anchored root: a symbolic link anywhere below the root makes
-// it unusable. The bytes are then read through that descriptor.
+// it unusable. Below an untrusted root the open starts from a descriptor of
+// the root whose own identity was checked, one directory at a time, so a
+// root swapped after that check cannot supply the file. The bytes are then
+// read through that descriptor.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -27,7 +30,9 @@ export const MAX_CANDIDATES_PER_FILE = 3;
 const WALK_MAX_DEPTH = 8;
 const WALK_MAX_ENTRIES = 20_000;
 const GIT_OID_RE = /^[a-f0-9]{40}$/;
-const { O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_APPEND, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+const { O_RDONLY, O_RDWR, O_CREAT, O_EXCL, O_APPEND, O_NOFOLLOW, O_NONBLOCK, O_DIRECTORY } = fs.constants;
+// An open that fails with one of these means there is no usable file there.
+const MISSING_CODES = ['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM', 'ENXIO', 'EISDIR', 'EWOULDBLOCK', 'EAGAIN'];
 
 // The running digest a file is verified with: sha256, or the git blob oid
 // (sha1 over "blob <size>\0" and the bytes) for a small file kept in git.
@@ -91,17 +96,6 @@ export async function anchorStore(fsApi, root) {
     return anchor;
 }
 
-// An untrusted root must still be the same directory at the same path.
-async function anchorIntact(fsApi, anchor) {
-    if (!anchor.untrusted) return true;
-    try {
-        const own = await fsApi.promises.lstat(anchor.path);
-        return own.isDirectory() && own.dev === anchor.dev && own.ino === anchor.ino;
-    } catch {
-        return false;
-    }
-}
-
 // Where the kernel must say an opened descriptor points: the path itself,
 // under the anchored real root.
 function boundPath(anchor, file) {
@@ -123,25 +117,108 @@ async function confirmBound(fsApi, handle, expected) {
     return actual === expected;
 }
 
+// `name` inside an opened directory, the way openat(2) names it: through the
+// kernel's link to that directory, so no rename or swap of a path above it
+// changes which directory the name is looked up in.
+function inDirectory(dir, name) {
+    return `/proc/self/fd/${dir.fd}/${name}`;
+}
+
+/**
+ * A descriptor of an untrusted root that is the anchored directory itself
+ * (C4): opened without following a link, its dev and inode checked on the
+ * descriptor, and /proc/self/fd showing it at its anchored real path. Returns
+ * null when the root is no longer that directory there.
+ */
+async function openAnchoredRoot(fsApi, anchor) {
+    let handle;
+    try {
+        handle = await fsApi.promises.open(anchor.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK);
+    } catch (error) {
+        if (error.code === 'ELOOP' || MISSING_CODES.includes(error.code)) return null;
+        throw error;
+    }
+    try {
+        const stat = await handle.stat();
+        // confirmBound also fails closed when /proc/self/fd cannot be read, before any name is looked up through it.
+        if (stat.isDirectory() && stat.dev === anchor.dev && stat.ino === anchor.ino && await confirmBound(fsApi, handle, anchor.real)) {
+            return handle;
+        }
+    } catch (error) {
+        await handle.close().catch(() => {});
+        throw error;
+    }
+    await handle.close().catch(() => {});
+    return null;
+}
+
+/**
+ * Open `relative` below an untrusted root's checked descriptor, one directory
+ * at a time, none of them through a symbolic link. Returns { handle } or
+ * { rejected }.
+ */
+async function openBelowRoot(fsApi, anchor, relative, signal) {
+    const root = await openAnchoredRoot(fsApi, anchor);
+    if (!root) return { rejected: 'its root directory changed' };
+    const parts = relative.split(path.sep);
+    let dir = root;
+    try {
+        for (const part of parts.slice(0, -1)) {
+            throwIfAborted(signal);
+            let next;
+            try {
+                next = await fsApi.promises.open(inDirectory(dir, part), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK);
+            } catch (error) {
+                // Linux reports a link opened with O_DIRECTORY | O_NOFOLLOW as ENOTDIR; lstat only names the reason.
+                const link = error.code === 'ENOTDIR'
+                    && await fsApi.promises.lstat(inDirectory(dir, part)).then((stats) => stats.isSymbolicLink(), () => false);
+                if (error.code === 'ELOOP' || link) return { rejected: 'reached through a symbolic link' };
+                if (MISSING_CODES.includes(error.code)) return { rejected: 'missing' };
+                throw error;
+            }
+            if (dir !== root) await dir.close().catch(() => {});
+            dir = next;
+        }
+        throwIfAborted(signal);
+        try {
+            return { handle: await fsApi.promises.open(inDirectory(dir, parts.at(-1)), O_RDONLY | O_NOFOLLOW | O_NONBLOCK) };
+        } catch (error) {
+            if (error.code === 'ELOOP') return { rejected: 'symlink' };
+            if (MISSING_CODES.includes(error.code)) return { rejected: 'missing' };
+            throw error;
+        }
+    } finally {
+        if (dir !== root) await dir.close().catch(() => {});
+        await root.close().catch(() => {});
+    }
+}
+
+async function openPath(fsApi, file) {
+    try {
+        return { handle: await fsApi.promises.open(file, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) };
+    } catch (error) {
+        if (error.code === 'ELOOP') return { rejected: 'symlink' };
+        if (MISSING_CODES.includes(error.code)) return { rejected: 'missing' };
+        throw error;
+    }
+}
+
 /**
  * Open an existing regular file for reading, bound to `file` under the
  * anchored root, without following a final link or blocking on a special
- * file (F2). Returns { handle, stat } or { rejected } when the path is
- * missing, a symbolic link, not a regular file, reached through a symbolic
- * link, or its untrusted root changed.
+ * file (F2). Below an untrusted root the file is looked up from the root's
+ * checked descriptor (C4). Returns { handle, stat } or { rejected } when the
+ * path is missing, a symbolic link, not a regular file, reached through a
+ * symbolic link, or its untrusted root changed.
  */
 export async function openBound(fsApi, anchor, file, { signal } = {}) {
     throwIfAborted(signal);
     const expected = boundPath(anchor, file);
-    if (!(await anchorIntact(fsApi, anchor))) return { rejected: 'its root directory changed' };
-    let handle;
-    try {
-        handle = await fsApi.promises.open(file, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
-    } catch (error) {
-        if (error.code === 'ELOOP') return { rejected: 'symlink' };
-        if (['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM', 'ENXIO', 'EISDIR', 'EWOULDBLOCK', 'EAGAIN'].includes(error.code)) return { rejected: 'missing' };
-        throw error;
-    }
+    const opened = anchor.untrusted
+        ? await openBelowRoot(fsApi, anchor, path.relative(anchor.path, path.resolve(file)), signal)
+        : await openPath(fsApi, file);
+    if (!opened.handle) return opened;
+    const { handle } = opened;
     try {
         throwIfAborted(signal);
         const stat = await handle.stat();
@@ -151,7 +228,7 @@ export async function openBound(fsApi, anchor, file, { signal } = {}) {
         }
         if (!(await confirmBound(fsApi, handle, expected))) {
             await handle.close();
-            return { rejected: 'reached through a symbolic link' };
+            return { rejected: anchor.untrusted ? 'it or its root directory moved while it was opened' : 'reached through a symbolic link' };
         }
         return { handle, stat };
     } catch (error) {
@@ -160,10 +237,13 @@ export async function openBound(fsApi, anchor, file, { signal } = {}) {
     }
 }
 
-/** Create a new file (never an existing one or a link), bound to `file` under the anchored store. */
+/**
+ * Create a new file (never an existing one or a link), bound to `file` under
+ * the anchored store, open for writing and for reading back what was written.
+ */
 export async function createBound(fsApi, anchor, file) {
     const expected = boundPath(anchor, file);
-    const handle = await fsApi.promises.open(file, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK, 0o644);
+    const handle = await fsApi.promises.open(file, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK, 0o644);
     if (!(await confirmBound(fsApi, handle, expected))) {
         await handle.close().catch(() => {});
         throw unsafePath('A model staging file was created through a symbolic link');
@@ -312,16 +392,21 @@ function copyWriteError(error) {
 
 /**
  * Copy an opened /shared candidate into a new staging file under the store,
- * in abortable chunks, hashing the bytes as they are written (R6). Returns
- * { staged } with the staging file's stat once it matches, or { reason } when
- * this candidate is not the pinned file. Local write and read failures are
- * errors, never "no candidate". The caller removes the staging file on
- * anything but success.
+ * in abortable chunks, hashing the bytes as they are read (R6). The source's
+ * digest proves only what was read from it: the staging file is then hashed
+ * again through its own descriptor, with an identical fstat before and after,
+ * so what is published is the bytes on disk (C3). Returns { staged, handle }
+ * once the staging file matches (the caller closes `handle` after publishing
+ * through it), or { reason } when this candidate is not the pinned file.
+ * Local write and read failures, and a staging file that does not hold what
+ * was written, are errors, never "no candidate". The caller removes the
+ * staging file on anything but success.
  */
-export async function copyToStaging(fsApi, { source, opened, anchor, staging, artifact, signal, chunkBytes = CHUNK_BYTES, onBytes }) {
+export async function copyToStaging(fsApi, { source, opened, anchor, staging, artifact, signal, chunkBytes = CHUNK_BYTES, onBytes, onVerifyBytes }) {
     const { handle: src, stat } = opened;
     const before = statIdentity(stat);
     const dst = await createBound(fsApi, anchor, staging);
+    let keep = false;
     try {
         const hash = createDigest(artifact);
         const buffer = Buffer.allocUnsafe(Math.min(chunkBytes, artifact.size));
@@ -356,9 +441,29 @@ export async function copyToStaging(fsApi, { source, opened, anchor, staging, ar
         } catch (error) {
             throw copyWriteError(error);
         }
-        return { staged: statIdentity(await dst.stat()) };
+        let checked;
+        try {
+            checked = await hashBound(dst, artifact, { signal, chunkBytes, onBytes: onVerifyBytes });
+        } catch (error) {
+            if (error instanceof DownloadError) throw error;
+            throw new DownloadError('COPY_FAILED', `Reading back the private copy failed (${error?.code || 'error'})`, {
+                details: { code: error?.code ?? null },
+            });
+        }
+        if (!checked.stable) {
+            throw new DownloadError('CHANGED_WHILE_VERIFYING', 'The private copy changed while it was being verified; '
+                + 'the copy was removed and any partial download is kept; run again', { retryable: true });
+        }
+        if (!checked.matches) {
+            throw new DownloadError('SHA256_MISMATCH', 'The private copy on disk does not match the pinned digest that its '
+                + 'source matched; the copy was removed and any partial download is kept', {
+                details: { expected: expectedDigest(artifact), actual: null },
+            });
+        }
+        keep = true;
+        return { staged: checked.stat, handle: dst };
     } finally {
-        await dst.close().catch(() => {});
+        if (!keep) await dst.close().catch(() => {});
     }
 }
 
@@ -367,11 +472,18 @@ export async function copyToStaging(fsApi, { source, opened, anchor, staging, ar
  * identity of the object that was hashed. The record is written without a
  * stat first, so a crash leaves a file that is checked again; the stat is
  * added only when the final path holds that same object (only its ctime,
- * changed by the rename, may differ).
+ * changed by the rename, may differ). With `handle`, the descriptor the bytes
+ * were hashed through, nothing is recorded unless its fstat is still exactly
+ * the one that was verified.
  */
-export async function publishVerified(fsApi, { root, staged, from, to, meta, record, writeJson }) {
+export async function publishVerified(fsApi, { root, staged, from, to, meta, record, writeJson, handle = null }) {
     await ensureDirUnder(fsApi, root, path.dirname(to));
     await ensureDirUnder(fsApi, root, path.dirname(meta));
+    if (handle && !sameStat(staged, statIdentity(await handle.stat()))) {
+        throw new DownloadError('CHANGED_WHILE_VERIFYING', 'The model file changed while it was being verified; run again', {
+            retryable: true,
+        });
+    }
     await writeJson(meta, record);
     await fsApi.promises.rename(from, to);
     const placed = await fsApi.promises.lstat(to);

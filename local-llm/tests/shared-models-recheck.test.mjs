@@ -105,7 +105,9 @@ test('16. a candidate replaced by a FIFO just before it is opened: no block, rej
         });
         let swapped = false;
         return { ...fs, promises: { ...fs.promises, open: async (file, flags, mode) => {
-            if (file === source && !swapped) {
+            // The candidate's own open: by its path, or below its root's descriptor (/proc/self/fd/<root>/<name>).
+            const candidate = file === source || (String(file).startsWith('/proc/self/fd/') && path.basename(String(file)) === ARTIFACT.file);
+            if (candidate && !(flags & fs.constants.O_DIRECTORY) && !swapped) {
                 swapped = true;
                 fs.unlinkSync(source);
                 execFileSync('mkfifo', [source]);

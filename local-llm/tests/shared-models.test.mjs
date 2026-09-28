@@ -80,6 +80,14 @@ const stagingLeft = (paths) => fs.existsSync(path.dirname(paths.partial))
     ? fs.readdirSync(path.dirname(paths.partial)).filter((name) => name.includes('.copy-'))
     : [];
 
+// Whether an opened file is a /shared candidate. A candidate is opened below
+// its root's descriptor (/proc/self/fd/<root>/<name>), so only the kernel's
+// view of the descriptor names /shared.
+async function opensShared(s, handle, flags) {
+    if (flags & fs.constants.O_DIRECTORY) return false;
+    return (await fs.promises.readlink(`/proc/self/fd/${handle.fd}`)).startsWith(`${fs.realpathSync(s.shared)}${path.sep}`);
+}
+
 function seedPartial(s, bytes) {
     fs.mkdirSync(path.dirname(s.paths.partial), { recursive: true });
     fs.writeFileSync(s.paths.partial, PAYLOAD.subarray(0, bytes));
@@ -264,7 +272,7 @@ test('4. a wrong same-size candidate beside a valid partial: the download resume
             ...fs.promises,
             open: async (file, flags, mode) => {
                 const handle = await fs.promises.open(file, flags, mode);
-                if (!String(file).startsWith(e.shared)) return handle;
+                if (!(await opensShared(e, handle, flags))) return handle;
                 return { fd: handle.fd, stat: () => handle.stat(), close: () => handle.close(),
                     read: async () => { throw Object.assign(new Error('EIO'), { code: 'EIO' }); } };
             },
@@ -296,14 +304,17 @@ test('5. a copy with too little free space is refused before copying, and admiss
     const s = setup(t);
     s.place('model-Q8_0.gguf');
     let reads = 0;
+    let opens = 0;
     const counting = { ...fs, promises: { ...fs.promises, open: async (file, flags, mode) => {
         const handle = await fs.promises.open(file, flags, mode);
-        if (!String(file).startsWith(s.shared)) return handle;
+        if (!(await opensShared(s, handle, flags))) return handle;
+        opens += 1;
         return { fd: handle.fd, stat: () => handle.stat(), close: () => handle.close(),
             read: (...args) => { reads += 1; return handle.read(...args); } };
     } } };
     await assert.rejects(s.get({ fsApi: counting, statfs: async () => ({ bavail: 1, bsize: 4096 }) }),
         (err) => err instanceof DownloadError && err.code === 'INSUFFICIENT_SPACE' && err.message.includes('private copy'));
+    assert.equal(opens, 1, 'the candidate was opened, so no read is counted only because the hook missed it');
     assert.equal(reads, 0);
     assert.deepEqual(stagingLeft(s.paths), []);
     assert.deepEqual(await artifactAcquisition({ root: s.root, artifact: ARTIFACT, candidates: [{ path: path.join(s.shared, 'model-Q8_0.gguf'), root: s.shared }] }),
@@ -469,7 +480,7 @@ test('10. Stop, Cancel and drain during a copy or a verification settle within a
         let chunks = 0;
         const slow = { ...fs, promises: { ...fs.promises, open: async (file, flags, mode) => {
             const handle = await fs.promises.open(file, flags, mode);
-            if (!String(file).startsWith(s.shared)) return handle;
+            if (!(await opensShared(s, handle, flags))) return handle;
             return { fd: handle.fd, stat: () => handle.stat(), close: () => handle.close(),
                 read: async (...args) => { chunks += 1; await new Promise((resolve) => setTimeout(resolve, 20)); return handle.read(...args); } };
         } } };

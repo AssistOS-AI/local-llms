@@ -313,16 +313,23 @@ async function writeJsonAtomic(fsApi, target, value) {
     }
 }
 
+// The bytes of a partial this artifact can resume from, or null: a regular
+// file whose identity record matches the artifact and that is not longer
+// than it. The overview, the plan and the transfer all use this one rule.
+async function partialBytes(fsApi, paths, artifact, keys) {
+    const partial = await regularFileUnder(fsApi, paths.root, paths.partial);
+    if (!partial || partial.size > artifact.size || !sameIdentity(await readJson(fsApi, paths.identity), artifact, keys)) return null;
+    return partial.size;
+}
+
 // A symbolic link anywhere in the store counts as absent here (C12, DS002).
 async function inspectWith(fsApi, paths, artifact, keys = IDENTITY_KEYS) {
     const file = await regularFileUnder(fsApi, paths.root, paths.file);
     if (file?.size === artifact.size && sameIdentity(await readJson(fsApi, paths.meta), artifact, keys)) {
         return { state: 'complete', bytes: file.size };
     }
-    const partial = await regularFileUnder(fsApi, paths.root, paths.partial);
-    if (partial && partial.size <= artifact.size && sameIdentity(await readJson(fsApi, paths.identity), artifact, keys)) {
-        return { state: 'partial', bytes: partial.size };
-    }
+    const partial = await partialBytes(fsApi, paths, artifact, keys);
+    if (partial !== null) return { state: 'partial', bytes: partial };
     return { state: 'absent', bytes: 0 };
 }
 
@@ -334,9 +341,12 @@ export async function inspectArtifact({ root, artifact }) {
  * How one pinned file would be obtained (C12, R4), decided without hashing:
  * `owned` (verified in the store; a changed stat is checked again at Run),
  * `in-place` (a regular file of the pinned size already at its store path),
- * `copy` from a /shared candidate of the pinned size, or `download`.
- * `bytesNeeded` is the new disk space that way needs; admission adds the
- * reserve.
+ * `copy` from a /shared candidate of the pinned size, `copy-or-resume` when
+ * there is also a partial to resume, or `download`. `bytesNeeded` is the new
+ * disk space that way needs; admission adds the reserve. A candidate is not
+ * checked here, so beside a partial it cannot raise the need: the transfer
+ * copies only when the whole copy fits and otherwise resumes the partial, so
+ * the need is the resume's (`copyBytesNeeded` is the copy's).
  */
 async function planWith(fsApi, paths, artifact, keys, candidates, inspected) {
     const file = artifact.file;
@@ -344,8 +354,12 @@ async function planWith(fsApi, paths, artifact, keys, candidates, inspected) {
     if (current.state === 'complete') return { file, method: 'owned', bytesNeeded: 0 };
     const existing = await regularFileUnder(fsApi, paths.root, paths.file);
     if (existing?.size === artifact.size) return { file, method: 'in-place', bytesNeeded: 0 };
+    const have = current.state === 'partial' ? current.bytes : 0;
+    if (candidates?.length && have > 0) {
+        return { file, method: 'copy-or-resume', bytesNeeded: artifact.size - have, copyBytesNeeded: artifact.size, source: candidates[0].path };
+    }
     if (candidates?.length) return { file, method: 'copy', bytesNeeded: artifact.size, source: candidates[0].path };
-    return { file, method: 'download', bytesNeeded: artifact.size - (current.state === 'partial' ? current.bytes : 0) };
+    return { file, method: 'download', bytesNeeded: artifact.size - have };
 }
 
 export async function artifactAcquisition({ root, artifact, candidates = [], inspected, fsApi = fs }) {
@@ -376,12 +390,12 @@ async function stagingFiles(fsApi, paths) {
 // matches this artifact and it is not longer than the artifact; anything
 // else (a link included, which is removed and never followed) restarts from zero.
 async function reconcilePartial(fsApi, paths, artifact, keys = IDENTITY_KEYS) {
-    const partial = await regularFileUnder(fsApi, paths.root, paths.partial);
-    if (!partial || partial.size > artifact.size || !sameIdentity(await readJson(fsApi, paths.identity), artifact, keys)) {
+    const bytes = await partialBytes(fsApi, paths, artifact, keys);
+    if (bytes === null) {
         await removePartial(fsApi, paths);
         return 0;
     }
-    return partial.size;
+    return bytes;
 }
 
 async function nearestExistingAncestor(fsApi, dir) {
@@ -400,11 +414,16 @@ async function nearestExistingAncestor(fsApi, dir) {
     }
 }
 
-async function assertFreeSpace({ fsApi, statfs, dir, remaining, what = 'the model weights' }) {
+async function freeSpace({ fsApi, statfs, dir, remaining }) {
     const stats = await statfs(await nearestExistingAncestor(fsApi, dir));
     const available = Number(stats.bavail) * Number(stats.bsize);
     const required = Math.ceil(remaining * SPACE_MARGIN);
-    if (available < required) {
+    return { available, required, fits: available >= required };
+}
+
+async function assertFreeSpace({ fsApi, statfs, dir, remaining, what = 'the model weights' }) {
+    const { available, required, fits } = await freeSpace({ fsApi, statfs, dir, remaining });
+    if (!fits) {
         throw new DownloadError('INSUFFICIENT_SPACE', `Not enough free space for ${what}`, {
             details: { required, available },
         });
@@ -491,7 +510,9 @@ async function useOwnFile(ctx) {
  * Step 3 (C12): a private, verified copy of a /shared candidate. At most
  * MAX_CANDIDATES_PER_FILE are hashed. Each gets its own staging file; an
  * existing partial and its identity record stay untouched until a verified
- * copy is published (R5). Space, write and read failures are errors (R6).
+ * copy is published (R5). A copy that does not fit beside a partial that can
+ * be resumed is not made: the partial is resumed instead, as the plan says
+ * (F2). Otherwise space, write and read failures are errors (R6).
  */
 async function adoptCopy(ctx, candidates) {
     const { fsApi, paths, artifact, label } = ctx;
@@ -505,11 +526,20 @@ async function adoptCopy(ctx, candidates) {
             continue;
         }
         let staging = null;
+        let published = null;
         try {
             if (opened.stat.size !== artifact.size) continue;
             hashed += 1;
-            await assertFreeSpace({ fsApi, statfs: ctx.statfs, dir: path.dirname(paths.partial), remaining: artifact.size,
-                what: 'a private copy of the model file' });
+            const space = { fsApi, statfs: ctx.statfs, dir: path.dirname(paths.partial), remaining: artifact.size };
+            if (!(await freeSpace(space)).fits) {
+                const have = await partialBytes(fsApi, paths, artifact, ctx.identityKeys);
+                if (have) {
+                    ctx.notes.push(`${label}: a private copy of ${candidate.path} does not fit on the disk; `
+                        + `resuming the partial download (${have} of ${artifact.size} bytes) instead`);
+                    return null;
+                }
+            }
+            await assertFreeSpace({ ...space, what: 'a private copy of the model file' });
             await ensureDirUnder(fsApi, paths.root, path.dirname(paths.partial));
             staging = `${paths.partial}.copy-${crypto.randomBytes(6).toString('hex')}`;
             const copied = await copyToStaging(fsApi, {
@@ -521,15 +551,18 @@ async function adoptCopy(ctx, candidates) {
                 signal: ctx.signal,
                 chunkBytes: ctx.chunkBytes,
                 onBytes: (bytes) => ctx.progress.tick(bytes, 0, 'copying'),
+                onVerifyBytes: (bytes) => ctx.progress.tick(bytes, 0, 'verifying'),
             });
             if (!copied.staged) {
                 ctx.notes.push(`${label}: ${candidate.path} not used; ${copied.reason}`);
                 continue;
             }
+            published = copied.handle;
             const provenance = { file: label, source: candidate.path, method: 'copy', bytes: artifact.size };
             await publishVerified(fsApi, {
                 root: paths.root,
                 staged: copied.staged,
+                handle: copied.handle,
                 from: staging,
                 to: paths.file,
                 meta: paths.meta,
@@ -541,6 +574,7 @@ async function adoptCopy(ctx, candidates) {
             await removePartial(fsApi, paths);
             return { provenance };
         } finally {
+            await published?.close().catch(() => {});
             await opened.handle.close().catch(() => {});
             if (staging) await fsApi.promises.rm(staging, { force: true }).catch(() => {});
         }
