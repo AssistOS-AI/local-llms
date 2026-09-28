@@ -34,6 +34,11 @@ export const UNIFIED = Object.freeze({
     psiStopAvg10: 50,
 });
 
+// The load modes llama-server may use on unified memory. They fill the page
+// cache very differently (DS005), so an envelope rectangle names the one it
+// was measured with and admits only that mode.
+export const UNIFIED_LOAD_MODES = Object.freeze(['dio', 'none']);
+
 /** The profile a snapshot calls for; a snapshot without a usable GPU keeps the dedicated rules. */
 export function profileOf(snapshot) {
     const gpu = snapshot?.gpu;
@@ -44,17 +49,27 @@ function gib(bytes) {
     return `${(bytes / GIB).toFixed(1)} GiB`;
 }
 
-/** The measured rectangle of a model's unified envelope that holds these parameters, or null. */
+function rectanglesFor(model, runnerId) {
+    return (model?.unified?.envelope || []).filter((entry) => entry.runner === runnerId);
+}
+
+/**
+ * The measured rectangle of a model's unified envelope that holds these
+ * parameters, or null. The load mode must be the one it was measured with:
+ * no mode stands in for another.
+ */
 export function envelopeFor(model, runnerId, params) {
-    const rectangles = (model?.unified?.envelope || []).filter((entry) => entry.runner === runnerId);
-    return rectangles.find((entry) => params.ctxSize <= entry.maxCtx && params.parallel <= entry.maxParallel
-        && (!params.mtp || entry.mtp)) || null;
+    return rectanglesFor(model, runnerId).find((entry) => entry.loadMode === params.loadMode
+        && params.ctxSize <= entry.maxCtx && params.parallel <= entry.maxParallel && (!params.mtp || entry.mtp)) || null;
+}
+
+function slots(parallel) {
+    return `${parallel} slot${parallel > 1 ? 's' : ''}`;
 }
 
 function describeEnvelope(model, runnerId) {
-    const rectangles = (model?.unified?.envelope || []).filter((entry) => entry.runner === runnerId);
-    return rectangles.map((entry) => `context ${entry.maxCtx} x ${entry.maxParallel} slot${entry.maxParallel > 1 ? 's' : ''}`
-        + `${entry.mtp ? ' (MTP allowed)' : ''}`).join('; ');
+    return rectanglesFor(model, runnerId).map((entry) => `context ${entry.maxCtx} x ${slots(entry.maxParallel)}`
+        + `${entry.mtp ? ' (MTP allowed)' : ''} with load mode ${entry.loadMode}`).join('; ');
 }
 
 /**
@@ -71,7 +86,7 @@ export function admitUnifiedLlamaServer({ runnerId, displayName, model, source, 
         const measured = describeEnvelope(model, runnerId);
         return result('incompatible', measured
             ? `${model.displayName} was measured on unified memory with ${displayName} only up to ${measured}; `
-                + `context ${params.ctxSize} x ${params.parallel} slot${params.parallel > 1 ? 's' : ''}${params.mtp ? ' with MTP' : ''} is outside it.`
+                + `context ${params.ctxSize} x ${slots(params.parallel)}${params.mtp ? ' with MTP' : ''} with load mode ${params.loadMode} is outside it.`
             : `${model.displayName} has not been measured on unified memory with ${displayName}, so it cannot run here yet.`, {});
     }
     const cacheRamBytes = UNIFIED.cacheRamMiB * MIB;
@@ -85,7 +100,7 @@ export function admitUnifiedLlamaServer({ runnerId, displayName, model, source, 
         unifiedBytes: needBytes,
         poolBytes: memory.totalBytes ?? null,
         floorBytes: UNIFIED.floorBytes,
-        envelope: { maxCtx: rectangle.maxCtx, maxParallel: rectangle.maxParallel, mtp: rectangle.mtp },
+        envelope: { loadMode: rectangle.loadMode, maxCtx: rectangle.maxCtx, maxParallel: rectangle.maxParallel, mtp: rectangle.mtp },
         basis: 'measured envelope (llama.cpp buffers at the measured corner, measured transient, prompt cache bound)',
     };
     if (!Number.isFinite(memory.totalBytes) || !Number.isFinite(memory.availableBytes)) {

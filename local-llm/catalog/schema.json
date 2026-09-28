@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "local-llm.catalog/v3",
   "title": "local-llm model catalog",
-  "description": "Schema v3. Seed catalog entries (read-only, shipped with the agent) and user registry entries share this shape. Sources are keyed by weight format; every runner reads one format, so runners that read the same format share one download. Seed Hugging Face sources must pin commit, size and sha256; user sources are pinned when added. `recommended` and `validated` are keyed by hardware profile (dedicated, unified; DS005), then by runner id. Entries of earlier schemas are not migrated.",
+  "description": "Schema v3. Seed catalog entries (read-only, shipped with the agent) and user registry entries share this shape. Sources are keyed by weight format; every runner reads one format, so runners that read the same format share one download. Seed Hugging Face sources must pin commit, size and sha256; user sources are pinned when added. `recommended` and `validated` are keyed by hardware profile (dedicated, unified; DS005), then by runner id. `unified` and `validated` labels come only from the trusted seed (the shipped catalog or the operator's LOCAL_LLM_CATALOG_FILE); a user registry entry carrying either is refused. Entries of earlier schemas are not migrated.",
   "type": "object",
   "required": [
     "schema",
@@ -139,7 +139,7 @@
         "validated": {
           "type": "object",
           "additionalProperties": false,
-          "description": "What was measured on real hardware, keyed by hardware profile, then by runner id.",
+          "description": "What was measured on real hardware, keyed by hardware profile, then by runner id. Seed entries only.",
           "properties": {
             "dedicated": {
               "type": "object",
@@ -175,7 +175,7 @@
           "required": [
             "envelope"
           ],
-          "description": "The unified profile's measured envelope (DS005). A model without one is refused on unified memory.",
+          "description": "The unified profile's measured envelope (DS005). A model without one is refused on unified memory. Seed entries only.",
           "properties": {
             "envelope": {
               "type": "array",
@@ -186,6 +186,7 @@
                 "additionalProperties": false,
                 "required": [
                   "runner",
+                  "loadMode",
                   "maxCtx",
                   "maxParallel",
                   "mtp",
@@ -195,6 +196,13 @@
                 "properties": {
                   "runner": {
                     "type": "string"
+                  },
+                  "loadMode": {
+                    "enum": [
+                      "dio",
+                      "none"
+                    ],
+                    "description": "The load mode this rectangle was measured with; it admits only that mode. A mode measured separately is a rectangle of its own."
                   },
                   "maxCtx": {
                     "type": "integer",

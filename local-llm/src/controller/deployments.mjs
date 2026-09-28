@@ -46,6 +46,7 @@ const TRANSFER_PHASES = new Set(['downloading', 'copying', 'verifying']);
 const REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
 const PROBE_TIMEOUT_MS = 10_000;
 const IMAGE_CONTRACT = '/opt/local-llm/source.contract';
+const PROFILE_UNDECIDED = 'No usable GPU has been seen yet, so the hardware profile is not decided; run again once the GPU can be read.';
 
 /**
  * What the image says about itself (`/opt/local-llm/source.contract`, one
@@ -253,19 +254,39 @@ export function createController({
 
     // The profile is fixed by the first snapshot that shows a usable GPU; a
     // transient failure (a cold nvidia-smi, a GPU not attached yet) leaves it
-    // undecided, and without a usable GPU every Run is refused anyway.
+    // undecided. Parameters are normalized, admitted, launched and guarded
+    // under the one committed profile: a Run is refused while it is undecided.
+    function commitProfile(snap) {
+        if (!profile && snap?.gpu?.available) {
+            profile = profileOf(snap);
+            log.append('controller', `hardware profile: ${profile}${snap.gpu.name ? ` (${snap.gpu.name})` : ''}`);
+        }
+        return profile;
+    }
+
     async function currentProfile() {
         if (!profile) {
             let snap = null;
             try {
                 snap = await snapshot();
             } catch {}
-            if (!profile && snap?.gpu?.available) {
-                profile = profileOf(snap);
-                log.append('controller', `hardware profile: ${profile}${snap.gpu.name ? ` (${snap.gpu.name})` : ''}`);
-            }
+            commitProfile(snap);
         }
         return profile;
+    }
+
+    // A Run's profile, or its refusal. Nothing is recorded when it is refused,
+    // so the same request can be sent again once the GPU can be read.
+    async function requireProfile() {
+        if (profile) return profile;
+        let snap = null;
+        try {
+            snap = await snapshot();
+        } catch {}
+        if (commitProfile(snap)) return profile;
+        const gpuReason = snap?.gpu?.reason ? `${String(snap.gpu.reason).replace(/\.$/, '')}. ` : '';
+        const admission = { status: 'incompatible', reason: `${gpuReason}${PROFILE_UNDECIDED}`, estimate: { isEstimate: true }, warnings: [] };
+        throw new LocalLlmError('admission_incompatible', admission.reason, { admission });
     }
 
     // The models offered in this profile (catalog v3 `profiles`).
@@ -298,13 +319,18 @@ export function createController({
     }
 
     // Admission with the checks the controller owns (availability, the image's
-    // GPUs, the profile) before the runner's own policy.
-    function admitHere({ definition, model, source, params, snap, remainingDownloadBytes = 0 }) {
+    // GPUs, the profile) before the runner's own policy. `params` were
+    // normalized for `selected`; without a committed profile nothing is
+    // admitted, so a later snapshot cannot pick rules those params do not match.
+    function admitHere({ definition, model, source, params, snap, remainingDownloadBytes = 0, selected = profile }) {
+        const refuse = (reason) => ({ status: 'incompatible', reason, estimate: { isEstimate: true }, warnings: [] });
         const availability = availabilityOf(definition);
-        if (!availability.available) return { status: 'incompatible', reason: availability.reason, estimate: { isEstimate: true }, warnings: [] };
+        if (!availability.available) return refuse(availability.reason);
         const mismatch = gpuMismatch(snap);
-        if (mismatch) return { status: 'incompatible', reason: mismatch, estimate: { isEstimate: true }, warnings: [] };
-        return admit({ runner: definition, model, source, params, snapshot: snap, remainingDownloadBytes, profile: profile || undefined });
+        if (mismatch) return refuse(mismatch);
+        // A snapshot without a GPU is refused by admit() with the GPU's own reason.
+        if (!selected && snap?.gpu?.available) return refuse(PROFILE_UNDECIDED);
+        return admit({ runner: definition, model, source, params, snapshot: snap, remainingDownloadBytes, profile: selected || undefined });
     }
 
     function findModel(modelId) {
@@ -431,7 +457,6 @@ export function createController({
     // Admission for the Run form's current values, before anything is saved
     // or downloaded. Parameter errors come back as data for the form.
     async function previewRun({ modelId, runnerId, params } = {}, snap) {
-        await currentProfile();
         const model = findModel(modelId);
         const definition = getRunner(runnerId);
         const source = sourceFor(model, definition);
@@ -452,15 +477,17 @@ export function createController({
             modelId,
             runnerId,
             params: normalized,
-            context: definition.describeContext ? definition.describeContext(normalized, { model, profile }) : null,
+            context: definition.describeContext ? definition.describeContext(normalized, { model, profile: profile || 'dedicated' }) : null,
             acquisition,
             admission: admitHere({ definition, model, source, params: normalized, snap, remainingDownloadBytes: acquisition.bytesNeeded }),
         };
     }
 
     async function overview({ preview = null } = {}) {
-        await currentProfile();
+        // One snapshot decides the profile and is admitted against, so the
+        // parameters shown are normalized for the rules that admit them.
         const snap = await snapshot();
+        commitProfile(snap);
         const runnerList = [];
         for (const definition of Object.values(runners)) {
             const gate = gateOf(definition);
@@ -514,7 +541,7 @@ export function createController({
                     size: source?.size ?? null,
                     download: disk,
                     params,
-                    context: params && definition.describeContext ? definition.describeContext(params, { model, profile }) : null,
+                    context: params && definition.describeContext ? definition.describeContext(params, { model, profile: profile || 'dedicated' }) : null,
                     admission: !availabilityOf(definition).available
                         ? admitHere({ definition, model, source, params: {}, snap })
                         : !gate.enabled ? disabledAdmission(gate) : paramError
@@ -581,7 +608,7 @@ export function createController({
     function describeDeploymentContext(definition, deployment) {
         if (!deployment || !definition?.describeContext) return null;
         try {
-            return definition.describeContext(deployment.params, { profile: profile || 'dedicated' });
+            return definition.describeContext(deployment.params, { profile: deployment.profile || profile || 'dedicated' });
         } catch {
             return null;
         }
@@ -738,7 +765,7 @@ export function createController({
     // It is a backstop, not protection: one load allocates faster than any
     // sampling can follow, so admission must cover the whole known allocation.
     function startMemoryGuard(deployment, current) {
-        const unified = profile === 'unified';
+        const unified = deployment.profile === 'unified';
         const floor = unified ? UNIFIED.floorBytes : deployment.admission?.estimate?.ramFloorBytes;
         if (!Number.isFinite(floor) || floor <= 0) return () => {};
         let timer = null;
@@ -840,10 +867,13 @@ export function createController({
         save();
     }
 
-    async function recheckAdmission(deployment, model) {
+    // Admission again, from a fresh snapshot, under the profile the Run was admitted with.
+    async function recheckAdmission(deployment, model, { remainingDownloadBytes = 0 } = {}) {
         const definition = getRunner(deployment.runnerId);
         const source = deployment.artifact;
-        const result = admitHere({ definition, model, source, params: deployment.params, snap: await snapshot() });
+        const result = admitHere({
+            definition, model, source, params: deployment.params, snap: await snapshot(), remainingDownloadBytes, selected: deployment.profile,
+        });
         deployment.admission = result;
         if (result.status !== 'ok') {
             throw new LocalLlmError(`admission_${result.status.replace('-', '_')}`, result.reason, { admission: result });
@@ -861,7 +891,8 @@ export function createController({
         return Object.freeze({
             runner: definition,
             model,
-            profile: profile || 'dedicated',
+            // The profile the Run was normalized and admitted under.
+            profile: deployment.profile,
             params: deployment.params,
             artifact: deployment.artifact,
             weights,
@@ -917,6 +948,7 @@ export function createController({
                     }
                 } catch {}
             }
+            // An early refusal before the runner is prepared; the check that counts is the last one, below.
             await recheckAdmission(deployment, model);
             throwIfAborted(signal);
         }
@@ -943,6 +975,15 @@ export function createController({
             for (const note of checked.notes || []) log.append('controller', note);
             throwIfAborted(signal);
         }
+        // The last admission, after the runner is prepared and the weights
+        // checked for the last time (which can take minutes of hashing):
+        // memory or disk taken meanwhile refuses the start instead of
+        // launching into it. Weights a runner fetches itself still need disk.
+        const remainingDownloadBytes = store.fetchedBy === 'controller'
+            ? 0 : (await acquisitionOf(deployment.artifact, null, signal)).bytesNeeded;
+        throwIfAborted(signal);
+        await recheckAdmission(deployment, model, { remainingDownloadBytes });
+        throwIfAborted(signal);
         const details = await definition.start(startContext(deployment, model, signal, weights, runnerDir));
         throwIfAborted(signal);
         if (!runner || runner.deploymentId !== deployment.id) {
@@ -1052,7 +1093,6 @@ export function createController({
 
     function run({ requestId, modelId, runnerId, params, replace = false } = {}) {
         return queue.run(async () => {
-            await currentProfile();
             if (typeof requestId !== 'string' || !REQUEST_ID_RE.test(requestId)) {
                 throw new LocalLlmError('invalid_request', 'requestId must be 8-128 letters, digits, dash or underscore.');
             }
@@ -1060,6 +1100,7 @@ export function createController({
             if (state.requests[requestId]) {
                 return { duplicate: true, deployment: publicDeployment() };
             }
+            await requireProfile();
             const model = findModel(modelId);
             const definition = getRunner(runnerId);
             const source = sourceFor(model, definition);
@@ -1124,6 +1165,8 @@ export function createController({
                 requestId,
                 modelId: model.id,
                 runnerId,
+                // Launch, the last admission and the memory guard use this profile.
+                profile,
                 params: normalized,
                 artifact: structuredClone(source),
                 phase: store.fetchedBy === 'runner' ? 'starting' : 'downloading',

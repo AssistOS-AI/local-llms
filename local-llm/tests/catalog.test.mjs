@@ -17,7 +17,7 @@ const GGUF = Object.freeze({
     commit: 'a'.repeat(40), size: 639446688, sha256: 'b'.repeat(64),
 });
 const OLLAMA = Object.freeze({ type: 'ollama', tag: 'qwen3:0.6b' });
-const RECTANGLE = Object.freeze({ runner: 'llama.cpp', maxCtx: 131072, maxParallel: 4, mtp: false, bufferBytes: 17_000_000_000, transientBytes: 2_000_000_000 });
+const RECTANGLE = Object.freeze({ runner: 'llama.cpp', loadMode: 'dio', maxCtx: 131072, maxParallel: 4, mtp: false, bufferBytes: 17_000_000_000, transientBytes: 2_000_000_000 });
 
 function tempStore(t, content) {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-catalog-'));
@@ -63,11 +63,12 @@ test('an entry is validated per format; runner-keyed sources are refused', () =>
 });
 
 test('profiles default to both; recommended and validated are keyed by profile, then runner', () => {
+    // `validated` is a measurement record: only a trusted seed entry carries one.
     const model = validateModel({
         id: 'qwen-small', sources: { gguf: GGUF },
         recommended: { dedicated: { 'llama.cpp': { ctxSize: 8192 } }, unified: { 'llama.cpp': { ctxSize: 32768 } } },
         validated: { unified: { 'llama.cpp': 'DGX Spark, b11159' } },
-    });
+    }, { seed: true });
     assert.deepEqual(model.profiles, ['dedicated', 'unified']);
     assert.deepEqual(model.recommended.unified['llama.cpp'], { ctxSize: 32768 });
     assert.equal(model.validated.unified['llama.cpp'], 'DGX Spark, b11159');
@@ -79,12 +80,12 @@ test('profiles default to both; recommended and validated are keyed by profile, 
     // A v2 entry (recommended keyed by runner) is not valid v3.
     assert.throws(() => validateModel({ id: 'v2-entry', sources: { gguf: GGUF }, recommended: { 'llama.cpp': { ctxSize: 8192 } } }),
         /recommended has an unknown profile 'llama\.cpp'/);
-    assert.throws(() => validateModel({ id: 'v2-entry', sources: { gguf: GGUF }, validated: { unified: { 'llama.cpp': 42 } } }),
+    assert.throws(() => validateModel({ id: 'v2-entry', sources: { gguf: GGUF }, validated: { unified: { 'llama.cpp': 42 } } }, { seed: true }),
         /validated\.unified\.llama\.cpp must be plain text/);
 });
 
-test('the unified envelope is measured rectangles, each with its buffers and transient', () => {
-    const model = validateModel({ id: 'enveloped', sources: { gguf: GGUF }, unified: { envelope: [RECTANGLE, { ...RECTANGLE, maxCtx: 262144, maxParallel: 1, mtp: true, measured: 'L1, 2026-09-28' }] } });
+test('the unified envelope is measured rectangles, each with its load mode, buffers and transient', () => {
+    const model = validateModel({ id: 'enveloped', sources: { gguf: GGUF }, unified: { envelope: [RECTANGLE, { ...RECTANGLE, maxCtx: 262144, maxParallel: 1, mtp: true, measured: 'L1, 2026-09-28' }] } }, { seed: true });
     assert.equal(model.unified.envelope.length, 2);
     assert.deepEqual(model.unified.envelope[0], { ...RECTANGLE, measured: undefined });
     assert.equal(model.unified.envelope[1].measured, 'L1, 2026-09-28');
@@ -95,12 +96,16 @@ test('the unified envelope is measured rectangles, each with its buffers and tra
         [{ mtp: 'yes' }, /mtp must be true or false/],
         [{ runner: '' }, /runner must name a runner/],
         [{ extra: 1 }, /unsupported field 'extra'/],
+        // The load mode is part of what was measured: it is required, one mode per rectangle.
+        [{ loadMode: undefined }, /loadMode must be the load mode it was measured with \(dio or none\)/],
+        [{ loadMode: 'mmap' }, /loadMode must be the load mode it was measured with/],
+        [{ loadMode: ['dio', 'none'] }, /loadMode must be the load mode it was measured with/],
     ]) {
         const entry = { ...RECTANGLE, ...change };
         for (const [key, value] of Object.entries(change)) if (value === undefined) delete entry[key];
-        assert.throws(() => validateModel({ id: 'enveloped', sources: { gguf: GGUF }, unified: { envelope: [entry] } }), pattern);
+        assert.throws(() => validateModel({ id: 'enveloped', sources: { gguf: GGUF }, unified: { envelope: [entry] } }, { seed: true }), pattern);
     }
-    assert.throws(() => validateModel({ id: 'enveloped', sources: { gguf: GGUF }, unified: { envelope: [] } }), /1-16 measured rectangles/);
+    assert.throws(() => validateModel({ id: 'enveloped', sources: { gguf: GGUF }, unified: { envelope: [] } }, { seed: true }), /1-16 measured rectangles/);
 });
 
 test('a registry entry of an earlier schema is kept in the state file but hidden from the catalog', (t) => {

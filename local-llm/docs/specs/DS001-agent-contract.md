@@ -54,11 +54,11 @@ Every tool is declared in `mcp-config.json` with `command: "node"`, `args: ["/co
 | --- | --- |
 | `local_llm_overview` | `overview`: the hardware profile (DS005), hardware, runners (with `supported: false` and the reason for a runner this image does not include), the models offered in the profile with per-runner download state and admission, current deployment |
 | `local_llm_status` | `status`: deployment phase, progress and log lines after `sinceSeq`, the hardware profile and, on unified memory, the memory guard's lowest MemAvailable, highest pressure and sample count |
-| `local_llm_run` | `run`: `requestId`, `modelId`, `runnerId`, `params` (validated against the runner's schema for the profile), `replace`; a runner the image does not include is refused with `runner_unavailable` before anything downloads |
+| `local_llm_run` | `run`: `requestId`, `modelId`, `runnerId`, `params` (validated against the runner's schema for the profile), `replace`; while no snapshot has shown a usable GPU, so no hardware profile is decided, it is refused with `admission_incompatible` and records nothing, so the same request can be sent again (DS005); a runner the image does not include is refused with `runner_unavailable` before anything downloads |
 | `local_llm_stop` | `stop` |
 | `local_llm_download_cancel` | `cancelDownload`: keeps the partial file; also stops a Run that is still looking for its files (DS002), and then succeeds; `not_downloading` when nothing is transferring or being looked up |
 | `local_llm_weights_delete` | `deleteWeights` |
-| `local_llm_model_add` / `_update` / `_remove` | registry edits; seed entries are read-only |
+| `local_llm_model_add` / `_update` / `_remove` | registry edits; seed entries are read-only; an entry that carries a unified envelope (`unified`) or any `validated` label is refused with `invalid_model`, because only the trusted seed catalog may certify measurements (DS005) |
 | `local_llm_test_prompt` | an admin smoke chat against the active runner on loopback; the one inference-routing exception (Question #3) |
 | `local_llm_runner_install` | `installRunner`: `runnerId`, `acceptLicence`; installs an on-demand runner from the image's runner lock (DS004). Who accepted a licence comes from the Router-signed invocation, never from tool input. |
 | `local_llm_runner_uninstall` | `uninstallRunner`: `runnerId`; refused while that runner runs a model |
