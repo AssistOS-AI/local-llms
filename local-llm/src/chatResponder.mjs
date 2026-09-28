@@ -11,8 +11,9 @@ import { serializeError } from './errors.mjs';
 
 const FORWARDED_FIELDS = new Set([
     'messages', 'stream', 'stream_options', 'max_tokens', 'max_completion_tokens', 'temperature', 'top_p',
-    'stop', 'seed', 'presence_penalty', 'frequency_penalty', 'n', 'tools', 'tool_choice', 'response_format',
-    'reasoning_effort', 'chat_template_kwargs', 'logprobs', 'top_logprobs',
+    'top_k', 'min_p', 'repeat_penalty', 'stop', 'seed', 'presence_penalty', 'frequency_penalty', 'n', 'tools',
+    'tool_choice', 'parallel_tool_calls', 'response_format', 'reasoning_effort', 'chat_template_kwargs',
+    'logprobs', 'top_logprobs',
 ]);
 
 // Runner-reported speed for the Settings test prompt: llama.cpp adds
@@ -69,13 +70,32 @@ async function reportStats(call, stats) {
     }
 }
 
-// Limits for Router-authorized callers: one choice per request, at most
-// MAX_COMPLETION_TOKENS generated tokens (larger values are clamped, and a
+// Limits for Router-authorized callers: one choice per request, at most the
+// completion budget in generated tokens (larger values are clamped, and a
 // request that sets no limit gets it as `max_tokens`), and a runner call that
-// ends inside the endpoint's 600 s command limit.
+// ends inside the endpoint's 600 s command limit (manifest `timeoutMs`). The
+// operator may set both through the agent's environment, within these bounds;
+// the caller's own deadline still applies (Soul Gateway: 120 s by default), so
+// a long budget needs that deadline raised too (DS001).
 export const MAX_COMPLETION_TOKENS = 8192;
+export const MAX_COMPLETION_TOKENS_LIMIT = 32768;
 export const RUNNER_TIMEOUT_MS = 570_000;
+const MIN_RUNNER_TIMEOUT_MS = 10_000;
 const TOKEN_LIMIT_FIELDS = ['max_tokens', 'max_completion_tokens'];
+
+function boundedInteger(value, fallback, min, max) {
+    if (!/^\d{1,9}$/.test(String(value ?? ''))) return fallback;
+    const number = Number(value);
+    return number >= min && number <= max ? number : fallback;
+}
+
+/** The completion budget and runner deadline from the agent's environment, each within its bounds. */
+export function chatLimits(env = process.env) {
+    return {
+        maxCompletionTokens: boundedInteger(env.LOCAL_LLM_MAX_COMPLETION_TOKENS, MAX_COMPLETION_TOKENS, 1, MAX_COMPLETION_TOKENS_LIMIT),
+        runnerTimeoutMs: boundedInteger(env.LOCAL_LLM_RUNNER_TIMEOUT_MS, RUNNER_TIMEOUT_MS, MIN_RUNNER_TIMEOUT_MS, RUNNER_TIMEOUT_MS),
+    };
+}
 
 export function requestLimitProblem(request) {
     if (request.n !== undefined && request.n !== 1) return 'n must be 1; local models return one choice per request';
@@ -88,15 +108,21 @@ export function requestLimitProblem(request) {
     return null;
 }
 
-export function buildRunnerRequest(request, target) {
+export function buildRunnerRequest(request, target, { maxCompletionTokens = MAX_COMPLETION_TOKENS } = {}) {
     const body = {};
     for (const [key, value] of Object.entries(request || {})) {
         if (FORWARDED_FIELDS.has(key)) body[key] = value;
     }
     for (const field of TOKEN_LIMIT_FIELDS) {
-        if (Number.isInteger(body[field]) && body[field] > MAX_COMPLETION_TOKENS) body[field] = MAX_COMPLETION_TOKENS;
+        if (Number.isInteger(body[field]) && body[field] > maxCompletionTokens) body[field] = maxCompletionTokens;
     }
-    if (!TOKEN_LIMIT_FIELDS.some((field) => Number.isInteger(body[field]))) body.max_tokens = MAX_COMPLETION_TOKENS;
+    if (!TOKEN_LIMIT_FIELDS.some((field) => Number.isInteger(body[field]))) body.max_tokens = maxCompletionTokens;
+    // A stream ends with a chunk that carries `usage`, unless the caller says otherwise.
+    if (body.stream === true) {
+        const options = body.stream_options && typeof body.stream_options === 'object' && !Array.isArray(body.stream_options)
+            ? body.stream_options : {};
+        body.stream_options = { include_usage: true, ...options };
+    }
     body.model = target.model;
     return body;
 }
@@ -116,7 +142,8 @@ export async function respond(payload, {
     call = callController,
     fetchImpl = globalThis.fetch,
     out = stdout,
-    timeoutMs = RUNNER_TIMEOUT_MS,
+    limits = chatLimits(),
+    timeoutMs = limits.runnerTimeoutMs,
 } = {}) {
     const request = payload?.request;
     if (!request || !Array.isArray(request.messages)) {
@@ -141,7 +168,7 @@ export async function respond(payload, {
         const response = await fetchImpl(`${target.baseUrl}/v1/chat/completions`, {
             method: 'POST',
             headers,
-            body: JSON.stringify(buildRunnerRequest(request, target)),
+            body: JSON.stringify(buildRunnerRequest(request, target, limits)),
             signal,
         });
         if (!response.ok) {

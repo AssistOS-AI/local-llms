@@ -53,6 +53,12 @@
         },
         "LOCAL_LLM_LMSTUDIO": {
           "required": false
+        },
+        "LOCAL_LLM_MAX_COMPLETION_TOKENS": {
+          "required": false
+        },
+        "LOCAL_LLM_RUNNER_TIMEOUT_MS": {
+          "required": false
         }
       }
     }

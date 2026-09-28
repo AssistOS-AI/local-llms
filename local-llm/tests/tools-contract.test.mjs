@@ -124,8 +124,12 @@ test('the chat responder forwards to the ready runner with its key, and answers 
     assert.equal(forwarded.init.headers.authorization, `Bearer ${'k'.repeat(43)}`);
     assert.deepEqual(JSON.parse(forwarded.init.body), { model: 'gpt-oss-20b', messages: [{ role: 'user', content: 'hi' }], max_tokens: 5 });
     assert.equal(JSON.parse(written).choices[0].message.content, 'hello');
+    // A stream ends with a usage chunk unless the caller chose otherwise.
     assert.deepEqual(buildRunnerRequest({ messages: [], stream: true }, { model: 'gpt-oss:20b' }),
-        { messages: [], stream: true, max_tokens: 8192, model: 'gpt-oss:20b' });
+        { messages: [], stream: true, max_tokens: 8192, stream_options: { include_usage: true }, model: 'gpt-oss:20b' });
+    assert.deepEqual(buildRunnerRequest({ messages: [], stream: true, stream_options: { include_usage: false } }, { model: 'm' }).stream_options,
+        { include_usage: false });
+    assert.equal('stream_options' in buildRunnerRequest({ messages: [] }, { model: 'm' }), false);
 });
 
 test('the chat responder reports runner timings from a response and from the last stream chunk', async () => {
@@ -223,7 +227,11 @@ test('the admin test prompt calls only the active loopback runner, with bounds',
 // variable with no default, so it is off unless the deployment sets it.
 test('the manifest declares the LM Studio switch as an optional variable that is off by default', () => {
     const manifest = read('manifest.json');
-    assert.deepEqual(manifest.profiles.default.env, { HF_TOKEN: { required: false }, [LMSTUDIO_SWITCH]: { required: false } });
+    assert.deepEqual(manifest.profiles.default.env, {
+        HF_TOKEN: { required: false }, [LMSTUDIO_SWITCH]: { required: false },
+        // The chat budget and deadline an operator may set (DS001).
+        LOCAL_LLM_MAX_COMPLETION_TOKENS: { required: false }, LOCAL_LLM_RUNNER_TIMEOUT_MS: { required: false },
+    });
     assert.match(manifest.description, /LM Studio/);
     assert.match(manifest.description, /internal use only/);
     assert.match(manifest.description, new RegExp(`ploinky var ${LMSTUDIO_SWITCH} internal-use`));
@@ -263,6 +271,29 @@ test('the chat responder caps completions, allows one choice and bounds the runn
     const timedOut = await respond({ request: { messages: [] } }, { call, fetchImpl: hanging, out: { write() {} }, timeoutMs: 50 });
     assert.ok(seenSignal instanceof AbortSignal);
     assert.deepEqual({ status: timedOut.status, code: timedOut.code }, { status: 504, code: 'runner_timeout' });
+});
+
+test('the completion budget and runner deadline come from the environment, within their bounds', async () => {
+    const { chatLimits, MAX_COMPLETION_TOKENS_LIMIT, RUNNER_TIMEOUT_MS } = await import('../src/chatResponder.mjs');
+    assert.deepEqual(chatLimits({}), { maxCompletionTokens: 8192, runnerTimeoutMs: 570_000 });
+    assert.deepEqual(chatLimits({ LOCAL_LLM_MAX_COMPLETION_TOKENS: '32000', LOCAL_LLM_RUNNER_TIMEOUT_MS: '110000' }),
+        { maxCompletionTokens: 32000, runnerTimeoutMs: 110_000 });
+    // Out of bounds or not a whole number: the default. The deadline never passes the endpoint's 600 s command limit.
+    for (const [tokens, timeout] of [['0', '600000'], ['40000', '5000'], ['1e3', 'soon'], ['-1', '570001']]) {
+        assert.deepEqual(chatLimits({ LOCAL_LLM_MAX_COMPLETION_TOKENS: tokens, LOCAL_LLM_RUNNER_TIMEOUT_MS: timeout }),
+            { maxCompletionTokens: 8192, runnerTimeoutMs: RUNNER_TIMEOUT_MS });
+    }
+    assert.equal(MAX_COMPLETION_TOKENS_LIMIT, 32768);
+    const target = { baseUrl: 'http://127.0.0.1:18080', apiKey: 'k', model: 'gpt-oss-20b' };
+    assert.equal(buildRunnerRequest({ messages: [], max_tokens: 100_000 }, target, { maxCompletionTokens: 32000 }).max_tokens, 32000);
+    let sent = null;
+    const fetchImpl = async (url, init) => {
+        sent = JSON.parse(init.body);
+        return new Response(JSON.stringify({ choices: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    await respond({ request: { messages: [], top_k: 20, min_p: 0.05, repeat_penalty: 1.1, parallel_tool_calls: false, user: 'x' } },
+        { call: async () => target, fetchImpl, out: { write() {} }, limits: { maxCompletionTokens: 1024, runnerTimeoutMs: 60_000 } });
+    assert.deepEqual(sent, { messages: [], top_k: 20, min_p: 0.05, repeat_penalty: 1.1, parallel_tool_calls: false, max_tokens: 1024, model: 'gpt-oss-20b' });
 });
 
 test('a chat request without a token limit gets the documented default cap', async () => {
