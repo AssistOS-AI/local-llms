@@ -343,6 +343,8 @@ test('a snapshot stopped while only the free-disk read is pending answers at onc
     t.after(() => process.off('unhandledRejection', onUnhandled));
     let release;
     const statfsGate = new Promise((resolve, reject) => { release = reject; });
+    // Whatever happens, the held read ends with the test.
+    t.after(() => release(new Error('test ended')));
     let queries = 0;
     const answers = {
         '--query-gpu=name,memory.total,memory.used,memory.free,driver_version': 'RTX, 6144, 0, 6144, 580.1\n',
@@ -363,7 +365,9 @@ test('a snapshot stopped while only the free-disk read is pending answers at onc
     await new Promise((resolve) => setTimeout(resolve, 10));
     const began = Date.now();
     stop.abort();
-    const outcome = await reading;
+    // Bounded: a snapshot that waited for the held read would never answer here.
+    const outcome = await Promise.race([reading, new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 2000))]);
+    assert.notEqual(outcome.timedOut, true, 'the stopped snapshot waited for the pending free-disk read');
     assert.ok(Date.now() - began < 100, 'the stop did not wait for statfs');
     assert.equal(outcome.error?.code, 'ABORT_ERR');
     // The free-disk read fails after the stop: handled, never unhandled.
