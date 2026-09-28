@@ -146,7 +146,7 @@ export function admitLlamaServer({ model, source, params, gpu, memory, disk, rem
             + `${gib(memory.availableBytes)} is available now.`, estimate, warnings);
     }
     if (diskShortage(remainingDownloadBytes, disk)) {
-        return result('insufficient-now', `The download needs ${gib(remainingDownloadBytes * 1.05)} of free disk; `
+        return result('insufficient-now', `The weights need ${gib(remainingDownloadBytes * 1.05)} of free disk (download or copy, with a 5 % reserve); `
             + `${gib(disk.freeBytes)} is free.`, estimate, warnings);
     }
     return result('ok', null, estimate, warnings);
@@ -187,7 +187,7 @@ export function admitOllama({ model, source, params, gpu, memory, disk, remainin
             + `${gib(memory.availableBytes)} is available now.`, withRam, warnings);
     }
     if (diskShortage(remainingDownloadBytes, disk)) {
-        return result('insufficient-now', `The download needs ${gib(remainingDownloadBytes * 1.05)} of free disk; `
+        return result('insufficient-now', `The weights need ${gib(remainingDownloadBytes * 1.05)} of free disk (download or copy, with a 5 % reserve); `
             + `${gib(disk.freeBytes)} is free.`, withRam, warnings);
     }
     return result('ok', null, withRam, warnings);
@@ -289,7 +289,7 @@ export function admitVllm({ model, source, params, gpu, memory, disk, remainingD
             estimate, warnings);
     }
     if (diskShortage(remainingDownloadBytes, disk)) {
-        return result('insufficient-now', `The download needs ${gib(remainingDownloadBytes * 1.05)} of free disk; `
+        return result('insufficient-now', `The weights need ${gib(remainingDownloadBytes * 1.05)} of free disk (download or copy, with a 5 % reserve); `
             + `${gib(disk.freeBytes)} is free.`, estimate, warnings);
     }
     return result('ok', null, estimate, warnings);
@@ -333,7 +333,7 @@ export function admitTabbyApi({ model, source, params, gpu, memory, disk, remain
             estimate, warnings);
     }
     if (diskShortage(remainingDownloadBytes, disk)) {
-        return result('insufficient-now', `The download needs ${gib(remainingDownloadBytes * 1.05)} of free disk; `
+        return result('insufficient-now', `The weights need ${gib(remainingDownloadBytes * 1.05)} of free disk (download or copy, with a 5 % reserve); `
             + `${gib(disk.freeBytes)} is free.`, estimate, warnings);
     }
     return result('ok', null, estimate, warnings);

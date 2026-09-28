@@ -27,15 +27,36 @@ Earlier schemas are not migrated (catalog v3 dropped the v1 and v2 migration on 
 
 ### Reusing a model file already in the workspace
 
-Before a controller download (a GGUF file, each shard of a split GGUF, each file of a Hugging Face snapshot), the agent looks for the pinned bytes, in this order:
+**Trust model.** The agent's store (`/data`, on the host `<workspace>/.data/local-llm`) is written only by the agent and by the operator (the host user); its files and verification records are trusted at that level, and the records are a cache, not authentication. `/shared` is mounted read-write into every agent of the workspace, so everything in it is untrusted input: nothing read from it is used until a private copy of it has been verified. Hashing proves the bytes that were actually read. The stat identity recorded afterwards (device, inode, size, mtime, ctime) only detects accidental change; timestamps do not guarantee immutability, and a writer with operator access can still change a file after the last check, as it can a downloaded file.
 
-1. **Its own store** (`/data/models/...`): a file whose verification record matches the pinned identity is used as it is, unless its recorded stat changed (below).
-2. **The workspace's shared model directory, `/shared/models`** (on the host `<workspace>/.data/shared/models`, which Ploinky mounts into every agent; `LOCAL_LLM_SHARED_MODELS` overrides it for tests). It is walked without following symbolic links, at most 8 levels and 20,000 entries deep, and only regular files of exactly the pinned size are candidates; names never decide. A candidate is hard-linked into the agent's store (copied when a link is impossible, as across filesystems), and then **the agent's own link or copy is hashed** against the pinned sha256 (or git blob id). Only a match is kept; a mismatch is discarded and the next candidate, then the download, is tried. The shared file itself is never changed. The deployment log names each adopted file and how.
-3. **The download** from Hugging Face, as before.
+**Where the agent looks, in order.** Before a controller download (a GGUF file, each shard of a split GGUF, each file of a Hugging Face snapshot):
 
-Only what the agent can see is searched: inside the Box, agent volumes stay inside the workspace, so reusing a file across workspaces means an operator hard-links it into `<workspace>/.data/shared/models`. Ollama tags keep Ollama's own store.
+1. **Its own store.** A file whose verification record matches the pinned identity is used as it is while its recorded stat is unchanged; a changed one is hashed again, kept if it still matches, otherwise removed and fetched again. A record without a stat is hashed once.
+2. **In-place adoption.** A regular file already at the file's canonical store path, of the pinned size and with no valid record, is hashed and adopted where it is. This is the zero-copy path for a retained or separately downloaded file: the operator hard-links it on the host into the canonical path. The canonical paths are:
+   - GGUF, and each shard of a split GGUF: `<workspace>/.data/local-llm/models/gguf/<owner>/<repo>/<commit>/<file>` (`<file>` is the file's whole path in the repository);
+   - a Hugging Face snapshot file: `<workspace>/.data/local-llm/models/hf/<owner>/<repo>/<commit>/<file>`.
 
-A hard link shares its inode with a path other agents can write through `/shared`. So every verified file's record keeps the device, inode, size, mtime and ctime it was verified at, and before each Run a file whose stat differs is hashed again: kept if its bytes still match, otherwise removed and fetched again. A file verified before these stats were recorded is hashed once. Delete weights removes only the agent's own link or copy; space counts as freed only for a file whose last link it removed.
+   The operator must not link a file that also stays under `.data/shared`: every agent could then write to it. The deployment log warns when an adopted file has other links.
+3. **`/shared/models`** (on the host `<workspace>/.data/shared/models`; `LOCAL_LLM_SHARED_MODELS` overrides it for tests). A candidate is used only through a **private copy** into the store, hashed as it is written; it is never hard-linked (a link would share the inode with a path every agent can write, and inside the container `/shared` and `/data` are separate mounts, where `link()` fails with EXDEV anyway).
+4. **The download** from Hugging Face, or its resume.
+
+Only what the agent can see is searched: nothing outside the workspace, and Ollama tags keep Ollama's own store.
+
+**Matching.** Only the pinned identity decides: the exact size and the pinned digest, the sha256 or, for a small file kept in git, the pinned git blob id. This holds for every shard and every snapshot file. Names only order the candidates.
+
+**Binding verification to the bytes that were hashed.** A candidate or store file is opened without following a final symbolic link (`O_NOFOLLOW`) and must be a regular file; `/proc/self/fd` must then show that the opened object is exactly the expected path under its root, which also defeats a symbolic link in, or a swap of, any directory on the way (if that cannot be read, the agent fails closed). The bytes are hashed through that descriptor, with an identical `fstat` before and after; a copy is hashed as it is written, and its source must not change while it is read. The record keeps the identity of the object that was hashed: after the agent's own rename, the final path must hold the same device, inode, size and mtime (only ctime, which the rename changes, may differ). A symbolic link anywhere in the store is treated as absent and logged: at a file's path it is replaced by the fetched file (its target is never touched); in a directory on the way it refuses the Run with `UNSAFE_PATH`.
+
+**Staging and resume.** Each candidate is copied to its own staging file (`<file>.partial.copy-<random>`, next to the partial). An existing `.partial` and its identity record stay untouched until a verified replacement is published; after a mismatch, an error or a Stop only the staging file is removed, and a later download resumes from the earlier offset. Staging files left by a crash are removed at the next attempt.
+
+**Copies follow the download's rules.** Free space for the copy plus the 5 % reserve is checked before copying (`INSUFFICIENT_SPACE`). The copy runs in abortable chunks (8 MiB), so Stop, Cancel and drain settle within one chunk. Progress reports the `copying` phase, and hashing bytes already on disk reports the `verifying` phase. A full disk pauses the deployment (`PAUSED_ENOSPC`); other read and write errors fail it (`COPY_FAILED`); none is ever treated as "no candidate".
+
+**Bounded, cancellable lookup.** One streaming walk of `/shared/models` per artifact (the overview uses one walk for every listed model) collects every size the artifact needs. It follows no directory link, stops at 8 levels and 20,000 entries, and checks for Stop at every entry. At most 3 same-size candidates are hashed per file, those with the file's name first.
+
+**Last check before loading.** Just before the runner starts, after any runner preparation, every file of the artifact is checked again: an unchanged stat, or its bytes are hashed again. A file that no longer matches fails the start (`CHANGED_AFTER_VERIFY`). This detects accidental change; it is not a lock.
+
+**Provenance.** Every file and shard carries one shape, `{ file, source, method, bytes }`: `method` is `in-place`, `copy` or `download`; `source` is the store path, the `/shared` path or the download URL (never a token); `bytes` is what that way moved (0 in place, the size for a copy, the bytes transferred by that download). It is recorded with the file, returned by the fetch, stored as the deployment's `provenance`, and written to the deployment log, one line per file; a file that was already verified is logged as such with its recorded provenance. The Run's plan (`acquisition`: each file's method and the disk it needs) is stored with the deployment when it is accepted.
+
+**Delete weights** removes the agent's own files. `freedBytes` counts the logical size of each distinct inode (device and inode) whose last link the deletion removed; an inode that keeps a link outside the deletion set counts 0.
 
 ### Split GGUF
 

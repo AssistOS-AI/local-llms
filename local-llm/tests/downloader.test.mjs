@@ -468,6 +468,9 @@ test('ENOSPC mid-transfer pauses and keeps the partial', { timeout: TIMEOUT }, a
     const open = async (...args) => {
         const handle = await fs.promises.open(...args);
         return {
+            fd: handle.fd,
+            stat: () => handle.stat(),
+            read: (...args) => handle.read(...args),
             write: async (buffer, offset, length) => {
                 if (written >= MIB) {
                     throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
@@ -547,13 +550,22 @@ test('inspect reports states and a complete download is a no-op', { timeout: TIM
 
     const before = server.requests.length;
     const again = await download(server, root);
-    assert.deepEqual(again, { status: 'complete', path: artifactPaths({ root, artifact: ARTIFACT }).file, bytesTransferred: 0 });
+    assert.deepEqual(again, {
+        status: 'complete',
+        path: artifactPaths({ root, artifact: ARTIFACT }).file,
+        bytesTransferred: 0,
+        notes: [],
+        current: true,
+        // Where the file came from, as recorded when it was verified (C12).
+        provenance: { file: FILE, source: `${server.baseUrl}/${REPO}/resolve/${COMMIT}/${FILE}`, method: 'download', bytes: SIZE - 1000 },
+    });
     assert.equal(server.requests.length, before);
 });
 
 test('artifactPaths keeps every path under the root', () => {
     const paths = artifactPaths({ root: '/data/weights', artifact: { ...ARTIFACT, file: `sub/${FILE}` } });
     assert.deepEqual(paths, {
+        root: '/data/weights',
         dir: `/data/weights/org/model-GGUF/${COMMIT}`,
         file: `/data/weights/org/model-GGUF/${COMMIT}/sub/${FILE}`,
         partial: `/data/weights/org/model-GGUF/${COMMIT}/sub/${FILE}.partial`,
@@ -591,16 +603,14 @@ test('a stop during the resume re-hash aborts before any request', { timeout: TI
     const paths = seedPartial(root, 2 * MIB);
     const controller = new AbortController();
     let chunks = 0;
-    const createReadStream = (...args) => (async function* () {
-        for await (const chunk of fs.createReadStream(...args)) {
-            chunks += 1;
-            yield chunk;
-            controller.abort();
-        }
-    })();
-    const fsApi = { ...fs, createReadStream };
+    // The re-hash reads in chunks and reports them as the verifying phase.
+    const onProgress = (progress) => {
+        if (progress.phase !== 'verifying') return;
+        chunks += 1;
+        controller.abort();
+    };
     await assert.rejects(
-        download(server, root, { fsApi, signal: controller.signal }),
+        download(server, root, { signal: controller.signal, onProgress, progressIntervalMs: 0, chunkBytes: 256 * 1024 }),
         (err) => err instanceof DownloadError && err.code === 'ABORTED',
     );
     assert.ok(chunks <= 2, `re-hash kept reading: ${chunks} chunks`);

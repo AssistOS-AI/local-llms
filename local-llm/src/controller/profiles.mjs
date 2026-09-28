@@ -100,7 +100,7 @@ export function admitUnifiedLlamaServer({ runnerId, displayName, model, source, 
             + `${gib(memory.availableBytes)} is available now. Other processes on this machine hold the rest.`, estimate);
     }
     if (Number.isFinite(disk?.freeBytes) && remainingDownloadBytes * 1.05 > disk.freeBytes) {
-        return result('insufficient-now', `The download needs ${gib(remainingDownloadBytes * 1.05)} of free disk; `
+        return result('insufficient-now', `The weights need ${gib(remainingDownloadBytes * 1.05)} of free disk (download or copy, with a 5 % reserve); `
             + `${gib(disk.freeBytes)} is free.`, estimate);
     }
     return result('ok', null, estimate);

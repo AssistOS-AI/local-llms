@@ -742,7 +742,7 @@ export class LocalLlmDashboard {
             stop.hidden = !stoppable;
         }
         if (cancel) {
-            const downloading = ['downloading', 'verifying', 'pulling'].includes(phase);
+            const downloading = ['downloading', 'copying', 'verifying', 'pulling'].includes(phase);
             cancel.disabled = this.busy || !downloading;
             cancel.hidden = !downloading;
         }

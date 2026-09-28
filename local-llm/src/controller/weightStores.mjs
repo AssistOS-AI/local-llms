@@ -10,19 +10,26 @@
 // `key(source)`, the artifact identity used for "in use" checks, so runners
 // that read the same file share it; `isPinned(source)`; `state(source)`;
 // `remove(source)`; `pin(source)` and `carryPin(next, previous)` for Add and
-// Update model; and `fetch(...)` when the controller fetches.
+// Update model; and, when the controller fetches, `fetch(...)`, `plan(...)`
+// (how each file would be obtained and the disk it needs, C12) and
+// `recheck(...)` (the last check before a runner loads the files).
 
 import fs from 'node:fs';
 import path from 'node:path';
 
 import { LocalLlmError } from '../errors.mjs';
 import {
+    artifactAcquisition,
     artifactPaths,
     downloadSnapshotFile,
     inspectSnapshotFile,
     resolveHuggingFaceSnapshot,
+    snapshotFileAcquisition,
     snapshotPaths,
+    verifyArtifact,
+    verifySnapshotFile,
 } from './downloader.mjs';
+import { freedBytes, orderCandidates, regularFilesIn, walkShared } from './workspaceReuse.mjs';
 import { splitGgufFiles, splitGgufName } from './catalog.mjs';
 import { deleteOllamaModel, deleteOllamaPartials, partialPullBytes, readOllamaManifest } from './ollamaStore.mjs';
 
@@ -41,11 +48,27 @@ export function createWeightStores({
     downloadSnapshot = downloadSnapshotFile,
     inspectSnapshot = inspectSnapshotFile,
     resolveSnapshot = resolveHuggingFaceSnapshot,
+    acquire = artifactAcquisition,
+    acquireSnapshot = snapshotFileAcquisition,
+    verify = verifyArtifact,
+    verifySnapshot = verifySnapshotFile,
     // The workspace's shared model directory (C12): a pinned file found there
-    // is adopted, by hard link or copy and then verified, instead of downloaded.
+    // is used through a private, verified copy instead of a download.
     sharedModelsRoot = null,
+    fsApi = fs,
 }) {
     const adoptFrom = sharedModelsRoot ? [sharedModelsRoot] : [];
+    // One walk of /shared per artifact (or per overview), for every size it needs.
+    const sharedIndex = async (sizes, signal) => (adoptFrom.length ? walkShared(fsApi, adoptFrom, sizes, signal) : new Map());
+    // The walk runs only when a file is first looked for there.
+    const lazyCandidates = (files, signal) => {
+        let index = null;
+        return (file) => (adoptFrom.length ? async () => {
+            index ??= await sharedIndex(files.map((entry) => entry.size), signal);
+            return orderCandidates(index.get(file.size), file.file);
+        } : null);
+    };
+    const sumPlans = (files) => ({ bytesNeeded: files.reduce((sum, entry) => sum + entry.bytesNeeded, 0), files });
     const ggufRoot = path.join(dataDir, 'models', 'gguf');
     const ollamaModels = path.join(dataDir, 'models', 'ollama');
     const hfRoot = path.join(dataDir, 'models', 'hf');
@@ -75,13 +98,34 @@ export function createWeightStores({
             const stateOf = all('complete') ? 'complete' : all('absent') ? 'absent' : 'partial';
             return { state: stateOf, bytes, total: source.size, ...(source.shards ? { shards: shards.length } : {}) };
         },
+        sizes: (source) => filesOf(source).map((file) => file.size),
+        async plan(source, { index = null, signal } = {}) {
+            if (!huggingface.isPinned(source)) return sumPlans([]);
+            const files = filesOf(source);
+            const found = index ?? await sharedIndex(files.map((file) => file.size), signal);
+            const plans = [];
+            for (const file of files) {
+                const inspected = await inspect({ root: ggufRoot, artifact: file });
+                plans.push(await acquire({ root: ggufRoot, artifact: file, inspected, candidates: orderCandidates(found.get(file.size), file.file) }));
+            }
+            return sumPlans(plans);
+        },
+        async recheck({ artifact, signal, onProgress }) {
+            const notes = [];
+            for (const file of filesOf(artifact)) {
+                notes.push(...(await verify({ root: ggufRoot, artifact: file, baseUrl: hfBaseUrl, signal, onProgress })).notes);
+            }
+            return { notes };
+        },
         async fetch({ artifact, signal, onProgress }) {
             // Shard by shard into one directory; progress counts the whole set.
             let done = 0;
             let transferred = 0;
             let first = null;
             const files = [];
-            const adopted = [];
+            const provenance = [];
+            const notes = [];
+            const candidatesFor = lazyCandidates(filesOf(artifact), signal);
             for (const file of filesOf(artifact)) {
                 const offset = done;
                 const result = await download({
@@ -89,7 +133,7 @@ export function createWeightStores({
                     root: ggufRoot,
                     token: env.HF_TOKEN || '',
                     baseUrl: hfBaseUrl,
-                    adoptFrom,
+                    candidates: candidatesFor(file),
                     onProgress: (progress) => onProgress?.({
                         ...progress,
                         bytes: offset + (progress.bytes || 0),
@@ -100,11 +144,12 @@ export function createWeightStores({
                 });
                 first ??= result.path;
                 files.push(result.path);
-                if (result.adopted) adopted.push({ file: file.file, ...result.adopted });
+                if (result.provenance) provenance.push(result.current ? { ...result.provenance, current: true } : result.provenance);
+                notes.push(...(result.notes || []));
                 done += file.size;
                 transferred += result.bytesTransferred || 0;
             }
-            return { path: first, files, bytes: artifact.size, bytesTransferred: transferred, adopted };
+            return { path: first, files, bytes: artifact.size, bytesTransferred: transferred, provenance, notes };
         },
         async remove(source) {
             if (!source.commit) return 0;
@@ -226,22 +271,6 @@ export function createWeightStores({
         ...(file.sha256 !== undefined ? { sha256: file.sha256 } : { gitOid: file.gitOid }),
     });
 
-    async function treeBytes(dir) {
-        let total = 0;
-        let entries = [];
-        try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return 0; }
-        for (const entry of entries) {
-            const full = path.join(dir, entry.name);
-            if (entry.isDirectory()) total += await treeBytes(full);
-            else if (entry.isFile()) {
-                // A hard link adopted from /shared frees nothing while the shared copy remains.
-                const stats = await fs.promises.lstat(full);
-                if (stats.nlink <= 1) total += stats.size;
-            }
-        }
-        return total;
-    }
-
     const hfSnapshot = Object.freeze({
         type: 'hf-snapshot',
         fetchedBy: 'controller',
@@ -261,16 +290,39 @@ export function createWeightStores({
             }
             return { state: complete ? 'complete' : (partial ? 'partial' : 'absent'), bytes, total: source.size };
         },
+        sizes: (source) => (source.files || []).map((file) => file.size),
+        async plan(source, { index = null, signal } = {}) {
+            if (!hfSnapshot.isPinned(source)) return sumPlans([]);
+            const found = index ?? await sharedIndex(source.files.map((file) => file.size), signal);
+            const plans = [];
+            for (const file of source.files) {
+                const artifact = snapshotFile(source, file);
+                const inspected = await inspectSnapshot({ root: hfRoot, artifact });
+                plans.push(await acquireSnapshot({ root: hfRoot, artifact, inspected, candidates: orderCandidates(found.get(file.size), file.path) }));
+            }
+            return sumPlans(plans);
+        },
+        async recheck({ artifact: source, signal, onProgress }) {
+            const notes = [];
+            for (const file of source.files) {
+                notes.push(...(await verifySnapshot({ root: hfRoot, artifact: snapshotFile(source, file), baseUrl: hfBaseUrl, signal, onProgress })).notes);
+            }
+            return { notes };
+        },
         async fetch({ artifact: source, signal, onProgress = () => {} }) {
             let done = 0;
             let transferred = 0;
-            for (const file of source.files) {
+            const provenance = [];
+            const notes = [];
+            const artifacts = source.files.map((file) => snapshotFile(source, file));
+            const candidatesFor = lazyCandidates(artifacts, signal);
+            for (const artifact of artifacts) {
                 const result = await downloadSnapshot({
                     root: hfRoot,
-                    artifact: snapshotFile(source, file),
+                    artifact,
                     token: env.HF_TOKEN || '',
                     baseUrl: hfBaseUrl,
-                    adoptFrom,
+                    candidates: candidatesFor(artifact),
                     signal,
                     onProgress: (progress) => onProgress({
                         ...progress,
@@ -279,18 +331,21 @@ export function createWeightStores({
                         transferred: transferred + (progress.transferred ?? 0),
                     }),
                 });
-                done += file.size;
+                done += artifact.size;
                 transferred += result.bytesTransferred;
+                if (result.provenance) provenance.push(result.current ? { ...result.provenance, current: true } : result.provenance);
+                notes.push(...(result.notes || []));
                 onProgress({ bytes: done, total: source.size, transferred, rate: 0, etaSeconds: null });
             }
             const { dir } = snapshotPaths({ root: hfRoot, repo: source.repo, commit: source.commit });
-            return { path: dir, bytes: source.size, bytesTransferred: transferred };
+            return { path: dir, bytes: source.size, bytesTransferred: transferred, provenance, notes };
         },
-        // Delete weights removes the whole snapshot and its bookkeeping.
+        // Delete weights removes the whole snapshot and its bookkeeping; the
+        // freed bytes count each inode whose last link goes with it (R8).
         async remove(source) {
             if (!source.commit) return 0;
             const { dir, stateDir } = snapshotPaths({ root: hfRoot, repo: source.repo, commit: source.commit });
-            const freed = await treeBytes(dir) + await treeBytes(stateDir);
+            const freed = freedBytes([...await regularFilesIn(fsApi, dir), ...await regularFilesIn(fsApi, stateDir)]);
             await fs.promises.rm(dir, { recursive: true, force: true });
             await fs.promises.rm(stateDir, { recursive: true, force: true });
             return freed;

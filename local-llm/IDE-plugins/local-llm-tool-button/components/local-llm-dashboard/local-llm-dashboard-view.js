@@ -13,8 +13,8 @@ import {
     runnerLabel,
 } from '../../../local-llm-settings/local-llm-settings-model.js';
 
-export const ACTIVE_PHASES = new Set(['downloading', 'verifying', 'pulling', 'starting', 'loading', 'ready', 'stopping']);
-const DOWNLOAD_PHASES = new Set(['downloading', 'verifying', 'pulling', 'paused']);
+export const ACTIVE_PHASES = new Set(['downloading', 'copying', 'verifying', 'pulling', 'starting', 'loading', 'ready', 'stopping']);
+const DOWNLOAD_PHASES = new Set(['downloading', 'copying', 'verifying', 'pulling', 'paused']);
 
 /** The runners that get a column in the Models table: those that can run here, and that this deployment's operator did not leave off. */
 export function tableRunners(runners = []) {

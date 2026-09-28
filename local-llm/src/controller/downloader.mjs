@@ -17,6 +17,29 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { isSnapshotFile } from './catalog.mjs';
+import { DownloadError, abortedError, throwIfAborted } from './downloadError.mjs';
+import {
+    CHUNK_BYTES,
+    MAX_CANDIDATES_PER_FILE,
+    assertRealDirs,
+    copyToStaging,
+    createDigest,
+    ensureDirUnder,
+    expectedDigest,
+    freedBytes,
+    hashBound,
+    hashPrefix,
+    openBound,
+    openPartialBound,
+    orderCandidates,
+    publishVerified,
+    regularFileUnder,
+    sameStat,
+    statIdentity,
+    walkShared,
+} from './workspaceReuse.mjs';
+
+export { DownloadError };
 
 const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}\/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
 const FILE_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/;
@@ -35,18 +58,6 @@ const FILE_IDENTITY_KEYS = Object.freeze(['url', 'size', 'sha256']);
 // A file of a Hugging Face snapshot: an LFS file by sha256, a small file kept
 // in git by its git blob oid.
 const SNAPSHOT_IDENTITY_KEYS = Object.freeze(['repo', 'commit', 'file', 'size', 'sha256', 'gitOid']);
-
-export class DownloadError extends Error {
-    constructor(code, message = code, { retryable = false, details } = {}) {
-        super(message);
-        this.name = 'DownloadError';
-        this.code = code;
-        this.retryable = retryable;
-        if (details !== undefined) {
-            this.details = details;
-        }
-    }
-}
 
 // Marks a local filesystem failure so the transfer loop never mistakes it for
 // a network error and retries into a full or broken disk.
@@ -270,7 +281,7 @@ export function artifactPaths({ root, artifact }) {
     assertInside(base, dir);
     assertInside(dir, file);
     const partial = `${file}.partial`;
-    return { dir, file, partial, identity: `${partial}.json`, meta: `${file}.json` };
+    return { root: base, dir, file, partial, identity: `${partial}.json`, meta: `${file}.json` };
 }
 
 function identityOf(artifact, keys = IDENTITY_KEYS) {
@@ -289,15 +300,6 @@ async function readJson(fsApi, filePath) {
     }
 }
 
-async function fileSize(fsApi, filePath) {
-    try {
-        const stats = await fsApi.promises.stat(filePath);
-        return stats.isFile() ? stats.size : null;
-    } catch {
-        return null;
-    }
-}
-
 async function writeJsonAtomic(fsApi, target, value) {
     const temp = `${target}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
     try {
@@ -309,126 +311,15 @@ async function writeJsonAtomic(fsApi, target, value) {
     }
 }
 
-// What a verified file looked like when its bytes were checked (C12, DS002).
-// A hard-linked file shares its inode with a path that other agents can write
-// through /shared, so any change here means the bytes are checked again.
-async function statIdentity(fsApi, filePath) {
-    const stats = await fsApi.promises.lstat(filePath);
-    return { dev: stats.dev, ino: stats.ino, size: stats.size, mtimeMs: stats.mtimeMs, ctimeMs: stats.ctimeMs };
-}
-
-function sameStat(recorded, current) {
-    return Boolean(recorded) && ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].every((key) => recorded[key] === current[key]);
-}
-
-const SHARED_WALK_MAX_DEPTH = 8;
-const SHARED_WALK_MAX_ENTRIES = 20_000;
-
-/**
- * Regular files of exactly `size` bytes under the shared roots, walked
- * without following symbolic links (C12). Only the pinned identity decides a
- * match, never a name: every candidate is hashed after adoption.
- */
-async function sharedCandidates(fsApi, roots, size) {
-    const found = [];
-    let seen = 0;
-    const walk = async (dir, depth) => {
-        if (depth > SHARED_WALK_MAX_DEPTH) return;
-        let entries;
-        try {
-            entries = await fsApi.promises.readdir(dir, { withFileTypes: true });
-        } catch {
-            return;
-        }
-        for (const entry of entries) {
-            if (++seen > SHARED_WALK_MAX_ENTRIES) return;
-            const full = path.join(dir, entry.name);
-            if (entry.isDirectory()) {
-                await walk(full, depth + 1);
-            } else if (entry.isFile()) {
-                try {
-                    const stats = await fsApi.promises.lstat(full);
-                    if (stats.isFile() && stats.size === size) found.push(full);
-                } catch {}
-            }
-        }
-    };
-    for (const root of roots) {
-        let stats;
-        try {
-            stats = await fsApi.promises.lstat(root);
-        } catch {
-            continue;
-        }
-        if (stats.isDirectory()) await walk(root, 0);
-    }
-    return found;
-}
-
-/**
- * Adopt a copy of the pinned artifact from the shared roots instead of
- * downloading it: hard-link it into the partial path (copy it when the link
- * fails, as across filesystems), hash the agent's own link or copy, and
- * finalize it only when it matches. Returns the source path, or null.
- */
-async function adoptShared(ctx, paths, roots) {
-    const candidates = await sharedCandidates(ctx.fsApi, roots, ctx.artifact.size);
-    for (const source of candidates) {
-        throwIfAborted(ctx.signal);
-        if (path.resolve(source) === path.resolve(paths.file)) continue;
-        await removePartial(ctx.fsApi, paths);
-        await ctx.fsApi.promises.mkdir(path.dirname(paths.partial), { recursive: true });
-        let method = 'link';
-        try {
-            await ctx.fsApi.promises.link(source, paths.partial);
-        } catch {
-            method = 'copy';
-            try {
-                await ctx.fsApi.promises.copyFile(source, paths.partial, fs.constants.COPYFILE_EXCL);
-            } catch {
-                await removePartial(ctx.fsApi, paths);
-                continue;
-            }
-        }
-        // The agent's own link or copy is what gets hashed, and it must still be a regular file of the pinned size.
-        const own = await ctx.fsApi.promises.lstat(paths.partial);
-        if (!own.isFile() || own.size !== ctx.artifact.size) {
-            await removePartial(ctx.fsApi, paths);
-            continue;
-        }
-        const digest = (await hashExisting(ctx.fsApi, paths.partial, own.size, ctx.signal, ctx.artifact, ctx.progress)).digest('hex');
-        if (digest !== expectedDigest(ctx.artifact)) {
-            await removePartial(ctx.fsApi, paths);
-            continue;
-        }
-        await writeJsonAtomic(ctx.fsApi, paths.meta, {
-            ...identityOf(ctx.artifact, ctx.identityKeys),
-            verifiedAt: new Date().toISOString(),
-            adopted: { from: source, method },
-        });
-        await ctx.fsApi.promises.rename(paths.partial, paths.file);
-        await recordStat(ctx.fsApi, paths);
-        return { source, method };
-    }
-    return null;
-}
-
-// After the final rename (which changes ctime), the stat the bytes were verified at.
-async function recordStat(fsApi, paths) {
-    const meta = await readJson(fsApi, paths.meta);
-    if (!meta) return;
-    await writeJsonAtomic(fsApi, paths.meta, { ...meta, stat: await statIdentity(fsApi, paths.file) });
-}
-
+// A symbolic link anywhere in the store counts as absent here (C12, DS002).
 async function inspectWith(fsApi, paths, artifact, keys = IDENTITY_KEYS) {
-    const size = await fileSize(fsApi, paths.file);
-    if (size === artifact.size && sameIdentity(await readJson(fsApi, paths.meta), artifact, keys)) {
-        return { state: 'complete', bytes: size };
+    const file = await regularFileUnder(fsApi, paths.root, paths.file);
+    if (file?.size === artifact.size && sameIdentity(await readJson(fsApi, paths.meta), artifact, keys)) {
+        return { state: 'complete', bytes: file.size };
     }
-    const partialSize = await fileSize(fsApi, paths.partial);
-    if (partialSize !== null && partialSize <= artifact.size
-        && sameIdentity(await readJson(fsApi, paths.identity), artifact, keys)) {
-        return { state: 'partial', bytes: partialSize };
+    const partial = await regularFileUnder(fsApi, paths.root, paths.partial);
+    if (partial && partial.size <= artifact.size && sameIdentity(await readJson(fsApi, paths.identity), artifact, keys)) {
+        return { state: 'partial', bytes: partial.size };
     }
     return { state: 'absent', bytes: 0 };
 }
@@ -437,24 +328,58 @@ export async function inspectArtifact({ root, artifact }) {
     return inspectWith(fs, artifactPaths({ root, artifact }), artifact);
 }
 
+/**
+ * How one pinned file would be obtained (C12, R4), decided without hashing:
+ * `owned` (verified in the store; a changed stat is checked again at Run),
+ * `in-place` (a regular file of the pinned size already at its store path),
+ * `copy` from a /shared candidate of the pinned size, or `download`.
+ * `bytesNeeded` is the new disk space that way needs; admission adds the
+ * reserve.
+ */
+async function planWith(fsApi, paths, artifact, keys, candidates, inspected) {
+    const file = artifact.file;
+    const current = inspected ?? await inspectWith(fsApi, paths, artifact, keys);
+    if (current.state === 'complete') return { file, method: 'owned', bytesNeeded: 0 };
+    const existing = await regularFileUnder(fsApi, paths.root, paths.file);
+    if (existing?.size === artifact.size) return { file, method: 'in-place', bytesNeeded: 0 };
+    if (candidates?.length) return { file, method: 'copy', bytesNeeded: artifact.size, source: candidates[0].path };
+    return { file, method: 'download', bytesNeeded: artifact.size - (current.state === 'partial' ? current.bytes : 0) };
+}
+
+export async function artifactAcquisition({ root, artifact, candidates = [], inspected, fsApi = fs }) {
+    return planWith(fsApi, artifactPaths({ root, artifact }), artifact, IDENTITY_KEYS, candidates, inspected);
+}
+
+export async function snapshotFileAcquisition({ root, artifact, candidates = [], inspected, fsApi = fs }) {
+    return planWith(fsApi, snapshotFilePaths({ root, artifact }), artifact, SNAPSHOT_IDENTITY_KEYS, candidates, inspected);
+}
+
 async function removePartial(fsApi, paths) {
     await fsApi.promises.rm(paths.partial, { force: true });
     await fsApi.promises.rm(paths.identity, { force: true });
 }
 
-// A partial is kept only when its identity record matches this artifact and
-// it is not longer than the artifact; anything else restarts from zero.
-async function reconcilePartial(fsApi, paths, artifact, keys = IDENTITY_KEYS) {
-    const have = await fileSize(fsApi, paths.partial);
-    if (have === null) {
-        await fsApi.promises.rm(paths.identity, { force: true });
-        return 0;
+// Copies left behind by a crash; each attempt stages under a fresh name.
+async function stagingFiles(fsApi, paths) {
+    const prefix = `${path.basename(paths.partial)}.copy-`;
+    try {
+        const names = await fsApi.promises.readdir(path.dirname(paths.partial));
+        return names.filter((name) => name.startsWith(prefix)).map((name) => path.join(path.dirname(paths.partial), name));
+    } catch {
+        return [];
     }
-    if (have > artifact.size || !sameIdentity(await readJson(fsApi, paths.identity), artifact, keys)) {
+}
+
+// A partial is kept only when it is a regular file whose identity record
+// matches this artifact and it is not longer than the artifact; anything
+// else (a link included, which is removed and never followed) restarts from zero.
+async function reconcilePartial(fsApi, paths, artifact, keys = IDENTITY_KEYS) {
+    const partial = await regularFileUnder(fsApi, paths.root, paths.partial);
+    if (!partial || partial.size > artifact.size || !sameIdentity(await readJson(fsApi, paths.identity), artifact, keys)) {
         await removePartial(fsApi, paths);
         return 0;
     }
-    return have;
+    return partial.size;
 }
 
 async function nearestExistingAncestor(fsApi, dir) {
@@ -473,61 +398,158 @@ async function nearestExistingAncestor(fsApi, dir) {
     }
 }
 
-async function assertFreeSpace({ fsApi, statfs, dir, remaining }) {
+async function assertFreeSpace({ fsApi, statfs, dir, remaining, what = 'the model weights' }) {
     const stats = await statfs(await nearestExistingAncestor(fsApi, dir));
     const available = Number(stats.bavail) * Number(stats.bsize);
     const required = Math.ceil(remaining * SPACE_MARGIN);
     if (available < required) {
-        throw new DownloadError('INSUFFICIENT_SPACE', 'Not enough free space for the model weights', {
+        throw new DownloadError('INSUFFICIENT_SPACE', `Not enough free space for ${what}`, {
             details: { required, available },
         });
     }
 }
 
-// Re-hashing a 17 GB partial takes a while, so a Stop is honoured per chunk.
-// The running digest a download is verified with: sha256, or the git blob
-// oid (sha1 over "blob <size>\0" and the bytes) for a snapshot file kept in git.
-function createDigest(artifact) {
-    if (artifact.sha256 === undefined && GIT_OID_RE.test(String(artifact.gitOid || ''))) {
-        return crypto.createHash('sha1').update(`blob ${artifact.size}\0`);
+function downloadSourceOf(ctx) {
+    return ctx.url || resolveUrl(ctx.baseUrl, ctx.artifact);
+}
+
+function provenanceOf(meta, ctx) {
+    const recorded = meta?.provenance;
+    if (recorded && typeof recorded.source === 'string' && typeof recorded.method === 'string') return recorded;
+    return { file: ctx.label, source: downloadSourceOf(ctx), method: 'download', bytes: ctx.artifact.size };
+}
+
+/**
+ * The agent's own file (C12, steps 1 and 2): a verified file whose stat is
+ * unchanged is used as it is; a changed one is hashed again; an unrecorded
+ * regular file of the pinned size at the store path is hashed and adopted in
+ * place. Always through one bound descriptor (R1, R2). Returns null when the
+ * file must be obtained another way.
+ */
+async function useOwnFile(ctx) {
+    const { fsApi, paths, artifact, identityKeys, label } = ctx;
+    const meta = await readJson(fsApi, paths.meta);
+    const recorded = sameIdentity(meta, artifact, identityKeys);
+    const opened = await openBound(fsApi, paths.root, paths.file);
+    if (!opened.handle) {
+        if (opened.rejected !== 'missing') {
+            ctx.notes.push(`${label}: the store path is ${opened.rejected === 'symlink' ? 'a symbolic link' : opened.rejected}; treated as absent`);
+        }
+        if (recorded) await fsApi.promises.rm(paths.meta, { force: true });
+        return null;
     }
-    return crypto.createHash('sha256');
-}
-
-function expectedDigest(artifact) {
-    return artifact.sha256 ?? artifact.gitOid;
-}
-
-async function hashExisting(fsApi, partial, have, signal, artifact, progress = null) {
-    const hash = createDigest(artifact);
-    if (have === 0) {
-        return hash;
+    const { handle, stat } = opened;
+    try {
+        if (stat.size !== artifact.size) {
+            if (recorded) await fsApi.promises.rm(paths.meta, { force: true });
+            return null;
+        }
+        if (recorded && sameStat(meta.stat, statIdentity(stat))) {
+            return { provenance: provenanceOf(meta, ctx), current: true };
+        }
+        // Changed since it was verified, verified before stats were recorded, or never verified here.
+        const checked = await hashBound(handle, artifact, {
+            signal: ctx.signal,
+            chunkBytes: ctx.chunkBytes,
+            onBytes: (bytes) => ctx.progress.tick(bytes, 0, 'verifying'),
+        });
+        if (!checked.stable) {
+            throw new DownloadError('CHANGED_WHILE_VERIFYING', `${label} changed while it was being verified; run again`, { retryable: true });
+        }
+        if (!checked.matches) {
+            if (recorded) {
+                // The agent's own file lost its bytes: remove it before fetching it again.
+                await fsApi.promises.rm(paths.file, { force: true });
+                await fsApi.promises.rm(paths.meta, { force: true });
+            } else {
+                ctx.notes.push(`${label}: the file at the store path does not match the pinned digest; it will be replaced`);
+            }
+            return null;
+        }
+        const provenance = recorded ? provenanceOf(meta, ctx) : { file: label, source: paths.file, method: 'in-place', bytes: 0 };
+        await writeJsonAtomic(fsApi, paths.meta, {
+            ...identityOf(artifact, identityKeys),
+            verifiedAt: new Date().toISOString(),
+            provenance,
+            stat: checked.stat,
+        });
+        if (!recorded && stat.nlink > 1) {
+            ctx.notes.push(`${label} was adopted in place and has ${stat.nlink - 1} other hard link(s); `
+                + 'do not keep a link to it under /shared, where every agent can write');
+        }
+        return recorded ? { provenance, current: true, reverified: true } : { provenance };
+    } finally {
+        await handle.close().catch(() => {});
     }
-    const stream = fsApi.createReadStream(partial, { start: 0, end: have - 1 });
-    let done = 0;
-    for await (const chunk of stream) {
-        throwIfAborted(signal);
-        hash.update(chunk);
-        done += chunk.length;
-        progress?.tick(done, 0);
+}
+
+/**
+ * Step 3 (C12): a private, verified copy of a /shared candidate. At most
+ * MAX_CANDIDATES_PER_FILE are hashed. Each gets its own staging file; an
+ * existing partial and its identity record stay untouched until a verified
+ * copy is published (R5). Space, write and read failures are errors (R6).
+ */
+async function adoptCopy(ctx, candidates) {
+    const { fsApi, paths, artifact, label } = ctx;
+    let hashed = 0;
+    for (const candidate of candidates) {
+        if (hashed >= MAX_CANDIDATES_PER_FILE) break;
+        throwIfAborted(ctx.signal);
+        const opened = await openBound(fsApi, candidate.root, candidate.path);
+        if (!opened.handle) {
+            ctx.notes.push(`${label}: skipped ${candidate.path} (${opened.rejected === 'symlink' ? 'a symbolic link' : opened.rejected})`);
+            continue;
+        }
+        let staging = null;
+        try {
+            if (opened.stat.size !== artifact.size) continue;
+            hashed += 1;
+            await assertFreeSpace({ fsApi, statfs: ctx.statfs, dir: path.dirname(paths.partial), remaining: artifact.size,
+                what: 'a private copy of the model file' });
+            await ensureDirUnder(fsApi, paths.root, path.dirname(paths.partial));
+            staging = `${paths.partial}.copy-${crypto.randomBytes(6).toString('hex')}`;
+            const copied = await copyToStaging(fsApi, {
+                source: candidate.path,
+                opened,
+                root: paths.root,
+                staging,
+                artifact,
+                signal: ctx.signal,
+                chunkBytes: ctx.chunkBytes,
+                onBytes: (bytes) => ctx.progress.tick(bytes, 0, 'copying'),
+            });
+            if (!copied.staged) {
+                ctx.notes.push(`${label}: ${candidate.path} not used; ${copied.reason}`);
+                continue;
+            }
+            const provenance = { file: label, source: candidate.path, method: 'copy', bytes: artifact.size };
+            await publishVerified(fsApi, {
+                root: paths.root,
+                staged: copied.staged,
+                from: staging,
+                to: paths.file,
+                meta: paths.meta,
+                record: { ...identityOf(artifact, ctx.identityKeys), verifiedAt: new Date().toISOString(), provenance },
+                writeJson: (target, value) => writeJsonAtomic(fsApi, target, value),
+            });
+            staging = null;
+            // Only now is an earlier partial of this file obsolete.
+            await removePartial(fsApi, paths);
+            return { provenance };
+        } finally {
+            await opened.handle.close().catch(() => {});
+            if (staging) await fsApi.promises.rm(staging, { force: true }).catch(() => {});
+        }
     }
-    return hash;
+    return null;
 }
 
-function abortedError() {
-    return new DownloadError('ABORTED', 'Download stopped; the partial file is kept for resume', { retryable: true });
-}
-
-function throwIfAborted(signal) {
-    if (signal?.aborted) {
-        throw abortedError();
-    }
-}
-
+// Progress carries its phase: `downloading`, `copying` (a private copy from
+// /shared) or `verifying` (hashing bytes already on disk).
 function createProgress({ total, onProgress, intervalMs }) {
     const samples = [];
     let lastEmit = -Infinity;
-    const emit = (bytes, transferred, now) => {
+    const emit = (bytes, transferred, now, phase) => {
         samples.push({ time: now, transferred });
         while (samples.length > 2 && samples[0].time < now - RATE_WINDOW_MS) {
             samples.shift();
@@ -538,20 +560,20 @@ function createProgress({ total, onProgress, intervalMs }) {
         const etaSeconds = rate > 0 ? Math.ceil((total - bytes) / rate) : null;
         lastEmit = now;
         try {
-            onProgress({ bytes, total, rate, etaSeconds, transferred });
+            onProgress({ bytes, total, rate, etaSeconds, transferred, phase });
         } catch {
             // A failing progress consumer must not corrupt the transfer.
         }
     };
     return {
-        tick(bytes, transferred) {
+        tick(bytes, transferred, phase = 'downloading') {
             const now = performance.now();
             if (now - lastEmit >= intervalMs) {
-                emit(bytes, transferred, now);
+                emit(bytes, transferred, now, phase);
             }
         },
-        finish(bytes, transferred) {
-            emit(bytes, transferred, performance.now());
+        finish(bytes, transferred, phase = 'downloading') {
+            emit(bytes, transferred, performance.now(), phase);
         },
     };
 }
@@ -740,7 +762,8 @@ async function transfer(ctx) {
     }
 }
 
-async function finalize(ctx, paths) {
+async function finalize(ctx) {
+    const { paths } = ctx;
     const digest = ctx.hash.digest('hex');
     if (digest !== expectedDigest(ctx.artifact)) {
         await removePartial(ctx.fsApi, paths);
@@ -748,22 +771,31 @@ async function finalize(ctx, paths) {
             details: { expected: expectedDigest(ctx.artifact), actual: digest },
         });
     }
-    // Meta goes first: a crash before the rename leaves a verifiable partial,
-    // never a final file without its identity record.
-    await writeJsonAtomic(ctx.fsApi, paths.meta, {
-        ...identityOf(ctx.artifact, ctx.identityKeys),
-        verifiedAt: new Date().toISOString(),
+    // The record goes first: a crash before the rename leaves a verifiable
+    // partial, never a final file without its identity record.
+    await publishVerified(ctx.fsApi, {
+        root: paths.root,
+        staged: ctx.written,
+        from: paths.partial,
+        to: paths.file,
+        meta: paths.meta,
+        record: {
+            ...identityOf(ctx.artifact, ctx.identityKeys),
+            verifiedAt: new Date().toISOString(),
+            provenance: { file: ctx.label, source: downloadSourceOf(ctx), method: 'download', bytes: ctx.transferred },
+        },
+        writeJson: (target, value) => writeJsonAtomic(ctx.fsApi, target, value),
     });
-    await ctx.fsApi.promises.rename(paths.partial, paths.file);
     await ctx.fsApi.promises.rm(paths.identity, { force: true });
-    await recordStat(ctx.fsApi, paths);
 }
 
-async function runTransfer(ctx, paths) {
+async function runTransfer(ctx) {
     try {
         await transfer(ctx);
         try {
             await ctx.handle.sync();
+            // The object whose every byte went through the running digest.
+            ctx.written = statIdentity(await ctx.handle.stat());
         } catch (err) {
             throw new LocalWriteError(err);
         }
@@ -783,7 +815,7 @@ async function runTransfer(ctx, paths) {
         await ctx.handle.close().catch(() => {});
     }
     ctx.progress.finish(ctx.have, ctx.transferred);
-    await finalize(ctx, paths);
+    await finalize(ctx);
 }
 
 export async function downloadArtifact({
@@ -798,6 +830,13 @@ export async function downloadArtifact({
     return downloadInto({ paths, artifact, identityKeys: IDENTITY_KEYS, url: null, token, fetchImpl, baseUrl, ...options });
 }
 
+/**
+ * Obtain one pinned file, in the order of C12 (DS002): the agent's own
+ * verified file; a file already at the store path, adopted in place; a
+ * private copy of a /shared candidate; otherwise a download or its resume.
+ * Returns the path, the bytes transferred, `provenance` ({ file, source,
+ * method, bytes }) and `notes` for the deployment log.
+ */
 async function downloadInto({
     paths,
     artifact,
@@ -814,60 +853,78 @@ async function downloadInto({
     maxAttempts = 6,
     backoffMs = (attempt) => Math.min(30_000, 1000 * 2 ** attempt),
     sleep,
-    // Directories to adopt a verified copy from before downloading (C12, DS002).
+    // Directories whose regular files may be copied instead of downloaded (C12).
     adoptFrom = [],
+    // Or the candidates already found by the caller's walk: a list, or an async function returning one.
+    candidates = null,
+    chunkBytes = CHUNK_BYTES,
 }) {
     throwIfAborted(signal);
-    const current = await inspectWith(fsApi, paths, artifact, identityKeys);
-    if (current.state === 'complete') {
-        await fsApi.promises.rm(paths.identity, { force: true });
-        const meta = await readJson(fsApi, paths.meta);
-        if (sameStat(meta?.stat, await statIdentity(fsApi, paths.file))) {
-            return { status: 'complete', path: paths.file, bytesTransferred: 0 };
-        }
-        // Changed since it was verified (or verified before stats were
-        // recorded): check the bytes again before anything loads them.
-        const digest = (await hashExisting(fsApi, paths.file, artifact.size, signal, artifact,
-            createProgress({ total: artifact.size, onProgress, intervalMs: progressIntervalMs }))).digest('hex');
-        if (digest === expectedDigest(artifact)) {
-            await recordStat(fsApi, paths);
-            return { status: 'complete', path: paths.file, bytesTransferred: 0, reverified: true };
-        }
-        await fsApi.promises.rm(paths.file, { force: true });
-        await fsApi.promises.rm(paths.meta, { force: true });
-    }
-    if (adoptFrom.length) {
-        const adopted = await adoptShared({
-            artifact, identityKeys, signal, fsApi,
-            progress: createProgress({ total: artifact.size, onProgress, intervalMs: progressIntervalMs }),
-        }, paths, adoptFrom);
-        if (adopted) return { status: 'complete', path: paths.file, bytesTransferred: 0, adopted };
-    }
-    const have = await reconcilePartial(fsApi, paths, artifact, identityKeys);
-    await assertFreeSpace({ fsApi, statfs, dir: paths.dir, remaining: artifact.size - have });
-    await fsApi.promises.mkdir(path.dirname(paths.file), { recursive: true });
-    await fsApi.promises.mkdir(path.dirname(paths.partial), { recursive: true });
-    await writeJsonAtomic(fsApi, paths.identity, identityOf(artifact, identityKeys));
     const ctx = {
-        artifact,
-        identityKeys,
-        url,
-        token,
-        fetchImpl,
-        baseUrl,
-        signal,
-        fsApi,
-        maxAttempts,
-        backoffMs,
-        sleep,
-        have,
-        transferred: 0,
-        hash: await hashExisting(fsApi, paths.partial, have, signal, artifact),
-        handle: await fsApi.promises.open(paths.partial, 'a'),
+        paths, artifact, identityKeys, url, token, fetchImpl, baseUrl, signal, statfs, fsApi, maxAttempts, backoffMs, sleep,
+        chunkBytes,
+        label: artifact.file || path.basename(paths.file),
+        notes: [],
         progress: createProgress({ total: artifact.size, onProgress, intervalMs: progressIntervalMs }),
     };
-    await runTransfer(ctx, paths);
-    return { status: 'complete', path: paths.file, bytesTransferred: ctx.transferred };
+    const done = (result, bytesTransferred = 0) => ({ status: 'complete', path: paths.file, bytesTransferred, notes: ctx.notes, ...result });
+    // No symbolic link on the way to either directory (R2); they are created only when something is placed (R3).
+    await assertRealDirs(fsApi, paths.root, path.dirname(paths.file));
+    await assertRealDirs(fsApi, paths.root, path.dirname(paths.partial));
+    for (const stale of await stagingFiles(fsApi, paths)) await fsApi.promises.rm(stale, { force: true });
+    const own = await useOwnFile(ctx);
+    if (own) {
+        await removePartial(fsApi, paths);
+        return done(own);
+    }
+    let list = typeof candidates === 'function' ? await candidates() : candidates;
+    if (!list && adoptFrom.length) {
+        list = orderCandidates((await walkShared(fsApi, adoptFrom, [artifact.size], signal)).get(artifact.size), ctx.label);
+    }
+    const copied = list?.length ? await adoptCopy(ctx, list) : null;
+    if (copied) return done(copied);
+    const have = await reconcilePartial(fsApi, paths, artifact, identityKeys);
+    await assertFreeSpace({ fsApi, statfs, dir: paths.dir, remaining: artifact.size - have });
+    await ensureDirUnder(fsApi, paths.root, path.dirname(paths.file));
+    await ensureDirUnder(fsApi, paths.root, path.dirname(paths.partial));
+    await writeJsonAtomic(fsApi, paths.identity, identityOf(artifact, identityKeys));
+    const handle = await openPartialBound(fsApi, paths.root, paths.partial);
+    const hash = createDigest(artifact);
+    try {
+        await hashPrefix(handle, have, hash, { signal, chunkBytes, onBytes: (bytes) => ctx.progress.tick(bytes, 0, 'verifying') });
+    } catch (error) {
+        await handle.close().catch(() => {});
+        throw error;
+    }
+    Object.assign(ctx, { have, transferred: 0, hash, handle });
+    await runTransfer(ctx);
+    return done({ provenance: { file: ctx.label, source: downloadSourceOf(ctx), method: 'download', bytes: ctx.transferred } },
+        ctx.transferred);
+}
+
+/**
+ * The last check before a runner loads the file (C12): the verified file's
+ * stat must be unchanged, or its bytes are hashed again. Throws when the file
+ * is no longer the verified one.
+ */
+async function verifyInto({ paths, artifact, identityKeys, url = null, baseUrl = 'https://huggingface.co', signal, onProgress = () => {},
+    fsApi = fs, progressIntervalMs = 500, chunkBytes = CHUNK_BYTES }) {
+    const ctx = {
+        paths, artifact, identityKeys, url, baseUrl, signal, fsApi, chunkBytes,
+        label: artifact.file || path.basename(paths.file),
+        notes: [],
+        progress: createProgress({ total: artifact.size, onProgress, intervalMs: progressIntervalMs }),
+    };
+    const meta = await readJson(fsApi, paths.meta);
+    const own = sameIdentity(meta, artifact, identityKeys) ? await useOwnFile(ctx) : null;
+    if (!own) {
+        throw new DownloadError('CHANGED_AFTER_VERIFY', `${ctx.label} is no longer the verified file; run again to fetch it`);
+    }
+    return { reverified: Boolean(own.reverified), notes: ctx.notes };
+}
+
+export async function verifyArtifact({ root, artifact, ...options }) {
+    return verifyInto({ paths: artifactPaths({ root, artifact }), artifact, identityKeys: IDENTITY_KEYS, ...options });
 }
 
 function fileSource({ url, size, sha256, target, allowHttp = false }) {
@@ -895,7 +952,7 @@ function fileSource({ url, size, sha256, target, allowHttp = false }) {
     const file = path.resolve(target);
     return {
         artifact: Object.freeze({ url: parsed.href, size, sha256 }),
-        paths: { dir: path.dirname(file), file, partial: `${file}.partial`, identity: `${file}.partial.json`, meta: `${file}.json` },
+        paths: { root: path.dirname(file), dir: path.dirname(file), file, partial: `${file}.partial`, identity: `${file}.partial.json`, meta: `${file}.json` },
     };
 }
 
@@ -915,20 +972,6 @@ export async function inspectFile({ url, size, sha256, target, allowHttp = true 
     return inspectWith(fs, paths, artifact, FILE_IDENTITY_KEYS);
 }
 
-async function removeFile(filePath) {
-    try {
-        const stats = await fs.promises.lstat(filePath);
-        await fs.promises.rm(filePath, { force: true });
-        // A hard link frees nothing while another link (a shared copy) remains.
-        return stats.isFile() && stats.nlink <= 1 ? stats.size : 0;
-    } catch (err) {
-        if (err.code === 'ENOENT') {
-            return 0;
-        }
-        throw err;
-    }
-}
-
 async function removeEmptyParents(base, dir) {
     let current = dir;
     while (current !== base && !path.relative(base, current).startsWith('..')) {
@@ -943,12 +986,20 @@ async function removeEmptyParents(base, dir) {
     }
 }
 
-export async function removeArtifact({ root, artifact }) {
+// Freed bytes count each inode whose last link this removal takes (R8).
+export async function removeArtifact({ root, artifact, fsApi = fs }) {
     const paths = artifactPaths({ root, artifact });
-    let freed = 0;
-    for (const target of [paths.file, paths.partial, paths.identity, paths.meta]) {
-        freed += await removeFile(target);
+    const targets = [paths.file, paths.partial, paths.identity, paths.meta, ...await stagingFiles(fsApi, paths)];
+    const stats = [];
+    for (const target of targets) {
+        try {
+            stats.push(await fsApi.promises.lstat(target));
+        } catch (err) {
+            if (err.code !== 'ENOENT') throw err;
+        }
     }
+    const freed = freedBytes(stats);
+    for (const target of targets) await fsApi.promises.rm(target, { force: true });
     await removeEmptyParents(path.resolve(root), path.dirname(paths.file));
     return freed;
 }
@@ -997,7 +1048,7 @@ function snapshotFilePaths({ root, artifact }) {
     const partial = path.join(stateDir, `${artifact.file}.partial`);
     assertInside(dir, file);
     assertInside(stateDir, partial);
-    return { dir, file, partial, identity: `${partial}.json`, meta: path.join(stateDir, `${artifact.file}.json`) };
+    return { root: path.resolve(root), dir, file, partial, identity: `${partial}.json`, meta: path.join(stateDir, `${artifact.file}.json`) };
 }
 
 /** One file of a pinned snapshot, resumed, verified and moved into the snapshot directory. */
@@ -1015,6 +1066,10 @@ export async function downloadSnapshotFile({
 
 export async function inspectSnapshotFile({ root, artifact }) {
     return inspectWith(fs, snapshotFilePaths({ root, artifact }), artifact, SNAPSHOT_IDENTITY_KEYS);
+}
+
+export async function verifySnapshotFile({ root, artifact, ...options }) {
+    return verifyInto({ paths: snapshotFilePaths({ root, artifact }), artifact, identityKeys: SNAPSHOT_IDENTITY_KEYS, ...options });
 }
 
 /**

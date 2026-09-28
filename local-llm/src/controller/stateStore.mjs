@@ -104,7 +104,7 @@ export function reconcileAfterRestart(state, now = new Date().toISOString()) {
     }
     const deployment = state.deployment;
     if (!deployment) return state;
-    if (['downloading', 'verifying', 'pulling'].includes(deployment.phase)) {
+    if (['downloading', 'copying', 'verifying', 'pulling'].includes(deployment.phase)) {
         deployment.phase = 'paused';
         deployment.pausedReason = 'The agent restarted during the download; press Run to resume.';
     } else if (['starting', 'loading', 'ready', 'stopping'].includes(deployment.phase)) {

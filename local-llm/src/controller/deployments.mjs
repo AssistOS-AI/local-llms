@@ -2,7 +2,7 @@
 // mutation serialized through one command queue, downloads and runner
 // processes owned here and never by a tool process.
 //
-//   idle -> downloading -> verifying -> starting -> ready -> stopping -> idle
+//   idle -> downloading | copying | verifying -> starting -> ready -> stopping -> idle
 //   (weights the controller fetches, such as a GGUF file)  plus paused and error
 //   idle -> starting -> downloading -> loading -> ready -> stopping -> idle
 //   (weights the runner fetches itself, such as an Ollama tag)
@@ -28,6 +28,8 @@ import {
     inspectArtifact,
     removeArtifact,
     resolveHuggingFaceArtifact,
+    verifyArtifact,
+    verifySnapshotFile,
 } from './downloader.mjs';
 import { readMemory as readHostMemory, readMemoryPressure, readSnapshot } from './hardware.mjs';
 import { UNIFIED, profileOf } from './profiles.mjs';
@@ -36,10 +38,11 @@ import { loadRunnerLock } from './runnerLock.mjs';
 import { createLogBuffer, parseRunnerReport, startRunnerProcess } from './runnerProcess.mjs';
 import { createStateStore, reconcileAfterRestart } from './stateStore.mjs';
 import { createWeightStores } from './weightStores.mjs';
+import { walkShared } from './workspaceReuse.mjs';
 import { DRAIN_QUEUE_WAIT_MS, DRAIN_RUNNER_GRACE_MS } from '../drainBudget.mjs';
 
-const ACTIVE_PHASES = new Set(['downloading', 'verifying', 'starting', 'loading', 'ready', 'stopping']);
-const TRANSFER_PHASES = new Set(['downloading', 'verifying']);
+const ACTIVE_PHASES = new Set(['downloading', 'copying', 'verifying', 'starting', 'loading', 'ready', 'stopping']);
+const TRANSFER_PHASES = new Set(['downloading', 'copying', 'verifying']);
 const REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
 const PROBE_TIMEOUT_MS = 10_000;
 const IMAGE_CONTRACT = '/opt/local-llm/source.contract';
@@ -76,6 +79,15 @@ export function dropPageCache(file, { spawnSyncImpl = spawnSync } = {}) {
         timeout: 30_000, stdio: 'ignore', env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' },
     });
     return result.status === 0 && !result.error;
+}
+
+// One log line per file or shard: how it was obtained (C12, R7).
+function describeProvenance(entry) {
+    const how = { 'in-place': `adopted in place at ${entry.source}`, copy: `copied from ${entry.source}`,
+        download: `downloaded from ${entry.source}` }[entry.method] || `${entry.method} from ${entry.source}`;
+    return entry.current
+        ? `${entry.file}: already verified in the store (${how}, ${entry.bytes} bytes)`
+        : `${entry.file}: ${how} (${entry.bytes} bytes), verified`;
 }
 
 function paramsKey(modelId, runnerId) {
@@ -131,6 +143,10 @@ export function createController({
     downloadSnapshot = undefined,
     inspectSnapshot = undefined,
     resolveSnapshot = undefined,
+    // The last check before loading reads what the real downloader wrote; an
+    // injected downloader brings its own check, or none.
+    verify = download === downloadArtifact ? verifyArtifact : async () => ({ notes: [] }),
+    verifySnapshot = downloadSnapshot === undefined ? verifySnapshotFile : async () => ({ notes: [] }),
     // The agent's own /dev/shm (a private tmpfs), where PyTorch runners keep sockets.
     shmDir = '/dev/shm',
     // Host-memory guard for deployments whose admission sets a RAM floor
@@ -207,6 +223,8 @@ export function createController({
         ...(downloadSnapshot ? { downloadSnapshot } : {}),
         ...(inspectSnapshot ? { inspectSnapshot } : {}),
         ...(resolveSnapshot ? { resolveSnapshot } : {}),
+        verify,
+        verifySnapshot,
         sharedModelsRoot,
     });
 
@@ -367,6 +385,17 @@ export function createController({
         return source ? storeFor(source).state(source) : null;
     }
 
+    // How the weights would be obtained and the disk that needs (C12, R4):
+    // Run, its preview and the overview all use it for the disk term of
+    // admission. It hashes and copies nothing.
+    async function acquisitionOf(source, index = null) {
+        if (!source) return { bytesNeeded: 0, files: [] };
+        const store = storeFor(source);
+        if (store.plan) return store.plan(source, { index });
+        const disk = await store.state(source);
+        return { bytesNeeded: disk?.total ? Math.max(0, disk.total - (disk.bytes || 0)) : 0, files: [] };
+    }
+
     function effectiveParams(model, runnerId, override) {
         const runnerDef = getRunner(runnerId);
         const options = { model, profile: profile || 'dedicated' };
@@ -416,14 +445,14 @@ export function createController({
         } catch (error) {
             return { modelId, runnerId, error: error.message, field: error.details?.field ?? null };
         }
-        const disk = await weightsState(source);
-        const remaining = disk?.total ? Math.max(0, disk.total - (disk.bytes || 0)) : 0;
+        const acquisition = await acquisitionOf(source);
         return {
             modelId,
             runnerId,
             params: normalized,
             context: definition.describeContext ? definition.describeContext(normalized, { model, profile }) : null,
-            admission: admitHere({ definition, model, source, params: normalized, snap, remainingDownloadBytes: remaining }),
+            acquisition,
+            admission: admitHere({ definition, model, source, params: normalized, snap, remainingDownloadBytes: acquisition.bytesNeeded }),
         };
     }
 
@@ -444,7 +473,12 @@ export function createController({
             });
         }
         const models = [];
-        for (const model of catalog()) {
+        const listed = catalog();
+        // One walk of /shared for every file the listed models could copy from there.
+        const sizes = listed.flatMap((model) => Object.values(model.sources)
+            .flatMap((source) => (source && storeFor(source).sizes ? storeFor(source).sizes(source) : [])));
+        const index = sharedModelsRoot && sizes.length ? await walkShared(fs, [sharedModelsRoot], sizes) : new Map();
+        for (const model of listed) {
             // One entry per weight format: runners that read it share the download.
             const weights = {};
             for (const [format, source] of Object.entries(model.sources)) {
@@ -452,6 +486,7 @@ export function createController({
                     label: WEIGHT_FORMATS[format]?.label || format,
                     size: source?.size ?? null,
                     download: await weightsState(source),
+                    acquisition: await acquisitionOf(source, index),
                     // The runners that can read them here: not one this deployment's operator left off.
                     runners: Object.values(runners)
                         .filter((definition) => definition.supported && availabilityOf(definition).available
@@ -470,7 +505,7 @@ export function createController({
                     try { params = effectiveParams(model, definition.id); } catch (error) { paramError = error.message; }
                 }
                 const disk = definition.supported ? weights[definition.weightFormat].download : null;
-                const remaining = disk && disk.total ? Math.max(0, disk.total - (disk.bytes || 0)) : 0;
+                const remaining = definition.supported ? weights[definition.weightFormat].acquisition.bytesNeeded : 0;
                 const gate = gateOf(definition);
                 perRunner[definition.id] = {
                     format: definition.weightFormat,
@@ -794,7 +829,10 @@ export function createController({
             etaSeconds: progress.etaSeconds ?? null,
             transferred: progress.transferred || 0,
         };
-        if (progress.total && progress.bytes >= progress.total && deployment.phase === 'downloading') {
+        if (progress.phase && TRANSFER_PHASES.has(deployment.phase)) {
+            // Copying from /shared and hashing show as their own phases (C12).
+            deployment.phase = progress.phase;
+        } else if (progress.total && progress.bytes >= progress.total && deployment.phase === 'downloading') {
             deployment.phase = 'verifying';
         }
         save();
@@ -865,9 +903,10 @@ export function createController({
                 transferred: fetched.bytesTransferred,
             };
             weights = { path: fetched.path };
-            for (const entry of fetched.adopted || []) {
-                log.append('controller', `adopted ${entry.file} from ${entry.from} (${entry.method}, verified) instead of downloading it`);
-            }
+            // Where every file and shard came from (C12, R7).
+            deployment.provenance = fetched.provenance || [];
+            for (const entry of deployment.provenance) log.append('controller', describeProvenance(entry));
+            for (const note of fetched.notes || []) log.append('controller', note);
             // Every file of the download (each shard of a split GGUF); a snapshot directory is skipped.
             for (const file of fetched.files || [fetched.path]) {
                 try {
@@ -886,6 +925,12 @@ export function createController({
             const built = await installer.ensureRunnable(definition.id, { signal });
             runnerDir = installer.pathsFor(installer.entryFor(definition.id)).runDir;
             if (built.rebuilt) log.append('controller', `rebuilt ${definition.id} in ${built.seconds.toFixed(1)} s (${built.bytes} bytes)`);
+            throwIfAborted(signal);
+        }
+        if (store.recheck) {
+            // The last check before loading: an unchanged stat, or the bytes hashed again (C12).
+            const checked = await store.recheck({ artifact: deployment.artifact, signal, onProgress: updateProgress });
+            for (const note of checked.notes || []) log.append('controller', note);
             throwIfAborted(signal);
         }
         const details = await definition.start(startContext(deployment, model, signal, weights, runnerDir));
@@ -1037,9 +1082,9 @@ export function createController({
                 await stopEverything('replace');
             }
             const disk = await weightsState(source);
-            const remaining = disk?.total ? Math.max(0, disk.total - (disk.bytes || 0)) : 0;
+            const acquisition = await acquisitionOf(source);
             const admission = admitHere({
-                definition, model, source, params: normalized, snap: await snapshot(), remainingDownloadBytes: remaining,
+                definition, model, source, params: normalized, snap: await snapshot(), remainingDownloadBytes: acquisition.bytesNeeded,
             });
             if (admission.status !== 'ok') {
                 throw new LocalLlmError(`admission_${admission.status.replace('-', '_')}`, admission.reason, { admission });
@@ -1059,6 +1104,7 @@ export function createController({
                 artifact: structuredClone(source),
                 phase: store.fetchedBy === 'runner' ? 'starting' : 'downloading',
                 admission,
+                acquisition: acquisition.files.map(({ file, method, bytesNeeded }) => ({ file, method, bytesNeeded })),
                 download: { bytes: disk?.bytes || 0, total: disk?.total ?? null, rate: 0, etaSeconds: null, transferred: 0 },
                 error: null,
                 pausedReason: null,
