@@ -21,6 +21,8 @@ import { DownloadError, abortedError, throwIfAborted } from './downloadError.mjs
 import {
     CHUNK_BYTES,
     MAX_CANDIDATES_PER_FILE,
+    anchorRoot,
+    anchorStore,
     assertRealDirs,
     copyToStaging,
     createDigest,
@@ -430,7 +432,7 @@ async function useOwnFile(ctx) {
     const { fsApi, paths, artifact, identityKeys, label } = ctx;
     const meta = await readJson(fsApi, paths.meta);
     const recorded = sameIdentity(meta, artifact, identityKeys);
-    const opened = await openBound(fsApi, paths.root, paths.file);
+    const opened = await openBound(fsApi, ctx.anchor, paths.file, { signal: ctx.signal });
     if (!opened.handle) {
         if (opened.rejected !== 'missing') {
             ctx.notes.push(`${label}: the store path is ${opened.rejected === 'symlink' ? 'a symbolic link' : opened.rejected}; treated as absent`);
@@ -467,6 +469,8 @@ async function useOwnFile(ctx) {
             return null;
         }
         const provenance = recorded ? provenanceOf(meta, ctx) : { file: label, source: paths.file, method: 'in-place', bytes: 0 };
+        // A snapshot keeps its records in a separate .state tree, which a canonical file placed by the operator lacks (F3).
+        await ensureDirUnder(fsApi, paths.root, path.dirname(paths.meta));
         await writeJsonAtomic(fsApi, paths.meta, {
             ...identityOf(artifact, identityKeys),
             verifiedAt: new Date().toISOString(),
@@ -495,7 +499,7 @@ async function adoptCopy(ctx, candidates) {
     for (const candidate of candidates) {
         if (hashed >= MAX_CANDIDATES_PER_FILE) break;
         throwIfAborted(ctx.signal);
-        const opened = await openBound(fsApi, candidate.root, candidate.path);
+        const opened = await openBound(fsApi, candidate.anchor, candidate.path, { signal: ctx.signal });
         if (!opened.handle) {
             ctx.notes.push(`${label}: skipped ${candidate.path} (${opened.rejected === 'symlink' ? 'a symbolic link' : opened.rejected})`);
             continue;
@@ -511,7 +515,7 @@ async function adoptCopy(ctx, candidates) {
             const copied = await copyToStaging(fsApi, {
                 source: candidate.path,
                 opened,
-                root: paths.root,
+                anchor: ctx.anchor,
                 staging,
                 artifact,
                 signal: ctx.signal,
@@ -762,15 +766,41 @@ async function transfer(ctx) {
     }
 }
 
+function mismatchError(ctx, actual, why = 'Downloaded bytes do not match') {
+    return new DownloadError('SHA256_MISMATCH', `${why} the pinned ${ctx.artifact.sha256 === undefined ? 'git oid' : 'sha256'}`, {
+        details: { expected: expectedDigest(ctx.artifact), actual },
+    });
+}
+
+/**
+ * The finished partial, verified through its own descriptor with an identical
+ * fstat before and after (F4): the streamed digest only proves the bytes
+ * received, not the bytes now on disk, including a resumed prefix.
+ */
+async function verifyPartial(ctx) {
+    const streamed = ctx.hash.digest('hex');
+    if (streamed !== expectedDigest(ctx.artifact)) {
+        await removePartial(ctx.fsApi, ctx.paths);
+        throw mismatchError(ctx, streamed);
+    }
+    const checked = await hashBound(ctx.handle, ctx.artifact, {
+        signal: ctx.signal,
+        chunkBytes: ctx.chunkBytes,
+        onBytes: (bytes) => ctx.progress.tick(bytes, ctx.transferred, 'verifying'),
+    });
+    if (!checked.stable) {
+        throw new DownloadError('CHANGED_WHILE_VERIFYING', `${ctx.label} changed while it was being verified; run again`, { retryable: true });
+    }
+    if (!checked.matches) {
+        await removePartial(ctx.fsApi, ctx.paths);
+        throw mismatchError(ctx, null, 'The bytes on disk changed after they were received; they do not match');
+    }
+    // The object whose every byte was just hashed through this descriptor.
+    ctx.written = checked.stat;
+}
+
 async function finalize(ctx) {
     const { paths } = ctx;
-    const digest = ctx.hash.digest('hex');
-    if (digest !== expectedDigest(ctx.artifact)) {
-        await removePartial(ctx.fsApi, paths);
-        throw new DownloadError('SHA256_MISMATCH', `Downloaded bytes do not match the pinned ${ctx.artifact.sha256 === undefined ? 'git oid' : 'sha256'}`, {
-            details: { expected: expectedDigest(ctx.artifact), actual: digest },
-        });
-    }
     // The record goes first: a crash before the rename leaves a verifiable
     // partial, never a final file without its identity record.
     await publishVerified(ctx.fsApi, {
@@ -794,11 +824,11 @@ async function runTransfer(ctx) {
         await transfer(ctx);
         try {
             await ctx.handle.sync();
-            // The object whose every byte went through the running digest.
-            ctx.written = statIdentity(await ctx.handle.stat());
         } catch (err) {
             throw new LocalWriteError(err);
         }
+        ctx.progress.finish(ctx.have, ctx.transferred);
+        await verifyPartial(ctx);
     } catch (err) {
         await syncQuietly(ctx.handle);
         if (err instanceof LocalWriteError) {
@@ -814,7 +844,6 @@ async function runTransfer(ctx) {
     } finally {
         await ctx.handle.close().catch(() => {});
     }
-    ctx.progress.finish(ctx.have, ctx.transferred);
     await finalize(ctx);
 }
 
@@ -868,6 +897,8 @@ async function downloadInto({
         progress: createProgress({ total: artifact.size, onProgress, intervalMs: progressIntervalMs }),
     };
     const done = (result, bytesTransferred = 0) => ({ status: 'complete', path: paths.file, bytesTransferred, notes: ctx.notes, ...result });
+    // The store root is anchored once for this operation (F1).
+    ctx.anchor = await anchorStore(fsApi, paths.root);
     // No symbolic link on the way to either directory (R2); they are created only when something is placed (R3).
     await assertRealDirs(fsApi, paths.root, path.dirname(paths.file));
     await assertRealDirs(fsApi, paths.root, path.dirname(paths.partial));
@@ -888,7 +919,7 @@ async function downloadInto({
     await ensureDirUnder(fsApi, paths.root, path.dirname(paths.file));
     await ensureDirUnder(fsApi, paths.root, path.dirname(paths.partial));
     await writeJsonAtomic(fsApi, paths.identity, identityOf(artifact, identityKeys));
-    const handle = await openPartialBound(fsApi, paths.root, paths.partial);
+    const handle = await openPartialBound(fsApi, ctx.anchor, paths.partial);
     const hash = createDigest(artifact);
     try {
         await hashPrefix(handle, have, hash, { signal, chunkBytes, onBytes: (bytes) => ctx.progress.tick(bytes, 0, 'verifying') });
@@ -915,8 +946,9 @@ async function verifyInto({ paths, artifact, identityKeys, url = null, baseUrl =
         notes: [],
         progress: createProgress({ total: artifact.size, onProgress, intervalMs: progressIntervalMs }),
     };
+    ctx.anchor = await anchorRoot(fsApi, paths.root);
     const meta = await readJson(fsApi, paths.meta);
-    const own = sameIdentity(meta, artifact, identityKeys) ? await useOwnFile(ctx) : null;
+    const own = ctx.anchor && sameIdentity(meta, artifact, identityKeys) ? await useOwnFile(ctx) : null;
     if (!own) {
         throw new DownloadError('CHANGED_AFTER_VERIFY', `${ctx.label} is no longer the verified file; run again to fetch it`);
     }

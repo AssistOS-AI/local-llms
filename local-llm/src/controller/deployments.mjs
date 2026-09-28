@@ -176,6 +176,8 @@ export function createController({
     const state = reconcileAfterRestart(stateStore.load(), now().toISOString());
     let detected = {};
     let job = null;
+    // The acquisition planning of the Run being admitted, which Stop, Cancel and drain can abort (F5).
+    let planning = null;
     // One runner install at a time, beside the deployment job.
     let installJob = null;
     // Installable through the controller: in the image's runner lock and with
@@ -388,10 +390,10 @@ export function createController({
     // How the weights would be obtained and the disk that needs (C12, R4):
     // Run, its preview and the overview all use it for the disk term of
     // admission. It hashes and copies nothing.
-    async function acquisitionOf(source, index = null) {
+    async function acquisitionOf(source, index = null, signal = undefined) {
         if (!source) return { bytesNeeded: 0, files: [] };
         const store = storeFor(source);
-        if (store.plan) return store.plan(source, { index });
+        if (store.plan) return store.plan(source, { index, signal });
         const disk = await store.state(source);
         return { bytesNeeded: disk?.total ? Math.max(0, disk.total - (disk.bytes || 0)) : 0, files: [] };
     }
@@ -928,8 +930,16 @@ export function createController({
             throwIfAborted(signal);
         }
         if (store.recheck) {
-            // The last check before loading: an unchanged stat, or the bytes hashed again (C12).
-            const checked = await store.recheck({ artifact: deployment.artifact, signal, onProgress: updateProgress });
+            // The last check before loading: an unchanged stat, or the bytes hashed again (C12); hashing shows as verifying.
+            const checked = await store.recheck({
+                artifact: deployment.artifact,
+                signal,
+                onProgress: (progress) => {
+                    if (progress.phase === 'verifying' && state.deployment?.phase === 'starting') setPhase('verifying');
+                    updateProgress(progress);
+                },
+            });
+            if (state.deployment?.phase === 'verifying') setPhase('starting');
             for (const note of checked.notes || []) log.append('controller', note);
             throwIfAborted(signal);
         }
@@ -1082,7 +1092,20 @@ export function createController({
                 await stopEverything('replace');
             }
             const disk = await weightsState(source);
-            const acquisition = await acquisitionOf(source);
+            // Planning walks /shared: Stop, Cancel and drain abort it before they queue behind this Run (F5).
+            const planAbort = new AbortController();
+            planning = planAbort;
+            let acquisition;
+            try {
+                acquisition = await acquisitionOf(source, null, planAbort.signal);
+            } catch (error) {
+                if (planAbort.signal.aborted) {
+                    throw new LocalLlmError('cancelled', 'The Run was stopped while it was looking for the model files.');
+                }
+                throw error;
+            } finally {
+                if (planning === planAbort) planning = null;
+            }
             const admission = admitHere({
                 definition, model, source, params: normalized, snap: await snapshot(), remainingDownloadBytes: acquisition.bytesNeeded,
             });
@@ -1121,6 +1144,7 @@ export function createController({
     }
 
     function stop() {
+        planning?.abort();
         return queue.run(async () => {
             await stopEverything('stop');
             // Stop also clears a failed or paused deployment (a paused partial stays on disk).
@@ -1132,6 +1156,7 @@ export function createController({
     }
 
     function cancelDownload() {
+        planning?.abort();
         return queue.run(async () => {
             const deployment = state.deployment;
             if (!deployment || !job || !(TRANSFER_PHASES.has(deployment.phase) || deployment.phase === 'starting')) {
@@ -1415,6 +1440,7 @@ export function createController({
      */
     async function drain() {
         draining = true;
+        planning?.abort();
         // Let a command that is already running finish first (a Run refuses to
         // start a job once draining is set); bounded so it cannot block the drain.
         const waited = new AbortController();
