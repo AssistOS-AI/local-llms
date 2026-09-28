@@ -26,7 +26,13 @@ export const ikLlamaCppRunner = createLlamaServerRunner({
         quietArgs: Object.freeze(['--webui', 'none']),
         // No --kv-unified: the context is split across the parallel slots.
         unifiedKv: false,
-        loadArgs: ({ mlock, noMmap }) => [...(mlock ? ['--mlock'] : []), ...(noMmap ? ['--no-mmap'] : [])],
+        // ik keeps the old --mlock / --no-mmap flags and has no direct I/O.
+        loadModes: Object.freeze(['auto', 'none', 'mmap', 'mlock', 'mmap+mlock']),
+        loadArgs: (loadMode) => ({
+            none: ['--no-mmap'],
+            mlock: ['--mlock', '--no-mmap'],
+            'mmap+mlock': ['--mlock'],
+        })[loadMode] || [],
         // ik turns Jinja chat templates off by default; llama.cpp has them on.
         jinja: () => true,
         parseVersion,

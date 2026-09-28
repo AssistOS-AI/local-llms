@@ -141,17 +141,18 @@ export function validateParams(schema, input, { defaults = {} } = {}) {
     return validateObject(schema, input, defaults, '');
 }
 
-export function recommendedFor(model, runnerId) {
-    const recommended = model?.recommended;
-    if (!isPlainObject(recommended) || !Object.hasOwn(recommended, runnerId)) {
+/** The model's recommended parameters for a runner in a hardware profile (catalog v3), or {}. */
+export function recommendedFor(model, runnerId, profile = 'dedicated') {
+    const byRunner = model?.recommended?.[profile];
+    if (!isPlainObject(byRunner) || !Object.hasOwn(byRunner, runnerId)) {
         return {};
     }
-    return recommended[runnerId] || {};
+    return byRunner[runnerId] || {};
 }
 
-/** A runner's parameters: the input, then the model's recommended values, then the schema defaults. */
-export function normalizeWith(schema, runnerId, params = {}, model = undefined) {
-    return validateParams(schema, params, { defaults: recommendedFor(model, runnerId) });
+/** A runner's parameters: the input, then the model's recommended values for the profile, then the schema defaults. */
+export function normalizeWith(schema, runnerId, params = {}, model = undefined, profile = 'dedicated') {
+    return validateParams(schema, params, { defaults: recommendedFor(model, runnerId, profile) });
 }
 
 export function assertPort(port) {

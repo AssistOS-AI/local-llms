@@ -21,7 +21,7 @@ One agent, `local-llms/local-llm`, runs on hosts whose GPU has its own memory (t
 | `dedicated` | nvidia-smi reports total, used and free memory in MiB | GPU memory for the offloaded weights, KV cache and buffers; system RAM for the rest (DS003) |
 | `unified` | the GPU shares system memory | one pool: MemTotal and MemAvailable from `/proc/meminfo` |
 
-Everything this specification adds applies to the unified profile only. The dedicated profile keeps its snapshot values, parameters, defaults, launch arguments, environment and admission exactly as DS003 describes them.
+The dedicated profile keeps DS003's admission and defaults. Some changes made for the unified profile apply to both (catalog v3, `loadMode`, the runner's OOM priority and JIT cache location, runner availability from the image); they are marked where they are described.
 
 ### Detecting the memory model
 
@@ -38,11 +38,46 @@ The memory model is never inferred from the CPU architecture. On a unified GPU t
 
 Measured on DGX Spark (driver 580.159.03): `NVIDIA GB10, [N/A], [N/A], [N/A], 580.159.03` and `0x2E1210DE, 12.1, ATS, 0, 4.52, 47`.
 
-Until a runner has a unified-memory policy, admission refuses it on a unified GPU as `incompatible`, naming the runner and the GPU.
 
 ### CPU threads
 
 On a CPU whose cores differ in capacity (sysfs `cpu_capacity`), `performanceCoreCount()` counts the allowed CPUs within 10 % of the highest capacity: 10 on DGX Spark (Cortex-X925 at 997–1024, Cortex-A725 at 718–731). When capacities are equal or not reported it returns null. The dedicated default thread count (physical cores minus 2, DS003) is unchanged.
+
+### Runner availability and the image's GPUs
+
+The image says what it contains: `/opt/local-llm/source.contract` (key=value lines). When it exists, a runner is available only if its executable is in the image (llama.cpp, ik_llama.cpp, Ollama) or the image's runner lock lists it (vLLM, TabbyAPI, LM Studio; DS004). An unavailable runner is `supported: false` in the overview with "not available on this platform: this image does not include it", and `local_llm_run` refuses it with `runner_unavailable` before anything downloads. Without a contract (tests, development) every runner counts as available. The arm64 image's contract names `gpu_compute_capabilities=12.1`, the GPUs its CUDA runners were built for; a GPU of any other compute capability, or one that does not report it, is refused before downloading. The amd64 image names none and nothing is checked there.
+
+### Choosing the profile
+
+The controller decides the profile from its first hardware snapshot, logs it (`hardware profile: unified (NVIDIA GB10)`) and keeps it for the container's lifetime; the overview and `local_llm_status` report it. A snapshot without a usable GPU keeps the dedicated rules. A later snapshot whose memory model disagrees is not acted on: admission refuses every Run as `incompatible`, saying the agent must be restarted. The catalog's `profiles` (DS002) decide which models are offered; `recommended` and `validated` are read for the current profile.
+
+### llama.cpp on unified memory
+
+Only llama.cpp has a unified-memory policy in this release; every other runner is `incompatible` there. Its unified parameters (`paramSchemaFor('unified')`) are `ctxSize` (up to 262,144 and the model's training context per slot), `parallel`, `loadMode` (`dio`, the default, or `none`), `mtp` (`--spec-type draft-mtp --spec-draft-n-max 3`, only for models measured with it), `threads` and `chatTemplateKwargs` (`reasoning_effort`, `preserve_thinking`). Every flag that changes memory is fixed at the values the envelopes were measured with: `-ngl 999 -fa on`, f16 K and V, `-b 2048 -ub 2048`, `--kv-unified` above one slot, and `--cache-ram 8192`. Threads default to the high-performance cores (10 on DGX Spark), else physical cores minus 2.
+
+`dio` loaded a cold gpt-oss-20b in 4.1–4.5 s with +0.8 GiB of page cache; `none` took 8.7 s and added 12.1 GiB (gpt-oss-120b: 16 s vs 51 s, +0.9 vs +37 GiB). After a controller download is verified, the file is dropped from the page cache (`dd iflag=nocache count=0`, which calls `posix_fadvise(DONTNEED)`; best effort).
+
+### Unified admission
+
+A run is admitted only inside the model's measured envelope (`unified.envelope`, DS002): rectangles of total context and parallel slots, each measured at its corner, with MTP allowed or not. Anything outside is `incompatible`, naming the measured rectangles. The need is the corner's figures, which cover every configuration inside the rectangle:
+
+need = `bufferBytes` (the model, KV, recurrent-state, output and compute buffers llama.cpp logs at `-lv 4`, on the GPU and the host) + `transientBytes` (measured memory beyond those buffers during load, prefill and parallel requests with the prompt cache at 1 MiB, times 1.25) + 1.5 GiB (the CUDA context and the runner process) + the prompt cache's bound (`--cache-ram`, 8192 MiB).
+
+llama-server's prompt cache lives in host memory, is bounded by `--cache-ram` (it evicts before it allocates, and skips a single state larger than the bound), and is allocated in one burst when a new task starts. `--cache-ram 0` is not an option: it also turns off the clearing of idle slots, so with a unified KV cache an idle slot keeps its cells and new requests fail (measured: 0 of 4). 8192 MiB, llama.cpp's default, is the measured baseline; smaller bounds wait for their measurements.
+
+| Verdict | When |
+| --- | --- |
+| `incompatible` | outside the envelope; need above MemTotal less a 16 GiB host reserve; `/proc/meminfo` unreadable |
+| `insufficient-now` | need above MemAvailable less the 8 GiB floor (other processes on the machine hold the rest), or the download does not fit the disk |
+| `ok` | otherwise |
+
+No CPU offload (`nCpuMoe`) in this profile. The reserve, floor and runtime constant are provisional until the stop-latency and headroom measurements are in.
+
+### Memory guard
+
+On unified memory every runner is watched from its start to its exit: MemAvailable is sampled every 250 ms whether the runner is loading or ready. Below the 8 GiB floor, or when `/proc/meminfo` cannot be read, the runner's whole process group is killed at once (SIGKILL; a runner starved of memory has nothing to save), and the deployment ends in `error` with the reason. PSI memory `full avg10` stops a runner only at 50 % or more together with MemAvailable below twice the floor: page-cache reclaim alone reached 14–28 % with 45 GiB or more available. `local_llm_status` reports the guard's lowest MemAvailable, highest pressure and sample count.
+
+The guard is a backstop, not protection. A load commits memory in bursts of 7–10 GiB per 250 ms, faster than any sampling can follow, and other users of the machine allocate from the same pool at any time. Admission, sized to the whole known allocation, is the control; the kernel OOM killer, which picks the runner first (`oom_score_adj` 1000, DS003), is the last resort. Memory cgroups do not bound GPU allocations here.
 
 ## Decisions & Questions
 
@@ -52,4 +87,4 @@ Response: The addressing mode alone is not a unified-memory signal (GH200 report
 
 ## Conclusion
 
-The agent picks the dedicated or unified profile from what nvidia-smi reports, refuses a GPU whose memory model it cannot tell, and sizes unified runs from system memory, leaving the dedicated profile as it was.
+The agent picks the dedicated or unified profile from what nvidia-smi reports, refuses a GPU whose memory model it cannot tell, runs only what the image contains, and admits unified runs only inside measured envelopes sized to their whole known allocation, with a 250 ms guard as a backstop.

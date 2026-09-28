@@ -1,7 +1,11 @@
 // Characterization of the llama.cpp and Ollama runners as seen from the
-// controller: the exact process each start launches, the probes it makes in
-// order, the chat target it hands out and the overview entry it reports.
-// The runner framework must not change any of it.
+// controller in the dedicated profile: the exact process each start launches,
+// the probes it makes in order, the chat target it hands out and the overview
+// entry it reports. Changes here are deliberate and recorded in the commit.
+// Hardware profiles (DS005) changed three things on purpose: every runner's
+// environment names CUDA_CACHE_PATH in the container's own filesystem, the
+// llama-server parameters have loadMode instead of mlock and noMmap, and the
+// overview carries the profile.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -105,7 +109,8 @@ test('llama.cpp: the exact launch, probes and chat target', async (t) => {
         '--batch-size', '256', '--ubatch-size', '256', '--chat-template-kwargs', '{"reasoning_effort":"low"}', '--jinja',
     ]);
     assert.deepEqual(process.env, {
-        PATH: '/usr/bin', HOME: path.join(h.dataDir, 'home'), LANG: 'C.UTF-8', LD_LIBRARY_PATH: '/usr/local/nvidia/lib64',
+        PATH: '/usr/bin', HOME: path.join(h.dataDir, 'home'), LANG: 'C.UTF-8', CUDA_CACHE_PATH: '/opt/runners/.cuda-cache',
+        LD_LIBRARY_PATH: '/usr/local/nvidia/lib64',
     });
     assert.deepEqual(probes, [
         ['http://127.0.0.1:18080/health', null],
@@ -149,7 +154,7 @@ test('Ollama: the exact launch, pull, load, probes and chat target', async (t) =
     assert.equal(process.command, '/opt/ollama/bin/ollama');
     assert.deepEqual(process.args, ['serve']);
     assert.deepEqual(process.env, {
-        PATH: '/usr/bin', HOME: `${h.dataDir}/home`, LANG: 'C.UTF-8',
+        PATH: '/usr/bin', HOME: `${h.dataDir}/home`, LANG: 'C.UTF-8', CUDA_CACHE_PATH: '/opt/runners/.cuda-cache',
         OLLAMA_MODELS: `${h.dataDir}/models/ollama`, OLLAMA_HOST: '127.0.0.1:18434', OLLAMA_NUM_PARALLEL: '1',
         OLLAMA_MAX_LOADED_MODELS: '1', OLLAMA_KV_CACHE_TYPE: 'f16', OLLAMA_CONTEXT_LENGTH: '4096',
         OLLAMA_KEEP_ALIVE: '30m', OLLAMA_NO_CLOUD: '1', LD_LIBRARY_PATH: '/usr/local/nvidia/lib64',
@@ -175,6 +180,7 @@ test('Ollama: the exact launch, pull, load, probes and chat target', async (t) =
 test('overview: the llama.cpp and Ollama runner entries and the seed model entries', async (t) => {
     const h = harness(t, { fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }) });
     const overview = await h.controller.overview();
+    assert.equal(overview.profile, 'dedicated');
     const byId = Object.fromEntries(overview.runners.map((runner) => [runner.id, runner]));
     for (const [id, displayName, weightFormat, pinnedVersion] of [
         // Intended change (runners plan, R8): the image pins llama.cpp b11159 and Ollama 0.34.4.
@@ -194,7 +200,7 @@ test('overview: the llama.cpp and Ollama runner entries and the seed model entri
     assert.deepEqual(llama.download, { state: 'absent', bytes: 0, total: 12109566624 });
     assert.deepEqual(llama.params, {
         ctxSize: 16384, nGpuLayers: 99, nCpuMoe: 17, flashAttn: 'auto', cacheTypeK: 'f16', cacheTypeV: 'f16',
-        threads: null, parallel: 1, batchSize: 256, ubatchSize: 256, mlock: false, noMmap: false,
+        threads: null, parallel: 1, batchSize: 256, ubatchSize: 256, loadMode: 'auto',
         chatTemplateKwargs: { reasoning_effort: 'low' },
     });
     assert.deepEqual(llama.context, { totalContext: 16384, perRequestContext: 16384, parallel: 1, kvUnified: false });

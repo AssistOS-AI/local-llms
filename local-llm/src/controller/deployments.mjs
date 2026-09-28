@@ -29,7 +29,8 @@ import {
     removeArtifact,
     resolveHuggingFaceArtifact,
 } from './downloader.mjs';
-import { readMemory as readHostMemory, readSnapshot } from './hardware.mjs';
+import { readMemory as readHostMemory, readMemoryPressure, readSnapshot } from './hardware.mjs';
+import { UNIFIED, profileOf } from './profiles.mjs';
 import { createRunnerInstaller, runTool } from './runnerInstaller.mjs';
 import { loadRunnerLock } from './runnerLock.mjs';
 import { createLogBuffer, parseRunnerReport, startRunnerProcess } from './runnerProcess.mjs';
@@ -41,6 +42,41 @@ const ACTIVE_PHASES = new Set(['downloading', 'verifying', 'starting', 'loading'
 const TRANSFER_PHASES = new Set(['downloading', 'verifying']);
 const REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
 const PROBE_TIMEOUT_MS = 10_000;
+const IMAGE_CONTRACT = '/opt/local-llm/source.contract';
+
+/**
+ * What the image says about itself (`/opt/local-llm/source.contract`, one
+ * key=value per line), or null when there is none (tests, development). The
+ * arm64 image names the GPUs its CUDA runners were built for in
+ * `gpu_compute_capabilities` (DS005).
+ */
+export function readImageContract(file = IMAGE_CONTRACT, { fsApi = fs } = {}) {
+    let text;
+    try {
+        text = fsApi.readFileSync(file, 'utf8');
+    } catch {
+        return null;
+    }
+    const contract = {};
+    for (const line of text.split('\n')) {
+        const match = /^([a-z_][a-z0-9_]*)=(.*)$/.exec(line.trim());
+        if (match) contract[match[1]] = match[2];
+    }
+    return Object.freeze(contract);
+}
+
+/**
+ * Drop a verified download's pages from the page cache (GNU dd's
+ * `iflag=nocache count=0` calls posix_fadvise DONTNEED on the whole file; no
+ * privilege is needed). A full page cache after a large download caused memory
+ * pressure and noisy runs on DGX Spark (DS005). Best effort: a failure is logged.
+ */
+export function dropPageCache(file, { spawnSyncImpl = spawnSync } = {}) {
+    const result = spawnSyncImpl('dd', [`if=${file}`, 'iflag=nocache', 'count=0', 'status=none'], {
+        timeout: 30_000, stdio: 'ignore', env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' },
+    });
+    return result.status === 0 && !result.error;
+}
 
 function paramsKey(modelId, runnerId) {
     return `${modelId}|${runnerId}`;
@@ -103,6 +139,17 @@ export function createController({
     readMemory = readHostMemory,
     memoryGuardLoadMs = 2000,
     memoryGuardReadyMs = 10_000,
+    // The unified profile's guard (DS005): every runner, sampled this often in every phase.
+    readPressure = readMemoryPressure,
+    unifiedGuardMs = UNIFIED.guardSampleMs,
+    // The hardware profile; null decides it from the first snapshot (DS005).
+    profile: fixedProfile = null,
+    // What the image contains; null (no source.contract) makes every runner available.
+    imageContract = readImageContract(),
+    fileExists = (file) => fs.existsSync(file),
+    dropCache = dropPageCache,
+    // The CUDA driver's JIT cache, in the container's own filesystem (DS004).
+    cudaCachePath = path.join(env.LOCAL_LLM_RUN_ROOT || '/opt/runners', '.cuda-cache'),
     now = () => new Date(),
 } = {}) {
     const log = createLogBuffer({ file: path.join(dataDir, 'logs', 'runner.log') });
@@ -127,6 +174,12 @@ export function createController({
     // Set when the memory guard stopped a deployment's runner: its message is
     // the deployment's error, not "exited unexpectedly".
     let memoryStop = null;
+    // The hardware profile, decided once from the first snapshot and kept for
+    // the container's lifetime; a later snapshot that disagrees is reported by
+    // admission, not acted on (DS005).
+    let profile = fixedProfile;
+    // The unified guard's view of the current runner (in memory only).
+    let guardStats = null;
 
     const stores = createWeightStores({
         dataDir,
@@ -165,8 +218,57 @@ export function createController({
         stateStore.save(state);
     }
 
+    async function currentProfile() {
+        if (!profile) {
+            let snap = null;
+            try {
+                snap = await snapshot();
+            } catch {}
+            if (!profile) {
+                profile = profileOf(snap);
+                log.append('controller', `hardware profile: ${profile}${snap?.gpu?.name ? ` (${snap.gpu.name})` : ''}`);
+            }
+        }
+        return profile;
+    }
+
+    // The models offered in this profile (catalog v3 `profiles`).
     function catalog() {
-        return mergeCatalog(seedCatalog, state.registry);
+        const current = profile || 'dedicated';
+        return mergeCatalog(seedCatalog, state.registry).filter((model) => model.profiles.includes(current));
+    }
+
+    // Whether this image can run a runner at all (DS005): its executable is in
+    // the image, or the image's runner lock lists it. Without a source.contract
+    // (tests, development) every runner counts as available.
+    function availabilityOf(definition) {
+        if (!imageContract) return { available: true, reason: null };
+        const present = definition.executable ? fileExists(definition.executable) : installer.installable(definition.id);
+        return present
+            ? { available: true, reason: null }
+            : { available: false, reason: `${definition.displayName} is not available on this platform: this image does not include it.` };
+    }
+
+    // The GPUs the image's CUDA runners were built for (arm64: 12.1). The amd64
+    // image names none, and nothing is checked there.
+    function gpuMismatch(snap) {
+        const listed = String(imageContract?.gpu_compute_capabilities || '').split(',').map((cap) => cap.trim()).filter(Boolean);
+        const gpu = snap?.gpu;
+        if (!listed.length || !gpu?.available) return null;
+        const capability = gpu.device?.computeCapability;
+        if (capability && listed.includes(capability)) return null;
+        return `This image's runners are built for GPUs of compute capability ${listed.join(', ')}; `
+            + `${gpu.name} ${capability ? `is ${capability}` : 'did not report its compute capability'}.`;
+    }
+
+    // Admission with the checks the controller owns (availability, the image's
+    // GPUs, the profile) before the runner's own policy.
+    function admitHere({ definition, model, source, params, snap, remainingDownloadBytes = 0 }) {
+        const availability = availabilityOf(definition);
+        if (!availability.available) return { status: 'incompatible', reason: availability.reason, estimate: { isEstimate: true }, warnings: [] };
+        const mismatch = gpuMismatch(snap);
+        if (mismatch) return { status: 'incompatible', reason: mismatch, estimate: { isEstimate: true }, warnings: [] };
+        return admit({ runner: definition, model, source, params, snapshot: snap, remainingDownloadBytes, profile: profile || undefined });
     }
 
     function findModel(modelId) {
@@ -243,8 +345,17 @@ export function createController({
 
     function effectiveParams(model, runnerId, override) {
         const runnerDef = getRunner(runnerId);
-        const saved = override ?? state.params[paramsKey(model.id, runnerId)] ?? {};
-        return runnerDef.normalizeParams(saved, { model });
+        const options = { model, profile: profile || 'dedicated' };
+        if (override) return runnerDef.normalizeParams(override, options);
+        const saved = state.params[paramsKey(model.id, runnerId)];
+        if (saved) {
+            // Saved values that no longer validate (another profile, an older
+            // parameter set) give way to the defaults instead of blocking the model.
+            try {
+                return runnerDef.normalizeParams(saved, options);
+            } catch {}
+        }
+        return runnerDef.normalizeParams({}, options);
     }
 
     function publicDeployment() {
@@ -259,12 +370,13 @@ export function createController({
     // Admission for the Run form's current values, before anything is saved
     // or downloaded. Parameter errors come back as data for the form.
     async function previewRun({ modelId, runnerId, params } = {}, snap) {
+        await currentProfile();
         const model = findModel(modelId);
         const definition = getRunner(runnerId);
         const source = sourceFor(model, definition);
-        if (!definition.supported || !source) {
+        if (!definition.supported || !source || !availabilityOf(definition).available) {
             return { modelId, runnerId, params: null, context: null,
-                admission: admit({ runner: definition, model, source, params: {}, snapshot: snap }) };
+                admission: admitHere({ definition, model, source, params: {}, snap }) };
         }
         const gate = gateOf(definition);
         if (!gate.enabled) return { modelId, runnerId, params: null, context: null, admission: disabledAdmission(gate) };
@@ -280,18 +392,21 @@ export function createController({
             modelId,
             runnerId,
             params: normalized,
-            context: definition.describeContext ? definition.describeContext(normalized) : null,
-            admission: admit({ runner: definition, model, source, params: normalized, snapshot: snap, remainingDownloadBytes: remaining }),
+            context: definition.describeContext ? definition.describeContext(normalized, { model, profile }) : null,
+            admission: admitHere({ definition, model, source, params: normalized, snap, remainingDownloadBytes: remaining }),
         };
     }
 
     async function overview({ preview = null } = {}) {
+        await currentProfile();
         const snap = await snapshot();
         const runnerList = [];
         for (const definition of Object.values(runners)) {
             const gate = gateOf(definition);
+            const availability = availabilityOf(definition);
             runnerList.push({
-                ...runnerSummary(definition),
+                ...runnerSummary(definition, profile),
+                ...(availability.available ? {} : { supported: false, unsupportedReason: availability.reason }),
                 ...(await runnerInfo(definition.id)),
                 enabled: gate.enabled,
                 ...(gate.enabled ? {} : { disabledReason: gate.reason }),
@@ -309,7 +424,8 @@ export function createController({
                     download: await weightsState(source),
                     // The runners that can read them here: not one this deployment's operator left off.
                     runners: Object.values(runners)
-                        .filter((definition) => definition.supported && gateOf(definition).enabled && definition.weightFormat === format)
+                        .filter((definition) => definition.supported && availabilityOf(definition).available
+                            && gateOf(definition).enabled && definition.weightFormat === format)
                         .map((definition) => definition.id),
                 };
             }
@@ -319,7 +435,8 @@ export function createController({
                 if (!source) continue;
                 let params = null;
                 let paramError = null;
-                if (definition.supported) {
+                const usable = definition.supported && availabilityOf(definition).available;
+                if (usable) {
                     try { params = effectiveParams(model, definition.id); } catch (error) { paramError = error.message; }
                 }
                 const disk = definition.supported ? weights[definition.weightFormat].download : null;
@@ -330,13 +447,10 @@ export function createController({
                     size: source?.size ?? null,
                     download: disk,
                     params,
-                    context: params && definition.describeContext ? definition.describeContext(params) : null,
+                    context: params && definition.describeContext ? definition.describeContext(params, { model, profile }) : null,
                     admission: !gate.enabled ? disabledAdmission(gate) : paramError
                         ? { status: 'incompatible', reason: paramError, estimate: {}, warnings: [] }
-                        : admit({
-                            runner: definition, model, source, params: params || {}, snapshot: snap,
-                            remainingDownloadBytes: remaining,
-                        }),
+                        : admitHere({ definition, model, source, params: params || {}, snap, remainingDownloadBytes: remaining }),
                 };
             }
             models.push({
@@ -350,12 +464,13 @@ export function createController({
                 contextLength: model.contextLength,
                 seed: model.seed,
                 sources: model.sources,
-                validated: model.validated,
+                validated: model.validated[profile] || {},
                 weights,
                 runners: perRunner,
             });
         }
         return {
+            profile,
             hardware: snap,
             runners: runnerList,
             models,
@@ -382,8 +497,11 @@ export function createController({
             nextSeq: log.seq,
             gpu,
             runnerReport: parseReport(log.all().filter((line) => line.seq > runnerLogStart)),
-            context: deployment && definition?.describeContext ? definition.describeContext(deployment.params) : null,
+            context: deployment && definition?.describeContext
+                ? definition.describeContext(deployment.params, { profile: profile || 'dedicated' }) : null,
             lastCompletion,
+            profile: profile || null,
+            memoryGuard: guardStats ? { ...guardStats } : null,
         };
     }
 
@@ -446,11 +564,14 @@ export function createController({
     }
 
     function runnerEnv(launchEnv) {
-        // Only what the runner needs: never the agent's secrets or tokens.
+        // Only what the runner needs: never the agent's secrets or tokens. The
+        // CUDA driver's JIT cache stays in the container's own filesystem, never
+        // in /data, which other workspace processes can write (DS004).
         return {
             PATH: env.PATH || '/usr/local/nvidia/bin:/usr/local/bin:/usr/bin:/bin',
             HOME: path.join(dataDir, 'home'),
             LANG: 'C.UTF-8',
+            CUDA_CACHE_PATH: cudaCachePath,
             ...launchEnv,
         };
     }
@@ -495,6 +616,7 @@ export function createController({
             deploymentId: deployment.id,
             exited: process.exited,
             stop: (options) => process.stop(options),
+            kill: () => (typeof process.kill === 'function' ? process.kill() : process.stop({ graceMs: 0 })),
             get running() { return process.running; },
         };
         const current = runner;
@@ -524,19 +646,31 @@ export function createController({
         return runner;
     }
 
-    // The backstop behind a RAM-floor admission (vLLM with CPU offload, whose
-    // estimate comes from two runs on one machine): while this runner loads and
-    // runs, sample MemAvailable; below the floor, stop it at once.
+    // The memory guard. Dedicated profile: the backstop behind a RAM-floor
+    // admission (vLLM with CPU offload, whose estimate comes from two runs on
+    // one machine): while this runner loads and runs, sample MemAvailable;
+    // below the floor, stop it at once. Unified profile (DS005): every runner,
+    // sampled every 250 ms in every phase; below the floor, or when
+    // /proc/meminfo cannot be read, or under heavy memory pressure with
+    // MemAvailable already low, the runner's process group is killed at once.
+    // It is a backstop, not protection: one load allocates faster than any
+    // sampling can follow, so admission must cover the whole known allocation.
     function startMemoryGuard(deployment, current) {
-        const floor = deployment.admission?.estimate?.ramFloorBytes;
+        const unified = profile === 'unified';
+        const floor = unified ? UNIFIED.floorBytes : deployment.admission?.estimate?.ramFloorBytes;
         if (!Number.isFinite(floor) || floor <= 0) return () => {};
         let timer = null;
         let cancelled = false;
+        if (unified) guardStats = { floorBytes: floor, minAvailableBytes: null, maxPressureAvg10: null, samples: 0 };
         const schedule = () => {
             if (cancelled) return;
             const ready = state.deployment?.id === deployment.id && state.deployment.phase === 'ready';
-            timer = setTimeout(tick, ready ? memoryGuardReadyMs : memoryGuardLoadMs);
+            timer = setTimeout(tick, unified ? unifiedGuardMs : (ready ? memoryGuardReadyMs : memoryGuardLoadMs));
             timer.unref?.();
+        };
+        const breach = (message) => {
+            cancelled = true;
+            stopForMemory(deployment, current, message, { kill: unified }).catch(() => {});
         };
         const tick = () => {
             if (cancelled || runner !== current) return;
@@ -544,10 +678,29 @@ export function createController({
             try {
                 available = readMemory().availableBytes;
             } catch {}
+            if (unified) {
+                const stats = guardStats;
+                if (!Number.isFinite(available)) {
+                    breach('stopped: host memory cannot be read (/proc/meminfo), so the runner cannot be watched');
+                    return;
+                }
+                const pressure = readPressure();
+                stats.samples += 1;
+                stats.minAvailableBytes = stats.minAvailableBytes === null ? available : Math.min(stats.minAvailableBytes, available);
+                if (Number.isFinite(pressure)) stats.maxPressureAvg10 = Math.max(stats.maxPressureAvg10 ?? 0, pressure);
+                if (available < floor) {
+                    breach(`stopped: host memory below the floor (${gib(available)} available, ${gib(floor)} required)`);
+                    return;
+                }
+                if (Number.isFinite(pressure) && pressure >= UNIFIED.psiStopAvg10 && available < 2 * floor) {
+                    breach(`stopped: memory pressure ${pressure.toFixed(1)} % with ${gib(available)} available`);
+                    return;
+                }
+                schedule();
+                return;
+            }
             if (Number.isFinite(available) && available < floor) {
-                cancelled = true;
-                stopForMemory(deployment, current,
-                    `stopped: host memory below the floor (${gib(available)} available, ${gib(floor)} required)`).catch(() => {});
+                breach(`stopped: host memory below the floor (${gib(available)} available, ${gib(floor)} required)`);
                 return;
             }
             schedule();
@@ -559,13 +712,15 @@ export function createController({
         };
     }
 
-    async function stopForMemory(deployment, current, message) {
+    async function stopForMemory(deployment, current, message, { kill = false } = {}) {
         memoryStop = { deploymentId: deployment.id, message };
         log.append('controller', message);
-        // The host is short of memory now: SIGKILL follows SIGTERM within the
-        // drain's grace, not a Stop's.
+        // The host is short of memory now. Unified: the whole process group is
+        // killed at once (a runner starved of memory has nothing to save).
+        // Dedicated: SIGKILL follows SIGTERM within the drain's grace, not a Stop's.
         try {
-            await current.stop({ graceMs: DRAIN_RUNNER_GRACE_MS });
+            if (kill) await current.kill();
+            else await current.stop({ graceMs: DRAIN_RUNNER_GRACE_MS });
         } catch {}
         // Once the agent drains, the drain settles the state; the log keeps the message.
         if (draining || queue.closed) return;
@@ -601,7 +756,7 @@ export function createController({
     async function recheckAdmission(deployment, model) {
         const definition = getRunner(deployment.runnerId);
         const source = deployment.artifact;
-        const result = admit({ runner: definition, model, source, params: deployment.params, snapshot: await snapshot() });
+        const result = admitHere({ definition, model, source, params: deployment.params, snap: await snapshot() });
         deployment.admission = result;
         if (result.status !== 'ok') {
             throw new LocalLlmError(`admission_${result.status.replace('-', '_')}`, result.reason, { admission: result });
@@ -619,6 +774,7 @@ export function createController({
         return Object.freeze({
             runner: definition,
             model,
+            profile: profile || 'dedicated',
             params: deployment.params,
             artifact: deployment.artifact,
             weights,
@@ -662,6 +818,13 @@ export function createController({
                 transferred: fetched.bytesTransferred,
             };
             weights = { path: fetched.path };
+            if (store.fetchedFile !== false) {
+                try {
+                    if (fs.statSync(fetched.path).isFile() && !dropCache(fetched.path)) {
+                        log.append('controller', 'could not drop the download from the page cache (dd iflag=nocache)');
+                    }
+                } catch {}
+            }
             await recheckAdmission(deployment, model);
             throwIfAborted(signal);
         }
@@ -783,6 +946,7 @@ export function createController({
 
     function run({ requestId, modelId, runnerId, params, replace = false } = {}) {
         return queue.run(async () => {
+            await currentProfile();
             if (typeof requestId !== 'string' || !REQUEST_ID_RE.test(requestId)) {
                 throw new LocalLlmError('invalid_request', 'requestId must be 8-128 letters, digits, dash or underscore.');
             }
@@ -797,6 +961,9 @@ export function createController({
                 const result = admit({ runner: definition, model, source, params: {}, snapshot: {} });
                 throw new LocalLlmError('runner_unsupported', result.reason);
             }
+            // Before anything is downloaded: a runner this image does not have (DS005).
+            const availability = availabilityOf(definition);
+            if (!availability.available) throw new LocalLlmError('runner_unavailable', availability.reason, { runner: runnerId });
             assertEnabled(definition);
             if (!source) throw new LocalLlmError('no_source', `${model.displayName} has no ${definition.displayName} source.`);
             if (installJob?.runnerId === runnerId) {
@@ -820,9 +987,8 @@ export function createController({
             }
             const disk = await weightsState(source);
             const remaining = disk?.total ? Math.max(0, disk.total - (disk.bytes || 0)) : 0;
-            const admission = admit({
-                runner: definition, model, source, params: normalized, snapshot: await snapshot(),
-                remainingDownloadBytes: remaining,
+            const admission = admitHere({
+                definition, model, source, params: normalized, snap: await snapshot(), remainingDownloadBytes: remaining,
             });
             if (admission.status !== 'ok') {
                 throw new LocalLlmError(`admission_${admission.status.replace('-', '_')}`, admission.reason, { admission });

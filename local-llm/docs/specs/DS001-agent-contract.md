@@ -52,9 +52,9 @@ Every tool is declared in `mcp-config.json` with `command: "node"`, `args: ["/co
 
 | Tool | Controller operation |
 | --- | --- |
-| `local_llm_overview` | `overview`: hardware, runners, models with per-runner download state and admission, current deployment |
-| `local_llm_status` | `status`: deployment phase, progress and log lines after `sinceSeq` |
-| `local_llm_run` | `run`: `requestId`, `modelId`, `runnerId`, `params`, `replace` |
+| `local_llm_overview` | `overview`: the hardware profile (DS005), hardware, runners (with `supported: false` and the reason for a runner this image does not include), the models offered in the profile with per-runner download state and admission, current deployment |
+| `local_llm_status` | `status`: deployment phase, progress and log lines after `sinceSeq`, the hardware profile and, on unified memory, the memory guard's lowest MemAvailable, highest pressure and sample count |
+| `local_llm_run` | `run`: `requestId`, `modelId`, `runnerId`, `params` (validated against the runner's schema for the profile), `replace`; a runner the image does not include is refused with `runner_unavailable` before anything downloads |
 | `local_llm_stop` | `stop` |
 | `local_llm_download_cancel` | `cancelDownload`: keeps the partial file |
 | `local_llm_weights_delete` | `deleteWeights` |

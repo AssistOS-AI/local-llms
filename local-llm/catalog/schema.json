@@ -1,112 +1,366 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "local-llm.catalog/v2",
+  "$id": "local-llm.catalog/v3",
   "title": "local-llm model catalog",
-  "description": "Seed catalog entries (read-only, shipped with the agent) and user registry entries share this shape. Sources are keyed by weight format; every runner reads one format, so runners that read the same format share one download. Seed Hugging Face sources must pin commit, size and sha256; user sources are pinned when added.",
+  "description": "Schema v3. Seed catalog entries (read-only, shipped with the agent) and user registry entries share this shape. Sources are keyed by weight format; every runner reads one format, so runners that read the same format share one download. Seed Hugging Face sources must pin commit, size and sha256; user sources are pinned when added. `recommended` and `validated` are keyed by hardware profile (dedicated, unified; DS005), then by runner id. Entries of earlier schemas are not migrated.",
   "type": "object",
-  "required": ["schema", "models"],
+  "required": [
+    "schema",
+    "models"
+  ],
   "additionalProperties": false,
   "properties": {
-    "schema": { "const": "local-llm.catalog/v2" },
-    "models": { "type": "array", "items": { "$ref": "#/$defs/model" } }
+    "schema": {
+      "const": "local-llm.catalog/v3"
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/model"
+      }
+    }
   },
   "$defs": {
     "model": {
       "type": "object",
-      "required": ["id", "sources"],
+      "required": [
+        "id",
+        "sources"
+      ],
       "additionalProperties": false,
       "properties": {
-        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$" },
-        "displayName": { "type": "string", "maxLength": 120 },
-        "description": { "type": "string", "maxLength": 400 },
-        "license": { "type": "string", "maxLength": 80 },
-        "architecture": { "enum": ["moe", "dense"] },
-        "totalParams": { "type": "string", "maxLength": 16 },
-        "activeParams": { "type": "string", "maxLength": 16 },
-        "contextLength": { "type": "integer", "minimum": 512 },
-        "requiresJinja": { "type": "boolean" },
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 400
+        },
+        "license": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "architecture": {
+          "enum": [
+            "moe",
+            "dense"
+          ]
+        },
+        "totalParams": {
+          "type": "string",
+          "maxLength": 16
+        },
+        "activeParams": {
+          "type": "string",
+          "maxLength": 16
+        },
+        "contextLength": {
+          "type": "integer",
+          "minimum": 512
+        },
+        "requiresJinja": {
+          "type": "boolean"
+        },
         "sources": {
           "type": "object",
           "minProperties": 1,
           "additionalProperties": false,
           "description": "Keyed by weight format: gguf is a single GGUF file on Hugging Face (read by llama.cpp and ik_llama.cpp); ollama is an Ollama library tag (read by Ollama); hf is a Hugging Face snapshot of safetensors (read by vLLM); exl3 is a Hugging Face snapshot of EXL3 weights (read by TabbyAPI).",
           "properties": {
-            "gguf": { "$ref": "#/$defs/huggingface" },
-            "ollama": { "$ref": "#/$defs/ollama" },
-            "hf": { "$ref": "#/$defs/hfSnapshot" },
-            "exl3": { "$ref": "#/$defs/hfSnapshot" }
+            "gguf": {
+              "$ref": "#/$defs/huggingface"
+            },
+            "ollama": {
+              "$ref": "#/$defs/ollama"
+            },
+            "hf": {
+              "$ref": "#/$defs/hfSnapshot"
+            },
+            "exl3": {
+              "$ref": "#/$defs/hfSnapshot"
+            }
           }
         },
         "memory": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "layers": { "type": "integer", "minimum": 1 },
-            "nonExpertBytes": { "type": "integer", "minimum": 0 },
-            "expertBytesPerLayer": { "type": "integer", "minimum": 0 },
-            "kvBytesPerToken": { "type": "integer", "minimum": 1 },
-            "fixedKvBytes": { "type": "integer", "minimum": 0 },
-            "embeddingBytes": { "type": "integer", "minimum": 0, "description": "The input embedding a runner keeps in system RAM (ExLlamaV3 does)." }
+            "layers": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "nonExpertBytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "expertBytesPerLayer": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "kvBytesPerToken": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "fixedKvBytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "embeddingBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "The input embedding a runner keeps in system RAM (ExLlamaV3 does)."
+            }
           }
         },
-        "recommended": { "type": "object", "description": "Default runner parameters, keyed by runner id." },
-        "validated": { "type": "object", "description": "What was measured on real hardware, keyed by runner id." }
+        "recommended": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Default runner parameters, keyed by hardware profile, then by runner id.",
+          "properties": {
+            "dedicated": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object"
+              }
+            },
+            "unified": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "validated": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "What was measured on real hardware, keyed by hardware profile, then by runner id.",
+          "properties": {
+            "dedicated": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 600
+              }
+            },
+            "unified": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 600
+              }
+            }
+          }
+        },
+        "profiles": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "dedicated",
+              "unified"
+            ]
+          },
+          "description": "The hardware profiles in which the model is offered (default: both)."
+        },
+        "unified": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "envelope"
+          ],
+          "description": "The unified profile's measured envelope (DS005). A model without one is refused on unified memory.",
+          "properties": {
+            "envelope": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "runner",
+                  "maxCtx",
+                  "maxParallel",
+                  "mtp",
+                  "bufferBytes",
+                  "transientBytes"
+                ],
+                "properties": {
+                  "runner": {
+                    "type": "string"
+                  },
+                  "maxCtx": {
+                    "type": "integer",
+                    "minimum": 512,
+                    "description": "Largest total context (the unified KV pool) measured."
+                  },
+                  "maxParallel": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 16,
+                    "description": "Most parallel slots measured."
+                  },
+                  "mtp": {
+                    "type": "boolean",
+                    "description": "Whether MTP speculative decoding may be on."
+                  },
+                  "bufferBytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Sum of the model, KV, recurrent-state, output and compute buffers llama.cpp logs at this corner (-lv 4), on the GPU and the host."
+                  },
+                  "transientBytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Measured memory beyond those buffers during load, prefill and parallel requests, with the prompt cache at 1 MiB, times 1.25."
+                  },
+                  "measured": {
+                    "type": "string",
+                    "maxLength": 600
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "huggingface": {
       "type": "object",
-      "required": ["type", "repo", "file"],
+      "required": [
+        "type",
+        "repo",
+        "file"
+      ],
       "additionalProperties": false,
       "properties": {
-        "type": { "const": "huggingface" },
-        "repo": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$" },
-        "file": { "type": "string", "pattern": "\\.gguf$", "description": "A single-file GGUF in the repository." },
-        "revision": { "type": "string" },
-        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-        "size": { "type": "integer", "minimum": 1 },
-        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "quantization": { "type": "string" }
+        "type": {
+          "const": "huggingface"
+        },
+        "repo": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"
+        },
+        "file": {
+          "type": "string",
+          "pattern": "\\.gguf$",
+          "description": "A single-file GGUF in the repository."
+        },
+        "revision": {
+          "type": "string"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "quantization": {
+          "type": "string"
+        }
       }
     },
     "ollama": {
       "type": "object",
-      "required": ["type", "tag"],
+      "required": [
+        "type",
+        "tag"
+      ],
       "additionalProperties": false,
       "properties": {
-        "type": { "const": "ollama" },
-        "tag": { "type": "string", "description": "An Ollama library tag such as gpt-oss:20b." },
-        "manifestDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-        "size": { "type": "integer", "minimum": 1 }
+        "type": {
+          "const": "ollama"
+        },
+        "tag": {
+          "type": "string",
+          "description": "An Ollama library tag such as gpt-oss:20b."
+        },
+        "manifestDigest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "hfSnapshot": {
       "type": "object",
-      "required": ["type", "repo"],
+      "required": [
+        "type",
+        "repo"
+      ],
       "additionalProperties": false,
       "description": "Every top-level model file (.json, .safetensors, .txt, .model, .tiktoken, .jinja) of a repository at one commit. Seed entries pin commit and files; size is their sum.",
       "properties": {
-        "type": { "const": "hf-snapshot" },
-        "repo": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$" },
-        "revision": { "type": "string" },
-        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "type": {
+          "const": "hf-snapshot"
+        },
+        "repo": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
         "files": {
           "type": "array",
           "minItems": 1,
           "maxItems": 200,
           "items": {
             "type": "object",
-            "required": ["path", "size"],
+            "required": [
+              "path",
+              "size"
+            ],
             "additionalProperties": false,
             "properties": {
-              "path": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\\.(json|safetensors|txt|model|tiktoken|jinja)$" },
-              "size": { "type": "integer", "minimum": 1 },
-              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The LFS sha256." },
-              "gitOid": { "type": "string", "pattern": "^[0-9a-f]{40}$", "description": "The git blob oid of a file kept in git." }
+              "path": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\\.(json|safetensors|txt|model|tiktoken|jinja)$"
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "The LFS sha256."
+              },
+              "gitOid": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$",
+                "description": "The git blob oid of a file kept in git."
+              }
             }
           }
         },
-        "size": { "type": "integer", "minimum": 1 },
-        "quantization": { "type": "string" }
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "quantization": {
+          "type": "string"
+        }
       }
     }
   }

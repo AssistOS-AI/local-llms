@@ -54,7 +54,13 @@ const paramSchema = deepFreeze({
             title: 'Flash attention',
             description: 'Flash attention on or off.'
         },
-        ...pick(['cacheTypeK', 'cacheTypeV', 'threads', 'parallel', 'batchSize', 'ubatchSize', 'noMmap']),
+        ...pick(['cacheTypeK', 'cacheTypeV', 'threads', 'parallel', 'batchSize', 'ubatchSize']),
+        // LM Studio's SDK takes mmap as a boolean (tryMmap), not llama.cpp's load modes.
+        noMmap: {
+            type: 'boolean', default: false,
+            title: 'Disable mmap',
+            description: 'Read the model into memory instead of memory-mapping the file.'
+        },
     }
 });
 

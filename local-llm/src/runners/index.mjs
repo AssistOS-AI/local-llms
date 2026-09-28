@@ -45,9 +45,16 @@ export function defaultPorts(runners = RUNNERS) {
     return Object.freeze(ports);
 }
 
-/** What the overview and the dashboard learn about each runner. */
-export function runnerSummary(runner) {
-    const { id, displayName, weightFormat, pinnedVersion, supported, paramSchema } = runner;
+/**
+ * What the overview and the dashboard learn about each runner, with its
+ * parameter schema for the hardware profile (null where it has no policy for
+ * that profile, DS005).
+ */
+export function runnerSummary(runner, profile = 'dedicated') {
+    const { id, displayName, weightFormat, pinnedVersion, supported } = runner;
+    const paramSchema = typeof runner.paramSchemaFor === 'function'
+        ? runner.paramSchemaFor(profile)
+        : (profile === 'dedicated' ? runner.paramSchema : null);
     return {
         id, displayName, weightFormat, pinnedVersion, supported, paramSchema,
         basicParams: runner.basicParams || [],
@@ -55,6 +62,6 @@ export function runnerSummary(runner) {
     };
 }
 
-export function runnerSummaries(runners = RUNNERS) {
-    return Object.values(runners).map(runnerSummary);
+export function runnerSummaries(runners = RUNNERS, profile = 'dedicated') {
+    return Object.values(runners).map((runner) => runnerSummary(runner, profile));
 }

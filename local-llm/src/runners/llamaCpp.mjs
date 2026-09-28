@@ -1,14 +1,10 @@
-import { createLlamaServerRunner } from './llamaServer.mjs';
+import { LOAD_MODES, createLlamaServerRunner } from './llamaServer.mjs';
 
-// b11125 replaced --mlock/--no-mmap with a single --load-mode option.
-function loadArgs({ mlock, noMmap }) {
-    if (noMmap && mlock) {
-        return ['--load-mode', 'mlock'];
-    }
-    if (noMmap) {
-        return ['--load-mode', 'none'];
-    }
-    return mlock ? ['--load-mode', 'mmap+mlock'] : [];
+// b10105 added --load-mode; b10875 removed --no-mmap, --mmap, --mlock and
+// --direct-io. `auto` passes no flag: the server then avoids mmap on an
+// integrated GPU by itself.
+function loadArgs(loadMode) {
+    return loadMode && loadMode !== 'auto' ? ['--load-mode', loadMode] : [];
 }
 
 function parseVersion(output) {
@@ -26,7 +22,9 @@ export const llamaCppRunner = createLlamaServerRunner({
         // -lv 4 prints the device, offload and CUDA buffer lines the status reads.
         quietArgs: Object.freeze(['--no-webui', '-lv', '4']),
         unifiedKv: true,
+        loadModes: LOAD_MODES,
         loadArgs,
+        unified: true,
         jinja: (model) => Boolean(model?.requiresJinja),
         parseVersion,
     }),

@@ -68,7 +68,7 @@ test('vLLM runs from its runnable copy on loopback, with the key in its environm
     assert.equal(valueOf(args, '--served-model-name'), 'qwen3-4b-awq');
     assert.equal(valueOf(args, '--host'), '127.0.0.1');
     assert.equal(valueOf(args, '--port'), '18082');
-    assert.equal(valueOf(args, '--max-model-len'), String(QWEN.recommended.vllm.maxModelLen));
+    assert.equal(valueOf(args, '--max-model-len'), String(QWEN.recommended.dedicated.vllm.maxModelLen));
     assert.equal(valueOf(args, '--gpu-memory-utilization'), '0.85');
     assert.equal(valueOf(args, '--max-num-seqs'), '1');
     assert.ok(args.includes('--enforce-eager'), 'eager by default for a faster start');

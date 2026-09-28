@@ -129,7 +129,20 @@ function wholeLines(emit) {
 // `filter`, when given, makes one line filter per output stream: it returns the
 // line to log (possibly shortened) or null to drop it. A runner whose output
 // echoes request bodies (LM Studio) uses it to keep them out of the log.
-export function startRunnerProcess({ command, args, env, cwd = '/', log, filter = null, spawnImpl = spawn, killImpl = process.kill }) {
+/**
+ * Make a runner the kernel OOM killer's first choice. Its memory on an
+ * integrated GPU is invisible to RSS, the OOM score and memory cgroups (DS005),
+ * so without this an out-of-memory kill would pick another process. Raising
+ * the value needs no privilege, and children the runner starts inherit it.
+ */
+export function setOomScoreAdj(pid, value = 1000, { fsApi = fs } = {}) {
+    fsApi.writeFileSync(`/proc/${pid}/oom_score_adj`, String(value));
+}
+
+export function startRunnerProcess({
+    command, args, env, cwd = '/', log, filter = null, spawnImpl = spawn, killImpl = process.kill,
+    oomScoreAdj = 1000, setOomScore = setOomScoreAdj,
+}) {
     if (!Array.isArray(args) || args.some((value) => typeof value !== 'string')) {
         throw new Error('Runner arguments must be an array of strings');
     }
@@ -140,6 +153,18 @@ export function startRunnerProcess({ command, args, env, cwd = '/', log, filter 
     // it started (worker processes, a model server's runner child), not just
     // the one the controller spawned.
     const child = spawnImpl(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    // Right after the spawn, before the runner can load anything (CUDA start-up
+    // alone takes longer than this write). A runner that cannot be marked is
+    // killed: it must never run as an ordinary OOM candidate.
+    let oomError = null;
+    if (oomScoreAdj !== null && Number.isInteger(child.pid)) {
+        try {
+            setOomScore(child.pid, oomScoreAdj);
+        } catch (error) {
+            // A runner that already exited has nothing left to protect.
+            if (!['ENOENT', 'ESRCH'].includes(error?.code)) oomError = error;
+        }
+    }
     function signalGroup(signal) {
         if (!Number.isInteger(child.pid)) return;
         try {
@@ -180,6 +205,10 @@ export function startRunnerProcess({ command, args, env, cwd = '/', log, filter 
     }
     let exitResult = null;
     exited.then((result) => { exitResult = result; });
+    if (oomError) {
+        log.append('controller', `runner killed: its OOM score could not be set (${oomError.code || oomError.message})`);
+        signalGroup('SIGKILL');
+    }
 
     async function stop({ graceMs = 10_000 } = {}) {
         if (exitResult) return exitResult;
@@ -195,10 +224,18 @@ export function startRunnerProcess({ command, args, env, cwd = '/', log, filter 
         return exited;
     }
 
+    // An immediate stop of the whole group, for the unified memory guard: a
+    // runner starved of memory has nothing to save, and waiting lets it take more.
+    function kill() {
+        if (!exitResult) signalGroup('SIGKILL');
+        return exited;
+    }
+
     return Object.freeze({
         pid: child.pid,
         exited,
         stop,
+        kill,
         get running() { return exitResult === null; },
     });
 }

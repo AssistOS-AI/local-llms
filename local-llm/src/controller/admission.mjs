@@ -340,13 +340,15 @@ export function admitTabbyApi({ model, source, params, gpu, memory, disk, remain
 }
 
 /**
- * The checks every runner shares, then the runner's own policy
- * (`runner.admit`), which sizes the estimate for how that runner uses memory.
+ * The checks every runner shares, then the runner's own policy for the
+ * hardware profile: `runner.admit` sizes dedicated GPU memory and RAM (DS003),
+ * `runner.admitUnified` the shared pool of a GPU that shares system memory
+ * (DS005). A runner without a unified policy cannot run on unified memory.
  *
- * @param {{ runner, model, source, params, snapshot, remainingDownloadBytes? }} input
+ * @param {{ runner, model, source, params, snapshot, remainingDownloadBytes?, profile? }} input
  * @returns {{ status: 'ok'|'incompatible'|'insufficient-now', reason, estimate, warnings }}
  */
-export function admit({ runner, model, source, params, snapshot, remainingDownloadBytes = 0 }) {
+export function admit({ runner, model, source, params, snapshot, remainingDownloadBytes = 0, profile = undefined }) {
     if (!runner.supported || typeof runner.admit !== 'function') {
         return result('incompatible', runner.unsupportedReason || `${runner.displayName} is not supported in this release.`, {});
     }
@@ -357,10 +359,19 @@ export function admit({ runner, model, source, params, snapshot, remainingDownlo
     if (!gpu?.available) {
         return result('incompatible', gpu?.reason || 'No GPU is available to this agent.', {});
     }
-    // A GPU that shares system memory has no GPU memory figures; only a runner
-    // with a unified-memory policy can size a model for it (DS005).
-    if (gpu.memoryModel === 'unified' && typeof runner.admitUnified !== 'function') {
-        return result('incompatible', `${runner.displayName} is not available on a GPU that shares system memory (${gpu.name}) in this release.`, {});
+    const current = gpu.memoryModel === 'unified' ? 'unified' : 'dedicated';
+    const selected = profile ?? current;
+    if (selected !== current) {
+        return result('incompatible', `The GPU now reports ${current} memory, but this agent started with the ${selected} profile; `
+            + 'restart local-llm to use it.', {});
+    }
+    if (selected === 'unified') {
+        if (typeof runner.admitUnified !== 'function') {
+            return result('incompatible', `${runner.displayName} is not available on a GPU that shares system memory (${gpu.name}) in this release.`, {});
+        }
+        return runner.admitUnified({
+            model, source, params, gpu, memory: snapshot.memory || {}, disk: snapshot.disk, remainingDownloadBytes,
+        });
     }
     return runner.admit({
         model, source, params, gpu, memory: snapshot.memory || {}, disk: snapshot.disk, remainingDownloadBytes,

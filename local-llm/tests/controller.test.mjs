@@ -187,7 +187,7 @@ test('commands are serialized and weights or entries in use cannot change', asyn
         id: 'tiny-user',
         displayName: 'Tiny',
         sources: {
-            'llama.cpp': {
+            gguf: {
                 type: 'huggingface', repo: 'test/tiny', file: 'tiny.gguf', revision: 'main',
                 commit: 'a'.repeat(40), size: 1000, sha256: 'b'.repeat(64),
             },
@@ -199,8 +199,7 @@ test('commands are serialized and weights or entries in use cannot change', asyn
         .then(() => order.push('run'));
     const remove = h.controller.deleteWeights({ modelId: 'tiny-user', runnerId: 'llama.cpp' })
         .then(() => order.push('delete-ok'), (error) => order.push(`delete-${error.code}`));
-    // The registry was written before catalog v2 and is migrated on load; updates use v2.
-    const update = h.controller.updateModel({ ...user, sources: { gguf: user.sources['llama.cpp'] }, displayName: 'Renamed' })
+    const update = h.controller.updateModel({ ...user, displayName: 'Renamed' })
         .then(() => order.push('update-ok'), (error) => order.push(`update-${error.code}`));
     await Promise.all([run, remove, update]);
     assert.deepEqual(order, ['run', 'delete-in_use', 'update-in_use']);

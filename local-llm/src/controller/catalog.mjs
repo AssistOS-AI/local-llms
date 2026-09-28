@@ -2,16 +2,21 @@
 // registry persisted under /data. Every entry is validated here; the same
 // rules apply to seed entries (at load) and to user entries (at add/update).
 //
-// Schema v2 keys a model's sources by weight format, not by runner: every
-// runner declares the format it reads, so runners that read the same GGUF
-// file share one download. `recommended` and `validated` stay per runner.
+// Schema v3 keys a model's sources by weight format (every runner declares
+// the format it reads, so runners that read the same GGUF file share one
+// download), keys `recommended` and `validated` by hardware profile and then
+// by runner (DS005), says in which profiles the model is offered, and carries
+// the unified profile's measured envelope. Entries of earlier schemas are not
+// migrated: a registry entry that is not valid v3 is hidden.
 
 import fs from 'node:fs';
 import path from 'node:path';
 
 import { LocalLlmError } from '../errors.mjs';
+import { PROFILES } from './profiles.mjs';
 
-export const CATALOG_SCHEMA = 'local-llm.catalog/v2';
+export const CATALOG_SCHEMA = 'local-llm.catalog/v3';
+
 
 const ID_RE = /^[a-z0-9][a-z0-9._-]{1,63}$/;
 const HF_REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}\/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
@@ -22,15 +27,6 @@ const SHA256_RE = /^[0-9a-f]{64}$/;
 const GIT_OID_RE = /^[0-9a-f]{40}$/;
 const OLLAMA_TAG_RE = /^[a-z0-9][a-z0-9._-]{0,63}(?:\/[a-z0-9][a-z0-9._-]{0,63})?(?::[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$/;
 const TEXT_MAX = 400;
-
-// v1 registries keyed sources by runner id. Where several v1 keys held a GGUF
-// file, the first in this order becomes the gguf source.
-const V1_GGUF_KEYS = Object.freeze(['llama.cpp', 'lmstudio', 'vllm']);
-// Per-runner entries of v1 runners that never ran. The v1 LM Studio stub never
-// started a model, so a v1 entry's parameters and measurements for it are
-// dropped. LM Studio is a runner again since Phase R7, so a v2 entry keeps its
-// own LM Studio entries; only an entry that still keys sources by runner is v1.
-const V1_STUB_RUNNERS = Object.freeze(['lmstudio']);
 
 function invalid(message, field) {
     return new LocalLlmError('invalid_model', message, { field });
@@ -55,6 +51,11 @@ function optionalInteger(value, field, min, max) {
         throw invalid(`${field} must be an integer from ${min} to ${max}`, field);
     }
     return value;
+}
+
+function requiredInteger(value, field, min, max) {
+    if (value === undefined || value === null) throw invalid(`${field} is required`, field);
+    return optionalInteger(value, field, min, max);
 }
 
 function onlyKeys(value, allowed, field) {
@@ -227,7 +228,7 @@ export function validateModel(value, { seed = false } = {}) {
     // `seed` may come back from an earlier validation; it is never taken from input.
     onlyKeys(value, [
         'id', 'displayName', 'description', 'license', 'architecture', 'totalParams', 'activeParams',
-        'contextLength', 'requiresJinja', 'sources', 'memory', 'recommended', 'validated', 'seed',
+        'contextLength', 'requiresJinja', 'profiles', 'sources', 'memory', 'recommended', 'validated', 'unified', 'seed',
     ], 'model');
     if (typeof value.id !== 'string' || !ID_RE.test(value.id)) {
         throw invalid('id must be 2-64 lowercase letters, digits, dot, dash or underscore', 'id');
@@ -245,12 +246,16 @@ export function validateModel(value, { seed = false } = {}) {
     }
     const architecture = value.architecture ?? 'dense';
     if (!['moe', 'dense'].includes(architecture)) throw invalid('architecture must be moe or dense', 'architecture');
-    if (value.recommended !== undefined && !plainObject(value.recommended)) {
-        throw invalid('recommended must be an object keyed by runner', 'recommended');
+    const profiles = value.profiles === undefined ? [...PROFILES] : value.profiles;
+    if (!Array.isArray(profiles) || profiles.length === 0 || profiles.some((profile) => !PROFILES.includes(profile))
+        || new Set(profiles).size !== profiles.length) {
+        throw invalid(`profiles must list one or both of ${PROFILES.join(', ')}`, 'profiles');
     }
-    if (value.validated !== undefined && !plainObject(value.validated)) {
-        throw invalid('validated must be an object keyed by runner', 'validated');
-    }
+    const recommended = validatePerProfile(value.recommended, 'recommended', (entry, field) => {
+        if (!plainObject(entry)) throw invalid(`${field} must be an object of parameters`, field);
+        return entry;
+    });
+    const validated = validatePerProfile(value.validated, 'validated', (entry, field) => optionalText(entry, field, 600));
     return Object.freeze({
         id: value.id,
         displayName: optionalText(value.displayName, 'displayName', 120) || value.id,
@@ -263,36 +268,60 @@ export function validateModel(value, { seed = false } = {}) {
         requiresJinja: value.requiresJinja === true,
         sources: Object.freeze(sources),
         memory: validateMemory(value.memory),
-        recommended: value.recommended ? structuredClone(value.recommended) : {},
-        validated: value.validated ? structuredClone(value.validated) : {},
+        profiles: Object.freeze([...profiles]),
+        recommended,
+        validated,
+        unified: validateUnified(value.unified),
         seed,
     });
 }
 
+// `recommended` and `validated`: { <profile>: { <runner id>: value } }.
+function validatePerProfile(value, field, validateEntry) {
+    if (value === undefined || value === null) return Object.freeze({});
+    if (!plainObject(value)) throw invalid(`${field} must be an object keyed by profile`, field);
+    const out = {};
+    for (const [profile, byRunner] of Object.entries(value)) {
+        if (!PROFILES.includes(profile)) throw invalid(`${field} has an unknown profile '${profile}'`, `${field}.${profile}`);
+        if (!plainObject(byRunner)) throw invalid(`${field}.${profile} must be an object keyed by runner`, `${field}.${profile}`);
+        out[profile] = Object.freeze(Object.fromEntries(Object.entries(byRunner)
+            .map(([runnerId, entry]) => [runnerId, validateEntry(entry, `${field}.${profile}.${runnerId}`)])));
+    }
+    return Object.freeze(structuredClone(out));
+}
+
+const ENVELOPE_KEYS = Object.freeze(['runner', 'maxCtx', 'maxParallel', 'mtp', 'bufferBytes', 'transientBytes', 'measured']);
+
 /**
- * Bring a registry entry written by the v1 controller (sources keyed by
- * runner id) to schema v2 (keyed by weight format). Idempotent, and it never
- * throws: anything it cannot map is left for validation to refuse, so the
- * entry is hidden but kept rather than lost.
+ * The unified profile's measured envelope (DS005): rectangles of context and
+ * parallel slots, each measured at its corner, with the deterministic buffer
+ * bytes llama.cpp logged there and the measured transient margin beyond them.
+ * A model without an envelope is refused on unified memory.
  */
-export function migrateModelEntry(entry) {
-    if (!plainObject(entry) || !plainObject(entry.sources)) return entry;
-    const sources = {};
-    for (const [key, source] of Object.entries(entry.sources)) {
-        if (!V1_GGUF_KEYS.includes(key)) sources[key] = source;
+function validateUnified(value) {
+    if (value === undefined || value === null) return null;
+    if (!plainObject(value)) throw invalid('unified must be an object', 'unified');
+    onlyKeys(value, ['envelope'], 'unified');
+    if (!Array.isArray(value.envelope) || value.envelope.length === 0 || value.envelope.length > 16) {
+        throw invalid('unified.envelope must list 1-16 measured rectangles', 'unified.envelope');
     }
-    if (!sources.gguf) {
-        const legacy = V1_GGUF_KEYS.map((key) => entry.sources[key]).find((source) => source?.type === 'huggingface');
-        if (legacy) sources.gguf = legacy;
-    }
-    const migrated = { ...entry, sources };
-    const v1 = Object.keys(entry.sources).some((key) => V1_GGUF_KEYS.includes(key));
-    if (!v1) return migrated;
-    for (const field of ['recommended', 'validated']) {
-        if (!plainObject(entry[field])) continue;
-        migrated[field] = Object.fromEntries(Object.entries(entry[field]).filter(([runnerId]) => !V1_STUB_RUNNERS.includes(runnerId)));
-    }
-    return migrated;
+    const envelope = value.envelope.map((entry, index) => {
+        const at = `unified.envelope[${index}]`;
+        if (!plainObject(entry)) throw invalid(`${at} must be an object`, at);
+        onlyKeys(entry, ENVELOPE_KEYS, at);
+        if (typeof entry.runner !== 'string' || !entry.runner) throw invalid(`${at}.runner must name a runner`, `${at}.runner`);
+        if (typeof entry.mtp !== 'boolean') throw invalid(`${at}.mtp must be true or false`, `${at}.mtp`);
+        return Object.freeze({
+            runner: entry.runner,
+            maxCtx: requiredInteger(entry.maxCtx, `${at}.maxCtx`, 512, 2 ** 22),
+            maxParallel: requiredInteger(entry.maxParallel, `${at}.maxParallel`, 1, 16),
+            mtp: entry.mtp,
+            bufferBytes: requiredInteger(entry.bufferBytes, `${at}.bufferBytes`, 1, 2 ** 45),
+            transientBytes: requiredInteger(entry.transientBytes, `${at}.transientBytes`, 0, 2 ** 40),
+            measured: optionalText(entry.measured, `${at}.measured`, 600),
+        });
+    });
+    return Object.freeze({ envelope: Object.freeze(envelope) });
 }
 
 export function loadSeedCatalog(file = path.join(import.meta.dirname, '..', '..', 'catalog', 'models.json')) {

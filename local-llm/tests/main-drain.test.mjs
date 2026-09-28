@@ -37,7 +37,7 @@ process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);\n`);
     fs.writeFileSync(smi, '#!/bin/sh\ncase "$1" in --query-gpu=*) echo "Test GPU, 6144, 13, 6000, 595.91.07";; esac\n', { mode: 0o755 });
     const catalog = path.join(root, 'catalog.json');
     fs.writeFileSync(catalog, JSON.stringify({
-        schema: 'local-llm.catalog/v2',
+        schema: 'local-llm.catalog/v3',
         models: [{
             id: 'tiny',
             architecture: 'dense',

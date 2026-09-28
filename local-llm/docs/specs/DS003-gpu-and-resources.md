@@ -34,6 +34,10 @@ The declaration asks for that CDI device and nothing else. Ploinky attaches it o
 
 Admission sizes every runner from the GPU's total and free memory. A GPU that gives no memory figures and is not known to share system memory is reported unavailable with a reason that names the GPU and the values it gave, and every Run is refused as `incompatible` with it, before anything is downloaded. Without this rule every memory comparison was false and any model was admitted, whatever its size. A GPU that shares system memory (NVIDIA GB10 in DGX Spark) is detected as such and uses the unified profile (DS005); a GPU that reports numbers gives the same values as before.
 
+### llama-server load mode
+
+The llama-server adapters take `loadMode` (`auto`, `none`, `mmap`, `mlock`, `mmap+mlock`, `dio`), mapped one to one to llama.cpp's `--load-mode` (added in b10105; b10875 removed `--no-mmap`, `--mmap`, `--mlock` and `--direct-io`). `auto`, the dedicated default, passes no flag. ik_llama.cpp keeps its older flags and has no direct I/O: `none` is `--no-mmap`, `mlock` is `--mlock --no-mmap`, `mmap+mlock` is `--mlock`, and `dio` is refused. The former `noMmap` and `mlock` booleans are gone (LM Studio keeps its own `noMmap`, which its SDK takes as `tryMmap`). The model's training context caps `ctxSize` at `contextLength` per slot.
+
 ### Admission
 
 `admit()` in `src/controller/admission.mjs` returns one of three answers, each with a reason and an estimate labelled `isEstimate: true`:
@@ -62,7 +66,8 @@ Estimates for llama.cpp come from the model's measured memory profile when the c
 | Fixed ports | Each adapter declares its port; `defaultPorts()` refuses two runners on one port. llama.cpp 18080, ik_llama.cpp 18081, vLLM 18082, TabbyAPI 18083, LM Studio 18084 (its daemon also listens on 127.0.0.1:41343, and its engine on a random loopback port), Ollama 18434, all inside the agent's network namespace |
 | Not reachable through the Router | `routerAccess.agentPorts: false` closes the agent-port relay for this agent |
 | Per-start credentials | llama.cpp and ik_llama.cpp get a fresh random `--api-key` on every start, and vLLM and TabbyAPI a key of their own; the chat responder reads it from the controller. LM Studio has none headless: its server relies on loopback, the agent's own network namespace and the closed relay, and the controller keeps only its own model loaded (DS001) |
-| Minimal environment | Runners get `PATH`, `HOME=/data/home`, `LANG` and their own variables only; no agent secrets |
+| Minimal environment | Runners get `PATH`, `HOME=/data/home`, `LANG`, `CUDA_CACHE_PATH` and their own variables only; no agent secrets. `CUDA_CACHE_PATH` (`/opt/runners/.cuda-cache`) keeps the CUDA driver's JIT cache in the container's own filesystem, never in `/data`, which other workspace processes can write (DS004) |
+| OOM priority | Every runner's `oom_score_adj` is set to 1000 right after spawn, before it can load anything; its children inherit it. On a GPU that shares system memory, GPU allocations are invisible to RSS, the OOM score and memory cgroups (DS005), so this is what makes an out-of-memory kill pick the runner. A runner that cannot be marked is killed; one that already exited is ignored |
 | Reaped on stop and drain | Each runner leads its own process group. Stop sends SIGTERM to the group, then SIGKILL after the grace period; when the runner exits, anything left in its group is killed, so helper processes a runner starts never outlive it |
 
 ### Reuse from repository DS010

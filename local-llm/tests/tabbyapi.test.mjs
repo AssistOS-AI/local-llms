@@ -44,7 +44,7 @@ test('the seed catalog pins Qwen3-8B EXL3 4.0 bpw as an EXL3 snapshot', () => {
     assert.equal(source.commit, '1fd66d10f8fbdf071a0ff35842a2d1bf0df94b45');
     assert.equal(source.files.length, 8);
     assert.equal(source.size, 5206949815);
-    assert.equal(QWEN8.recommended.tabbyapi.cacheMode, 'Q4');
+    assert.equal(QWEN8.recommended.dedicated.tabbyapi.cacheMode, 'Q4');
 });
 
 test('TabbyAPI is a supported runner that reads EXL3 snapshots on its own loopback port', () => {

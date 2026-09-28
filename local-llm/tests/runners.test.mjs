@@ -160,7 +160,7 @@ describe('llama.cpp runner', () => {
     });
 
     it('applies model recommended params over schema defaults', () => {
-        const model = { id: 'gpt-oss-20b', recommended: { 'llama.cpp': { ctxSize: 65536, nCpuMoe: 12 } } };
+        const model = { id: 'gpt-oss-20b', recommended: { dedicated: { 'llama.cpp': { ctxSize: 65536, nCpuMoe: 12 } } } };
         const values = llamaCppRunner.normalizeParams({}, { model });
         assert.equal(values.ctxSize, 65536);
         assert.equal(values.nCpuMoe, 12);
@@ -169,7 +169,10 @@ describe('llama.cpp runner', () => {
         const { args } = llamaLaunch({}, { model });
         assert.ok(hasPair(args, '--ctx-size', '65536'));
         assert.ok(hasPair(args, '--alias', 'gpt-oss-20b'));
-        const bad = { id: 'x', recommended: { 'llama.cpp': { ctxSize: 1 } } };
+        const bad = { id: 'x', recommended: { dedicated: { 'llama.cpp': { ctxSize: 1 } } } };
+        // Recommended values of another profile never apply.
+        const unifiedOnly = { id: 'u', recommended: { unified: { 'llama.cpp': { ctxSize: 65536 } } } };
+        assert.equal(llamaCppRunner.normalizeParams({}, { model: unifiedOnly }).ctxSize, 16384);
         assertParamError(() => llamaCppRunner.normalizeParams({}, { model: bad }), 'ctxSize');
     });
 
@@ -178,18 +181,21 @@ describe('llama.cpp runner', () => {
         assert.ok(!llamaLaunch({}).args.includes('--jinja'));
     });
 
-    it('maps mlock/noMmap to --load-mode and omits the default', () => {
+    it('maps loadMode one to one to --load-mode and omits auto', () => {
         const modeOf = (params) => {
             const { args } = llamaLaunch(params);
             const index = args.indexOf('--load-mode');
             return index === -1 ? null : args[index + 1];
         };
         assert.equal(modeOf({}), null);
-        assert.equal(modeOf({ mlock: true }), 'mmap+mlock');
-        assert.equal(modeOf({ noMmap: true }), 'none');
-        assert.equal(modeOf({ mlock: true, noMmap: true }), 'mlock');
-        const { args } = llamaLaunch({ mlock: true });
+        assert.equal(modeOf({ loadMode: 'auto' }), null);
+        for (const mode of ['none', 'mmap', 'mlock', 'mmap+mlock', 'dio']) assert.equal(modeOf({ loadMode: mode }), mode);
+        const { args } = llamaLaunch({ loadMode: 'mlock' });
         assert.ok(!args.includes('--mlock') && !args.includes('--no-mmap'));
+        assertParamError(() => llamaLaunch({ loadMode: 'direct' }), 'loadMode');
+        // The flags b10875 removed are not parameters any more.
+        assertParamError(() => llamaLaunch({ noMmap: true }), 'noMmap');
+        assertParamError(() => llamaLaunch({ mlock: true }), 'mlock');
     });
 
     it('passes chatTemplateKwargs as one JSON argument', () => {
@@ -249,7 +255,15 @@ describe('ik_llama.cpp runner', () => {
         assert.equal(ikLlamaCppRunner.executable, '/opt/ik_llama.cpp/llama-server');
         assert.equal(ikLlamaCppRunner.pinnedVersion, '20f7a72');
         assert.deepEqual(ikLlamaCppRunner.basicParams, ['ctxSize', 'nCpuMoe']);
-        assert.equal(ikLlamaCppRunner.paramSchema, llamaCppRunner.paramSchema);
+        // The same parameters as llama.cpp, except that ik has no direct I/O.
+        const { loadMode: ikLoad, ...ikRest } = ikLlamaCppRunner.paramSchema.properties;
+        const { loadMode: llamaLoad, ...llamaRest } = llamaCppRunner.paramSchema.properties;
+        assert.deepEqual(ikRest, llamaRest);
+        assert.deepEqual(ikLoad.enum, ['auto', 'none', 'mmap', 'mlock', 'mmap+mlock']);
+        assert.deepEqual(llamaLoad.enum, ['auto', 'none', 'mmap', 'mlock', 'mmap+mlock', 'dio']);
+        // ik has no unified-memory policy.
+        assert.equal(ikLlamaCppRunner.paramSchemaFor('unified'), null);
+        assert.equal(typeof ikLlamaCppRunner.admitUnified, 'undefined');
     });
 
     it('launches gpt-oss-20b with the flags ik understands, in the documented order', () => {
@@ -266,13 +280,16 @@ describe('ik_llama.cpp runner', () => {
     });
 
     it('never passes the llama.cpp flags ik rejects, nor run-time repacking', () => {
-        const full = ikLaunch({ ctxSize: 32768, nCpuMoe: 8, threads: 12, parallel: 2, mlock: true, noMmap: true,
+        const full = ikLaunch({ ctxSize: 32768, nCpuMoe: 8, threads: 12, parallel: 2, loadMode: 'mlock',
             flashAttn: 'off', cacheTypeK: 'q8_0', cacheTypeV: 'q4_0', batchSize: 4096, ubatchSize: 1024 });
         for (const rejected of ['--no-webui', '-lv', '--kv-unified', '--load-mode', '-rtr', '--run-time-repack', '-fmoe']) {
             assert.equal(full.args.includes(rejected), false, rejected);
         }
         assert.ok(hasPair(full.args, '-np', '2'));
         assert.ok(full.args.includes('--mlock') && full.args.includes('--no-mmap'));
+        const flags = (loadMode) => ikLaunch({ loadMode }).args.filter((arg) => ['--mlock', '--no-mmap'].includes(arg));
+        assert.deepEqual([flags('auto'), flags('mmap'), flags('none'), flags('mmap+mlock')], [[], [], ['--no-mmap'], ['--mlock']]);
+        assert.throws(() => ikLaunch({ loadMode: 'dio' }), /loadMode/);
         assert.ok(hasPair(full.args, '--flash-attn', 'off'));
         assert.ok(full.args.every((arg) => !SHELL_META.test(arg)));
         // Without the options, neither switch is passed.
@@ -454,7 +471,7 @@ describe('argv safety', () => {
             assertParamError(() => ollamaRunner.normalizeParams({ keepAlive: `5m${value}` }), 'keepAlive');
         }
         const full = llamaLaunch({
-            ctxSize: 32768, nCpuMoe: 8, threads: 12, parallel: 2, mlock: true, noMmap: true,
+            ctxSize: 32768, nCpuMoe: 8, threads: 12, parallel: 2, loadMode: 'mlock',
             flashAttn: 'on', cacheTypeK: 'q8_0', cacheTypeV: 'q4_0', batchSize: 4096, ubatchSize: 1024
         }, { model: { id: 'm', requiresJinja: true } });
         assert.ok(full.args.every((arg) => !SHELL_META.test(arg)));

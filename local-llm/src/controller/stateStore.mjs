@@ -7,11 +7,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { migrateModelEntry } from './catalog.mjs';
-
-// Registry entries are migrated one by one when the file loads (catalog v2),
-// so the file version stays 1: a controller from before catalog v2 then hides
-// migrated entries instead of discarding the whole file.
+// Registry entries are kept as written; the catalog hides any that are not
+// valid for its schema (catalog v3 migrates nothing).
 export const STATE_VERSION = 1;
 const MAX_REQUEST_RECORDS = 200;
 
@@ -50,7 +47,7 @@ function normalizeState(value) {
     if (value.deployment && typeof value.deployment === 'object') state.deployment = value.deployment;
     if (value.params && typeof value.params === 'object' && !Array.isArray(value.params)) state.params = value.params;
     if (value.requests && typeof value.requests === 'object' && !Array.isArray(value.requests)) state.requests = value.requests;
-    if (Array.isArray(value.registry)) state.registry = value.registry.map(migrateModelEntry);
+    if (Array.isArray(value.registry)) state.registry = value.registry;
     if (value.ollamaPulls && typeof value.ollamaPulls === 'object' && !Array.isArray(value.ollamaPulls)) {
         state.ollamaPulls = value.ollamaPulls;
     }

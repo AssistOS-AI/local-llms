@@ -9,6 +9,7 @@ import test from 'node:test';
 
 import { admit } from '../src/controller/admission.mjs';
 import { loadSeedCatalog } from '../src/controller/catalog.mjs';
+import { defaultThreads, physicalCoreCount } from '../src/controller/hardware.mjs';
 import { RUNNERS, defaultPorts } from '../src/runners/index.mjs';
 import {
     LMSTUDIO_SWITCH,
@@ -330,7 +331,8 @@ function startContext(t, runDir, { port = 18084 } = {}) {
 const ENGINE = `${RUN_DIR}/home/.lmstudio/extensions/backends/llama.cpp-linux-x86_64-nvidia-cuda12-avx2-2.41.0/llama-server`;
 const ENGINE_ARGS = ['--ctx-size', '16384', '--n-gpu-layers', '999999', '--n-cpu-moe', '0', '--ctx-checkpoints', '0', '--batch-size', '256',
     '--ubatch-size', '256', '--threads', '7', '--parallel', '1', '--cache-type-k', 'f16', '--cache-type-v', 'f16', '--flash-attn', 'on',
-    '--no-kv-unified', '--load-mode', 'mmap', '--n-gpu-layers', '99', '--n-cpu-moe', '17', '--threads', '12'];
+    // The override's threads are the adapter's default on the machine running the test (physical cores minus 2).
+    '--no-kv-unified', '--load-mode', 'mmap', '--n-gpu-layers', '99', '--n-cpu-moe', '17', '--threads', String(defaultThreads(physicalCoreCount()))];
 
 test('start runs llmster from its copy, imports by symbolic link, loads through the SDK and checks the engine it got', async (t) => {
     const root = tempDir(t, 'run');
