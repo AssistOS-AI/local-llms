@@ -93,11 +93,12 @@ function harness(t, { dataDir = null } = {}) {
 
 const run = (h, requestId, modelId = 'gpt-oss-20b') => settle(h.controller.run({ requestId, modelId, runnerId: 'llama.cpp' }));
 
-test('the special ids are valid request ids; the map of accepted requests starts empty and without a prototype', (t) => {
+test('the special ids are valid request ids; the map of accepted requests starts empty, as an ordinary object', (t) => {
     const h = harness(t);
     for (const requestId of [...SPECIAL, ORDINARY]) assert.match(requestId, REQUEST_ID_RE);
-    assert.equal(Object.getPrototypeOf(h.controller.state.requests), null);
-    assert.deepEqual(Object.keys(h.controller.state.requests), []);
+    assert.equal(Object.getPrototypeOf(h.controller.state.requests), Object.prototype);
+    assert.deepEqual(h.controller.state.requests, {});
+    // Inherited members such as constructor or toString exist on it, and are never taken for records.
     for (const requestId of SPECIAL) assert.equal(acceptedRequest(h.controller.state.requests, requestId), null);
 });
 
@@ -117,7 +118,7 @@ for (const requestId of [...SPECIAL, ORDINARY]) {
         await until(() => h.controller.state.deployment?.phase === 'ready', 'ready');
         assert.equal(h.controller.state.deployment.requestId, requestId);
         assert.ok(Object.hasOwn(h.controller.state.requests, requestId), 'recorded as an own entry');
-        assert.equal(Object.getPrototypeOf(h.controller.state.requests), null, 'recording did not set a prototype');
+        assert.equal(Object.getPrototypeOf(h.controller.state.requests), Object.prototype, 'recording did not set a prototype');
         assert.deepEqual(Object.keys(h.controller.state.requests), [requestId]);
         assert.equal(outcome(await run(h, requestId)), 'duplicate');
         assert.equal(h.downloads.length, 1);
@@ -128,7 +129,7 @@ for (const requestId of [...SPECIAL, ORDINARY]) {
         assert.ok(Object.hasOwn(file.requests, requestId));
         assert.deepEqual(Object.keys(file.requests), [requestId]);
         const again = harness(t, { dataDir: h.dataDir });
-        assert.equal(Object.getPrototypeOf(again.controller.state.requests), null);
+        assert.equal(Object.getPrototypeOf(again.controller.state.requests), Object.prototype);
         assert.ok(Object.hasOwn(again.controller.state.requests, requestId));
         assert.equal(outcome(await run(again, requestId)), 'duplicate');
         // Another special id is still fresh after the restart.
@@ -175,7 +176,7 @@ test('a state file that names special ids is read as own entries, and only those
 }
 `);
     const h = harness(t, { dataDir });
-    assert.equal(Object.getPrototypeOf(h.controller.state.requests), null);
+    assert.equal(Object.getPrototypeOf(h.controller.state.requests), Object.prototype, 'loading did not set a prototype');
     assert.deepEqual(Object.keys(h.controller.state.requests).sort(), ['__proto__', 'constructor']);
     assert.equal(acceptedRequest(h.controller.state.requests, '__proto__').deploymentId, 'd-proto');
     assert.equal(outcome(await run(h, '__proto__')), 'duplicate');
@@ -194,7 +195,7 @@ test('the request map helpers: own entries only, data properties only, from any 
     for (const requestId of SPECIAL) assert.equal(acceptedRequest(plain, requestId), null);
     const map = requestMap();
     for (const requestId of SPECIAL) recordRequest(map, requestId, { deploymentId: `d-${requestId}`, at: 'x' });
-    assert.equal(Object.getPrototypeOf(map), null);
+    assert.equal(Object.getPrototypeOf(map), Object.prototype, 'recording __proto__ did not set a prototype');
     assert.deepEqual(Object.keys(map).sort(), [...SPECIAL].sort());
     for (const requestId of SPECIAL) {
         const descriptor = Object.getOwnPropertyDescriptor(map, requestId);
@@ -204,7 +205,7 @@ test('the request map helpers: own entries only, data properties only, from any 
     // Copying a parsed document keeps a `__proto__` key as data.
     const copied = requestMap(JSON.parse('{"__proto__":{"deploymentId":"d"},"ordinary-id-01":{"deploymentId":"e"}}'));
     assert.deepEqual(Object.keys(copied).sort(), ['__proto__', 'ordinary-id-01']);
-    assert.equal(Object.getPrototypeOf(copied), null);
+    assert.equal(Object.getPrototypeOf(copied), Object.prototype);
     // Recording into an ordinary object defines data too: its prototype does not change.
     recordRequest(plain, '__proto__', { deploymentId: 'd' });
     assert.equal(Object.getPrototypeOf(plain), Object.prototype);

@@ -13,16 +13,18 @@ export const STATE_VERSION = 1;
 const MAX_REQUEST_RECORDS = 200;
 
 // Accepted Run requests by request id. Every id the request pattern allows is
-// an ordinary key, `__proto__`, `constructor` and `toString` included: the map
-// has no prototype, a record counts only as the map's own property, and it is
-// written as a data property, never through a setter.
+// an ordinary key, `__proto__`, `constructor` and `toString` included: a record
+// counts only as the map's own property (never an inherited member), and it is
+// defined as a data property (never assigned, so no setter such as
+// `__proto__` runs and the map's prototype never changes). The map itself is an
+// ordinary object, so it compares and serializes like the other state fields.
 function defineRecord(map, requestId, record) {
     Object.defineProperty(map, requestId, { value: record, enumerable: true, writable: true, configurable: true });
 }
 
 /** A request map holding the own entries of `entries` (as loaded from the state file). */
 export function requestMap(entries = {}) {
-    const map = Object.create(null);
+    const map = {};
     for (const [requestId, record] of Object.entries(entries)) defineRecord(map, requestId, record);
     return map;
 }
