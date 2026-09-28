@@ -128,3 +128,20 @@ test('a state file from a newer controller is kept aside, not overwritten silent
     const kept = fs.readdirSync(path.dirname(store.file)).filter((name) => name.startsWith('controller.json.unsupported-'));
     assert.equal(kept.length, 1);
 });
+
+test('the unified seed lists the models measured or to be measured on DGX Spark, every source pinned', () => {
+    const byId = Object.fromEntries(loadSeedCatalog().map((model) => [model.id, model]));
+    for (const id of ['gpt-oss-120b', 'qwen3.6-35b-a3b-mtp', 'qwen3-coder-30b-a3b', 'glm-4.7-flash', 'qwen3.5-122b-a10b']) {
+        const model = byId[id];
+        assert.deepEqual(model.profiles, ['unified'], id);
+        assert.match(model.sources.gguf.commit, /^[0-9a-f]{40}$/, id);
+        assert.equal(model.sources.gguf.revision, model.sources.gguf.commit, id);
+    }
+    assert.equal(byId['gpt-oss-120b'].sources.gguf.sha256, '582bd40f6886200101f4c4ed9f25f3fe80cc14c86e9e2b37746cd8904a0c622d');
+    assert.equal(byId['qwen3.6-35b-a3b-mtp'].sources.gguf.sha256, '55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1');
+    // Qwen3.5-122B-A10B is a split GGUF: three shards, 74.7 GB together.
+    assert.equal(byId['qwen3.5-122b-a10b'].sources.gguf.shards.length, 3);
+    assert.equal(byId['qwen3.5-122b-a10b'].sources.gguf.size, 74664408608);
+    // Listed models without a measured envelope are refused on unified memory until measured.
+    for (const id of ['qwen3-coder-30b-a3b', 'glm-4.7-flash', 'qwen3.5-122b-a10b']) assert.equal(byId[id].unified, null, id);
+});

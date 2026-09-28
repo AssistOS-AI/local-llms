@@ -307,6 +307,164 @@
           }
         }
       }
+    },
+    {
+      "id": "gpt-oss-120b",
+      "displayName": "gpt-oss-120b",
+      "description": "OpenAI open-weight mixture-of-experts model, 117B parameters with 5.1B active. Unified memory only: its 63 GB of MXFP4 weights need DGX Spark's shared memory.",
+      "license": "Apache-2.0",
+      "architecture": "moe",
+      "totalParams": "117B",
+      "activeParams": "5.1B",
+      "contextLength": 131072,
+      "requiresJinja": true,
+      "profiles": [
+        "unified"
+      ],
+      "sources": {
+        "gguf": {
+          "type": "huggingface",
+          "repo": "ggml-org/gpt-oss-120b-GGUF",
+          "file": "gpt-oss-120b-MXFP4.gguf",
+          "revision": "238abdd290bb874b90a5da1b4549881b7d05c091",
+          "commit": "238abdd290bb874b90a5da1b4549881b7d05c091",
+          "size": 63387346208,
+          "sha256": "582bd40f6886200101f4c4ed9f25f3fe80cc14c86e9e2b37746cd8904a0c622d",
+          "quantization": "MXFP4"
+        }
+      },
+      "recommended": {
+        "unified": {
+          "llama.cpp": {
+            "ctxSize": 32768,
+            "parallel": 1,
+            "loadMode": "dio",
+            "chatTemplateKwargs": {
+              "reasoning_effort": "low"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "qwen3.6-35b-a3b-mtp",
+      "displayName": "Qwen3.6-35B-A3B (MTP)",
+      "description": "Qwen mixture-of-experts model with a multi-token-prediction head, 35B parameters with 3B active, UD-Q4_K_XL. MTP speculative decoding is opt-in (mtp).",
+      "license": "Apache-2.0",
+      "architecture": "moe",
+      "totalParams": "35B",
+      "activeParams": "3B",
+      "contextLength": 262144,
+      "profiles": [
+        "unified"
+      ],
+      "sources": {
+        "gguf": {
+          "type": "huggingface",
+          "repo": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+          "file": "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+          "revision": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",
+          "commit": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",
+          "size": 22853663008,
+          "sha256": "55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1",
+          "quantization": "UD-Q4_K_XL"
+        }
+      },
+      "recommended": {
+        "unified": {
+          "llama.cpp": {
+            "ctxSize": 32768,
+            "parallel": 1,
+            "loadMode": "dio"
+          }
+        }
+      }
+    },
+    {
+      "id": "qwen3-coder-30b-a3b",
+      "displayName": "Qwen3-Coder-30B-A3B-Instruct",
+      "description": "Qwen coding mixture-of-experts model, 30B parameters with 3B active, Q8_0. Listed for unified memory; it runs once it has been measured there.",
+      "license": "Apache-2.0",
+      "architecture": "moe",
+      "totalParams": "30B",
+      "activeParams": "3B",
+      "contextLength": 262144,
+      "profiles": [
+        "unified"
+      ],
+      "sources": {
+        "gguf": {
+          "type": "huggingface",
+          "repo": "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+          "file": "Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf",
+          "revision": "b17cb02dd882d5b6ab62fc777ad2995f19668350",
+          "commit": "b17cb02dd882d5b6ab62fc777ad2995f19668350",
+          "size": 32483935392,
+          "sha256": "4ff1cff607804037bf6d2168249c570baa4e1621292b159c0e06591e0d7c3066",
+          "quantization": "Q8_0"
+        }
+      }
+    },
+    {
+      "id": "glm-4.7-flash",
+      "displayName": "GLM-4.7-Flash",
+      "description": "Z.ai GLM-4.7-Flash mixture-of-experts model, Q8_0. Listed for unified memory; it runs once it has been measured there.",
+      "license": "MIT",
+      "architecture": "moe",
+      "profiles": [
+        "unified"
+      ],
+      "sources": {
+        "gguf": {
+          "type": "huggingface",
+          "repo": "unsloth/GLM-4.7-Flash-GGUF",
+          "file": "GLM-4.7-Flash-Q8_0.gguf",
+          "revision": "0d32489ecb9db6d2a4fc93bd27ef01519f95474d",
+          "commit": "0d32489ecb9db6d2a4fc93bd27ef01519f95474d",
+          "size": 31842799968,
+          "sha256": "8c0922b03326932a40315ce92bbee01cc836ad18664268019143c898bdd7dd0b",
+          "quantization": "Q8_0"
+        }
+      }
+    },
+    {
+      "id": "qwen3.5-122b-a10b",
+      "displayName": "Qwen3.5-122B-A10B",
+      "description": "Qwen mixture-of-experts model, 122B parameters with 10B active, MXFP4_MOE in three GGUF shards (74.7 GB: check free disk first). Listed for unified memory; it runs once it has been measured there.",
+      "license": "Apache-2.0",
+      "architecture": "moe",
+      "totalParams": "122B",
+      "activeParams": "10B",
+      "profiles": [
+        "unified"
+      ],
+      "sources": {
+        "gguf": {
+          "type": "huggingface",
+          "repo": "unsloth/Qwen3.5-122B-A10B-GGUF",
+          "file": "MXFP4_MOE/Qwen3.5-122B-A10B-MXFP4_MOE-00001-of-00003.gguf",
+          "revision": "51eab4d59d53f573fb9206cb3ce613f1d0aa392b",
+          "commit": "51eab4d59d53f573fb9206cb3ce613f1d0aa392b",
+          "quantization": "MXFP4_MOE",
+          "shards": [
+            {
+              "file": "MXFP4_MOE/Qwen3.5-122B-A10B-MXFP4_MOE-00001-of-00003.gguf",
+              "size": 10943552,
+              "sha256": "467c9bd92ea518539cf75bf5a5fbfbd35e9a0b40d766ccaa67bf120e12041df3"
+            },
+            {
+              "file": "MXFP4_MOE/Qwen3.5-122B-A10B-MXFP4_MOE-00002-of-00003.gguf",
+              "size": 49639075904,
+              "sha256": "96826e65ea619e50311763d56332ecf13f274b4d383fa3981b2c842d5c7a41fd"
+            },
+            {
+              "file": "MXFP4_MOE/Qwen3.5-122B-A10B-MXFP4_MOE-00003-of-00003.gguf",
+              "size": 25014389152,
+              "sha256": "e3d0c53a236f6628928918ff3db806ab410b2b337d5e041076f57d9296ce47f5"
+            }
+          ]
+        }
+      }
     }
   ]
 }
