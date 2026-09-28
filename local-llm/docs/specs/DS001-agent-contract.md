@@ -79,10 +79,10 @@ Soul Gateway refuses a call whose caller is the agent that the target model fron
 
 On SIGTERM, SIGINT or SIGHUP the controller:
 
-1. stops accepting new commands, waits up to 1 s for a command already in progress (a Run that reaches its start then refuses with `shutting_down`), and aborts the active job, which checkpoints a download as `paused` and keeps the `.partial` file and its identity sidecar;
+1. stops accepting new commands, aborts the active job, which checkpoints a download as `paused` and keeps the `.partial` file and its identity sidecar, and stops every hardware query in flight: the job's, a command's or the overview's. A snapshot runs up to three nvidia-smi queries in turn, each allowed 10 s, so none is waited out. The query in progress is killed (SIGKILL) and waited for up to 1 s to exit (`HARDWARE_QUERY_REAP_MS`); one that has not exited by then (a hung driver) is named in the deployment log. A stopped snapshot is never used, so nothing is admitted or launched from it. The drain then waits up to 1 s for a command already in progress (a Run that reaches its start then refuses with `shutting_down`), and the query wait runs during that same second;
 2. stops the runner's process group (SIGTERM, then SIGKILL after 3 s) and reaps it;
 3. closes the control socket and stops AgentServer (SIGTERM; its own shutdown waits up to 20 s for in-flight tool calls, and it is killed after 21 s);
-4. exits 0, or exits 1 if the whole drain exceeds 30 s. The worst case of steps 1–3 is 25 s, 5 s under that deadline and 10 s under Ploinky's 35 s restart window (`src/drainBudget.mjs`).
+4. exits 0, or exits 1 if the whole drain exceeds 30 s. The worst case of steps 1–3 is 25 s, 5 s under that deadline and 10 s under Ploinky's 35 s restart window (`src/drainBudget.mjs`). A hardware snapshot in progress adds nothing to it: before, a SIGTERM during a Run's snapshot waited up to 30 s of nvidia-smi queries before AgentServer was even told to stop.
 
 If AgentServer exits on its own, the controller stops the runner and exits non-zero, so Ploinky restarts the agent.
 

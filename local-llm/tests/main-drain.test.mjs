@@ -204,3 +204,94 @@ test('a drain stops and reaps a real runner process', async (t) => {
     assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
     assert.equal(controller.state.deployment.phase, 'idle');
 });
+
+// A slow nvidia-smi (a fixture executable, no GPU): every query of the
+// `slowSnapshot`-th snapshot (counted by its first query) answers after
+// `delayMs`, each still inside nvidia-smi's 10 s timeout. Each query's pid is
+// recorded. AgentServer takes `agentDrainMs` to shut down (it may take 20 s).
+function slowSnapshotFixture(t, { slowSnapshot, delayMs, agentDrainMs }) {
+    const f = fixture(t);
+    const agentSignal = path.join(f.root, 'agent-signal.json');
+    fs.writeFileSync(path.join(f.agentLib, 'server', 'AgentServer.mjs'), `import fs from 'node:fs';
+fs.writeFileSync(${JSON.stringify(f.agentEnv)}, JSON.stringify({
+    socketPath: process.env.LOCAL_LLM_SOCKET, token: process.env.LOCAL_LLM_CONTROL_TOKEN }));
+process.on('SIGTERM', () => {
+    fs.writeFileSync(${JSON.stringify(agentSignal)}, JSON.stringify({ at: Date.now() }));
+    setTimeout(() => process.exit(0), ${agentDrainMs});
+});
+setInterval(() => {}, 1000);\n`);
+    const count = path.join(f.root, 'smi-count');
+    const queries = path.join(f.root, 'smi-queries');
+    fs.writeFileSync(f.smi, `#!${process.execPath}
+import fs from 'node:fs';
+const arg = process.argv[2] || '';
+let n = fs.existsSync(${JSON.stringify(count)}) ? Number(fs.readFileSync(${JSON.stringify(count)}, 'utf8')) : 0;
+if (arg.startsWith('--query-gpu=name,')) { n += 1; fs.writeFileSync(${JSON.stringify(count)}, String(n)); }
+fs.appendFileSync(${JSON.stringify(queries)}, JSON.stringify({ snapshot: n, pid: process.pid, arg }) + '\\n');
+const out = arg.startsWith('--query-gpu=name,') ? 'Test GPU, 6144, 13, 6000, 595.91.07'
+    : arg.startsWith('--query-gpu=pci.') ? '0x250310DE, 8.6, HMM, 0, 5, 30' : '';
+setTimeout(() => { if (out) console.log(out); }, n === ${slowSnapshot} ? ${delayMs} : 0);
+`, { mode: 0o755 });
+    const recorded = () => (fs.existsSync(queries)
+        ? fs.readFileSync(queries, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
+        : []);
+    const signalledAt = () => (fs.existsSync(agentSignal) ? JSON.parse(fs.readFileSync(agentSignal, 'utf8')).at : null);
+    return { ...f, recorded, signalledAt };
+}
+
+async function fastServer(t) {
+    const server = http.createServer((req, res) => {
+        res.writeHead(200, { 'content-length': PAYLOAD.length });
+        res.end(PAYLOAD);
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => server.close());
+    return `http://127.0.0.1:${server.address().port}`;
+}
+
+// A Run reads four snapshots: the profile, admission, after the download, and the last one before launch.
+const FINAL_SNAPSHOT = 4;
+
+test('SIGTERM during a slow final hardware snapshot kills the query, launches nothing and drains cleanly', { timeout: 60_000 }, async (t) => {
+    const f = slowSnapshotFixture(t, { slowSnapshot: FINAL_SNAPSHOT, delayMs: 8000, agentDrainMs: 8000 });
+    const main = startMain(f, { LOCAL_LLM_HF_BASE_URL: await fastServer(t), LOCAL_LLM_SHARED_MODELS: path.join(f.root, 'no-shared') });
+    t.after(() => { try { main.child.kill('SIGKILL'); } catch {} });
+    const opts = await channel(f);
+    const accepted = await callController('run', { requestId: 'drain-slow-smi-01', modelId: 'tiny', runnerId: 'llama.cpp' }, opts);
+    assert.equal(accepted.accepted, true);
+    await until(() => f.recorded().some((query) => query.snapshot === FINAL_SNAPSHOT));
+    const [slow] = f.recorded().filter((query) => query.snapshot === FINAL_SNAPSHOT);
+    const began = Date.now();
+    main.child.kill('SIGTERM');
+    const result = await main.exited;
+    const elapsed = Date.now() - began;
+    assert.equal(result.code, 0, result.output);
+    assert.doesNotMatch(result.output, /drain timed out/);
+    // AgentServer is told to stop at once, not after the query's 8 s; its own 8 s is the drain.
+    assert.ok(f.signalledAt() - began < 1500, `AgentServer was signalled after ${f.signalledAt() - began} ms`);
+    assert.ok(elapsed < 8000 + 3000, `the drain took ${elapsed} ms`);
+    // The query was killed and has exited, and the snapshot's later queries never ran.
+    assert.throws(() => process.kill(slow.pid, 0), { code: 'ESRCH' });
+    assert.equal(f.recorded().filter((query) => query.snapshot === FINAL_SNAPSHOT).length, 1);
+    const log = fs.readFileSync(path.join(f.dataDir, 'logs', 'runner.log'), 'utf8');
+    assert.doesNotMatch(log, /\[controller\] starting \//, 'no runner was launched');
+    assert.doesNotMatch(log, /was killed but has not exited/);
+    const state = JSON.parse(fs.readFileSync(path.join(f.dataDir, 'state', 'controller.json'), 'utf8'));
+    assert.equal(state.deployment.phase, 'idle');
+    assert.equal(state.deployment.runner, null);
+});
+
+test('without SIGTERM a slow final hardware snapshot is waited for and the launch goes ahead', { timeout: 60_000 }, async (t) => {
+    const f = slowSnapshotFixture(t, { slowSnapshot: FINAL_SNAPSHOT, delayMs: 1500, agentDrainMs: 0 });
+    const main = startMain(f, { LOCAL_LLM_HF_BASE_URL: await fastServer(t), LOCAL_LLM_SHARED_MODELS: path.join(f.root, 'no-shared') });
+    t.after(() => { try { main.child.kill('SIGKILL'); } catch {} });
+    const opts = await channel(f);
+    await callController('run', { requestId: 'slow-smi-launch-01', modelId: 'tiny', runnerId: 'llama.cpp' }, opts);
+    const logFile = path.join(f.dataDir, 'logs', 'runner.log');
+    // The launch is attempted once the slow snapshot has answered (without a llama-server here, it then fails).
+    await until(() => fs.existsSync(logFile) && /\[controller\] starting \//.test(fs.readFileSync(logFile, 'utf8')), 15_000);
+    assert.equal(f.recorded().filter((query) => query.snapshot === FINAL_SNAPSHOT).length, 3, 'all three queries answered');
+    main.child.kill('SIGTERM');
+    const result = await main.exited;
+    assert.equal(result.code, 0, result.output);
+});

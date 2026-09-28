@@ -31,7 +31,7 @@ import {
     verifyArtifact,
     verifySnapshotFile,
 } from './downloader.mjs';
-import { readMemory as readHostMemory, readMemoryPressure, readSnapshot } from './hardware.mjs';
+import { readMemory as readHostMemory, readMemoryPressure, readSnapshot, unreapedQueries as hardwareUnreaped } from './hardware.mjs';
 import { UNIFIED, profileOf } from './profiles.mjs';
 import { createRunnerInstaller, runTool } from './runnerInstaller.mjs';
 import { loadRunnerLock } from './runnerLock.mjs';
@@ -120,7 +120,10 @@ export function createController({
     hfBaseUrl = env.LOCAL_LLM_HF_BASE_URL || 'https://huggingface.co',
     stateStore = createStateStore({ dataDir }),
     runners = RUNNERS,
-    snapshot = () => readSnapshot({ dataDir }),
+    // A snapshot's queries stop when `signal` aborts (a Stop, a Cancel or the drain).
+    snapshot = ({ signal } = {}) => readSnapshot({ dataDir, signal }),
+    // Stopped hardware queries that have not exited yet (logged by the drain).
+    unreapedQueries = hardwareUnreaped,
     download = downloadArtifact,
     inspect = inspectArtifact,
     remove = removeArtifact,
@@ -179,6 +182,8 @@ export function createController({
     let job = null;
     // The acquisition planning of the Run being admitted, which Stop, Cancel and drain can abort (F5).
     let planning = null;
+    // Every hardware snapshot stops when the agent drains (DS001).
+    const hardwareStop = new AbortController();
     // One runner install at a time, beside the deployment job.
     let installJob = null;
     // Installable through the controller: in the image's runner lock and with
@@ -264,11 +269,29 @@ export function createController({
         return profile;
     }
 
+    // A fresh snapshot that stops with the drain and, for a job, with the job.
+    // A stopped snapshot is never used: after a stop nothing is admitted or
+    // launched, even from a snapshot that ignored the stop.
+    async function takeSnapshot(signal = null) {
+        const stop = signal ? AbortSignal.any([hardwareStop.signal, signal]) : hardwareStop.signal;
+        let snap;
+        try {
+            snap = await snapshot({ signal: stop });
+        } catch (error) {
+            if (!stop.aborted) throw error;
+        }
+        if (signal?.aborted) throw new LocalLlmError('aborted', 'Stopped while starting.');
+        if (hardwareStop.signal.aborted) {
+            throw new LocalLlmError('shutting_down', 'The agent is restarting; run the model again once it is back.');
+        }
+        return snap;
+    }
+
     async function currentProfile() {
         if (!profile) {
             let snap = null;
             try {
-                snap = await snapshot();
+                snap = await takeSnapshot();
             } catch {}
             commitProfile(snap);
         }
@@ -281,8 +304,10 @@ export function createController({
         if (profile) return profile;
         let snap = null;
         try {
-            snap = await snapshot();
-        } catch {}
+            snap = await takeSnapshot();
+        } catch (error) {
+            if (error.code === 'shutting_down') throw error;
+        }
         if (commitProfile(snap)) return profile;
         const gpuReason = snap?.gpu?.reason ? `${String(snap.gpu.reason).replace(/\.$/, '')}. ` : '';
         const admission = { status: 'incompatible', reason: `${gpuReason}${PROFILE_UNDECIDED}`, estimate: { isEstimate: true }, warnings: [] };
@@ -486,7 +511,7 @@ export function createController({
     async function overview({ preview = null } = {}) {
         // One snapshot decides the profile and is admitted against, so the
         // parameters shown are normalized for the rules that admit them.
-        const snap = await snapshot();
+        const snap = await takeSnapshot();
         commitProfile(snap);
         const runnerList = [];
         for (const definition of Object.values(runners)) {
@@ -584,7 +609,7 @@ export function createController({
         const lines = log.since(Number(sinceSeq) || 0);
         let gpu = null;
         try {
-            const snap = await snapshot();
+            const snap = await takeSnapshot();
             gpu = snap.gpu;
         } catch {}
         const definition = deployment && Object.hasOwn(runners, deployment.runnerId) ? runners[deployment.runnerId] : null;
@@ -867,12 +892,14 @@ export function createController({
         save();
     }
 
-    // Admission again, from a fresh snapshot, under the profile the Run was admitted with.
-    async function recheckAdmission(deployment, model, { remainingDownloadBytes = 0 } = {}) {
+    // Admission again, from a fresh snapshot, under the profile the Run was
+    // admitted with. The job's `signal` stops the snapshot's queries at once.
+    async function recheckAdmission(deployment, model, { remainingDownloadBytes = 0, signal = null } = {}) {
         const definition = getRunner(deployment.runnerId);
         const source = deployment.artifact;
+        const snap = await takeSnapshot(signal);
         const result = admitHere({
-            definition, model, source, params: deployment.params, snap: await snapshot(), remainingDownloadBytes, selected: deployment.profile,
+            definition, model, source, params: deployment.params, snap, remainingDownloadBytes, selected: deployment.profile,
         });
         deployment.admission = result;
         if (result.status !== 'ok') {
@@ -916,7 +943,7 @@ export function createController({
                 Object.assign(deployment, fields);
                 save();
             },
-            recheckAdmission: () => recheckAdmission(deployment, model),
+            recheckAdmission: () => recheckAdmission(deployment, model, { signal }),
             throwIfAborted: () => throwIfAborted(signal),
         });
     }
@@ -949,7 +976,7 @@ export function createController({
                 } catch {}
             }
             // An early refusal before the runner is prepared; the check that counts is the last one, below.
-            await recheckAdmission(deployment, model);
+            await recheckAdmission(deployment, model, { signal });
             throwIfAborted(signal);
         }
         setPhase('starting');
@@ -982,7 +1009,7 @@ export function createController({
         const remainingDownloadBytes = store.fetchedBy === 'controller'
             ? 0 : (await acquisitionOf(deployment.artifact, null, signal)).bytesNeeded;
         throwIfAborted(signal);
-        await recheckAdmission(deployment, model, { remainingDownloadBytes });
+        await recheckAdmission(deployment, model, { remainingDownloadBytes, signal });
         throwIfAborted(signal);
         const details = await definition.start(startContext(deployment, model, signal, weights, runnerDir));
         throwIfAborted(signal);
@@ -1149,7 +1176,7 @@ export function createController({
             // A walk with nothing left to read (an empty or missing root) returns normally after an abort.
             if (planAbort.signal.aborted) throw stopped();
             const admission = admitHere({
-                definition, model, source, params: normalized, snap: await snapshot(), remainingDownloadBytes: acquisition.bytesNeeded,
+                definition, model, source, params: normalized, snap: await takeSnapshot(), remainingDownloadBytes: acquisition.bytesNeeded,
             });
             if (admission.status !== 'ok') {
                 throw new LocalLlmError(`admission_${admission.status.replace('-', '_')}`, admission.reason, { admission });
@@ -1489,13 +1516,24 @@ export function createController({
     async function drain() {
         draining = true;
         planning?.abort();
+        // The active job, then every hardware query (the job's, a command's or
+        // the overview's), stop at once: a snapshot's nvidia-smi queries can
+        // take 10 s each. A killed query is waited for during the command wait
+        // below (HARDWARE_QUERY_REAP_MS), so the drain's worst case is unchanged.
+        const active = job;
+        if (active && !active.abort.signal.aborted) {
+            active.cancelReason = 'drain';
+            active.abort.abort();
+        }
+        hardwareStop.abort();
         // Let a command that is already running finish first (a Run refuses to
         // start a job once draining is set); bounded so it cannot block the drain.
         const waited = new AbortController();
         await Promise.race([queue.close(), sleep(DRAIN_QUEUE_WAIT_MS, waited.signal)]);
         waited.abort();
+        if (active) await active.promise;
         if (job) {
-            job.cancelReason = 'drain';
+            job.cancelReason ??= 'drain';
             job.abort.abort();
             await job.promise;
         }
@@ -1508,6 +1546,10 @@ export function createController({
             const stopping = runner;
             runner = null;
             await stopping.stop({ graceMs: runnerGraceMs() });
+        }
+        // A stopped query that has not exited (a hung driver) is left to the host, never forgotten.
+        for (const pid of unreapedQueries()) {
+            log.append('controller', `nvidia-smi (pid ${pid}) was killed but has not exited; the drain goes on without it`);
         }
         if (state.deployment) {
             if (TRANSFER_PHASES.has(state.deployment.phase)) {

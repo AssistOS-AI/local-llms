@@ -12,15 +12,63 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 
+import { HARDWARE_QUERY_REAP_MS } from '../drainBudget.mjs';
+
 // The Box GPU wiring binds the host nvidia-smi here (the override is a test seam).
 export const NVIDIA_SMI = process.env.LOCAL_LLM_NVIDIA_SMI || '/usr/local/nvidia/bin/nvidia-smi';
 const MIB = 1024 * 1024;
+const QUERY_TIMEOUT_MS = 10_000;
 
-function run(execFileImpl, command, args, timeoutMs = 10_000) {
+// Stopped queries that had not exited when their wait ended, by pid, until they exit.
+const unreaped = new Set();
+
+/** The pids of stopped hardware queries that have not exited yet (a drain logs them). */
+export function unreapedQueries() {
+    return [...unreaped];
+}
+
+function stoppedError() {
+    return Object.assign(new Error('The hardware query was stopped.'), { name: 'AbortError', code: 'ABORT_ERR' });
+}
+
+// One query. A stop (`signal`) kills it at once with SIGKILL (a read-only
+// query has nothing to save) and answers once it has exited, or after
+// HARDWARE_QUERY_REAP_MS; one still running then is recorded until it exits.
+// execFile's own `signal` answers before the child has exited, so it is not used.
+function run(execFileImpl, command, args, { timeoutMs = QUERY_TIMEOUT_MS, signal } = {}) {
     return new Promise((resolve) => {
-        execFileImpl(command, args, { timeout: timeoutMs, encoding: 'utf8' }, (error, stdout, stderr) => {
-            resolve({ ok: !error, stdout: String(stdout || ''), stderr: String(stderr || ''), error });
-        });
+        if (signal?.aborted) {
+            resolve({ ok: false, aborted: true, stdout: '', stderr: '', error: stoppedError() });
+            return;
+        }
+        let settled = false;
+        let reapTimer = null;
+        let child = null;
+        const finish = (result) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(reapTimer);
+            signal?.removeEventListener('abort', onAbort);
+            resolve(signal?.aborted ? { ok: false, aborted: true, stdout: '', stderr: '', error: stoppedError() } : result);
+        };
+        function onAbort() {
+            try {
+                child?.kill('SIGKILL');
+            } catch {}
+            reapTimer = setTimeout(() => {
+                if (child?.pid && child.exitCode === null && child.signalCode === null) {
+                    unreaped.add(child.pid);
+                    child.once('exit', () => unreaped.delete(child.pid));
+                }
+                finish(null);
+            }, HARDWARE_QUERY_REAP_MS);
+            reapTimer.unref?.();
+        }
+        signal?.addEventListener('abort', onAbort, { once: true });
+        // The callback runs once the child has exited and its output is closed.
+        child = execFileImpl(command, args, { timeout: timeoutMs, killSignal: 'SIGKILL', encoding: 'utf8' }, (error, stdout, stderr) => {
+            finish({ ok: !error, stdout: String(stdout || ''), stderr: String(stderr || ''), error });
+        }) || null;
     });
 }
 
@@ -42,8 +90,9 @@ const UNIFIED_ADDRESSING = Object.freeze(['ATS', 'HMM']);
 // so an older driver that does not know a field here loses only these values.
 export const DEVICE_QUERY_FIELDS = 'pci.device_id,compute_cap,addressing_mode,utilization.gpu,power.draw,temperature.gpu';
 
-async function readDevice(execFileImpl, nvidiaSmi) {
-    const query = await run(execFileImpl, nvidiaSmi, [`--query-gpu=${DEVICE_QUERY_FIELDS}`, '--format=csv,noheader,nounits']);
+async function readDevice(execFileImpl, nvidiaSmi, signal) {
+    const query = await run(execFileImpl, nvidiaSmi, [`--query-gpu=${DEVICE_QUERY_FIELDS}`, '--format=csv,noheader,nounits'], { signal });
+    if (query.aborted) throw query.error;
     if (!query.ok) return null;
     const [row] = csvRows(query.stdout);
     if (!row || row.length < 6) return null;
@@ -79,11 +128,17 @@ function csvRows(text) {
         .map((line) => line.split(',').map((cell) => cell.trim()));
 }
 
-export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI, env = process.env } = {}) {
+/**
+ * The GPU as nvidia-smi reports it: up to three queries in turn. A stop
+ * (`signal`) ends the query in progress at once and throws an AbortError,
+ * never a GPU that looks unavailable.
+ */
+export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI, env = process.env, signal } = {}) {
     const query = await run(execFileImpl, nvidiaSmi, [
         '--query-gpu=name,memory.total,memory.used,memory.free,driver_version',
         '--format=csv,noheader,nounits',
-    ]);
+    ], { signal });
+    if (query.aborted) throw query.error;
     if (!query.ok) {
         // Ploinky starts this agent without the GPU device when the Box has no
         // GPU for it, and says why (containerSecurity.gpu, Ploinky D14).
@@ -104,7 +159,7 @@ export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI,
     const [name, total, used, free, driver] = first;
     const memory = { totalBytes: mib(total), usedBytes: mib(used), freeBytes: mib(free) };
     const memoryNumeric = Object.values(memory).every(Number.isFinite);
-    const facts = await readDevice(execFileImpl, nvidiaSmi);
+    const facts = await readDevice(execFileImpl, nvidiaSmi, signal);
     const memoryModel = memoryModelOf({ memoryNumeric, device: facts?.device });
     if (memoryModel === 'unknown') {
         // Admission sizes every runner from the memory figures, so a GPU that
@@ -123,7 +178,8 @@ export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI,
     const apps = await run(execFileImpl, nvidiaSmi, [
         '--query-compute-apps=pid,process_name,used_memory',
         '--format=csv,noheader,nounits',
-    ]);
+    ], { signal });
+    if (apps.aborted) throw apps.error;
     const processes = apps.ok
         ? csvRows(apps.stdout).map(([pid, processName, usedMemory]) => ({
             pid: Number(pid), name: processName, usedBytes: Number(usedMemory) * MIB,
@@ -294,9 +350,9 @@ export async function readDisk(dataDir, { statfs = (target) => fs.promises.statf
     return { freeBytes: Number(stats.bavail) * Number(stats.bsize), totalBytes: Number(stats.blocks) * Number(stats.bsize) };
 }
 
-export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs } = {}) {
+export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signal } = {}) {
     const [gpu, disk] = await Promise.all([
-        readGpu({ execFileImpl }),
+        readGpu({ execFileImpl, signal }),
         readDisk(dataDir, { statfs }).catch((error) => ({ freeBytes: null, totalBytes: null, error: error.message })),
     ]);
     return {
