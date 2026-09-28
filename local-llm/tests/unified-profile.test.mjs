@@ -346,3 +346,38 @@ test('the page cache is dropped with dd iflag=nocache count=0, in a minimal envi
     assert.deepEqual(calls, [{ command: 'dd', args: ['if=/data/models/x.gguf', 'iflag=nocache', 'count=0', 'status=none'], env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' } }]);
     assert.equal(dropPageCache('/x', { spawnSyncImpl: () => ({ status: 1 }) }), false);
 });
+
+test('state this controller cannot read is reported, never misread: old registry entries, saved parameters, a recorded deployment', async (t) => {
+    const v2 = { id: 'user-v2', sources: { gguf: { ...GGUF, file: 'v2.gguf' } }, recommended: { 'llama.cpp': { ctxSize: 8192 } } };
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-old-state-'));
+    t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+    const stateStore = createStateStore({ dataDir });
+    stateStore.save({
+        version: 1, registry: [v2], requests: {},
+        params: { 'gpt-oss-20b|llama.cpp': { ctxSize: 8192, noMmap: true } },
+        deployment: { id: 'd-1', modelId: 'gpt-oss-20b', runnerId: 'llama.cpp', phase: 'idle', params: { ctxSize: 8192, mlock: true } },
+    });
+    const dedicated = { gpu: { available: true, memoryModel: 'dedicated', name: 'RTX', totalBytes: 6144 * MIB, usedBytes: 0, freeBytes: 6000 * MIB, processes: [] },
+        memory: { totalBytes: 31 * GIB, availableBytes: 24 * GIB }, disk: { freeBytes: 300 * GIB } };
+    const controller = createController({
+        dataDir, env: { PATH: '/usr/bin' }, seedCatalog: SEED, stateStore, snapshot: async () => structuredClone(dedicated),
+        inspect: async () => ({ state: 'absent', bytes: 0 }),
+        detectRunner: (runner) => ({ installed: runner.supported, version: runner.pinnedVersion, reason: null }),
+    });
+    const overview = await controller.overview();
+    assert.deepEqual(overview.unsupportedModels, [{ id: 'user-v2', reason: "recommended has an unknown profile 'llama.cpp'" }]);
+    assert.ok(!overview.models.some((model) => model.id === 'user-v2'));
+    // Saved parameters that no longer validate give way to the defaults, once, with a log line.
+    const llama = overview.models.find((model) => model.id === 'gpt-oss-20b').runners['llama.cpp'];
+    assert.equal(llama.params.ctxSize, 16384);
+    const status = await controller.status();
+    assert.equal(status.context, null, 'a recorded deployment with old parameters has no context, and no error');
+    const lines = status.logs.map((entry) => entry.line);
+    assert.ok(lines.some((line) => /model entry user-v2 is not supported by this catalog and is not offered/.test(line)));
+    assert.equal(lines.filter((line) => /saved parameters for gpt-oss-20b on llama\.cpp no longer apply \(Invalid parameter noMmap: unknown parameter\)/.test(line)).length, 1);
+    // The unsupported entry can be removed.
+    assert.deepEqual(await controller.removeModel({ modelId: 'user-v2' }), {
+        removed: 'user-v2', note: 'The entry was not supported by this catalog; downloaded weights, if any, stay on disk.',
+    });
+    assert.deepEqual((await controller.overview()).unsupportedModels, []);
+});

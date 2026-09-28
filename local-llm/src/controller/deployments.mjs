@@ -20,7 +20,7 @@ import path from 'node:path';
 import { LocalLlmError } from '../errors.mjs';
 import { RUNNERS, defaultPorts, runnerSummary } from '../runners/index.mjs';
 import { admit } from './admission.mjs';
-import { WEIGHT_FORMATS, loadSeedCatalog, mergeCatalog, validateModel } from './catalog.mjs';
+import { WEIGHT_FORMATS, loadSeedCatalog, mergeCatalog, unsupportedRegistryEntries, validateModel } from './catalog.mjs';
 import { createCommandQueue } from './commandQueue.mjs';
 import {
     DownloadError,
@@ -180,6 +180,15 @@ export function createController({
     let profile = fixedProfile;
     // The unified guard's view of the current runner (in memory only).
     let guardStats = null;
+    // Saved parameter sets already reported as no longer valid.
+    const resetParams = new Set();
+
+    // State this controller cannot read is reported, never misread (catalog v3
+    // migrates nothing): a registry entry of an earlier schema stays in the
+    // state file, is left out of the catalog, and is named here and in the overview.
+    for (const entry of unsupportedRegistryEntries(state.registry)) {
+        log.append('controller', `model entry ${entry.id ?? '(no id)'} is not supported by this catalog and is not offered: ${entry.reason}`);
+    }
 
     const stores = createWeightStores({
         dataDir,
@@ -353,7 +362,13 @@ export function createController({
             // parameter set) give way to the defaults instead of blocking the model.
             try {
                 return runnerDef.normalizeParams(saved, options);
-            } catch {}
+            } catch (error) {
+                const key = paramsKey(model.id, runnerId);
+                if (!resetParams.has(key)) {
+                    resetParams.add(key);
+                    log.append('controller', `saved parameters for ${model.id} on ${runnerId} no longer apply (${error.message}); using the defaults`);
+                }
+            }
         }
         return runnerDef.normalizeParams({}, options);
     }
@@ -473,6 +488,8 @@ export function createController({
             profile,
             hardware: snap,
             runners: runnerList,
+            // Registry entries this catalog cannot read; remove them and add the model again.
+            unsupportedModels: unsupportedRegistryEntries(state.registry),
             models,
             deployment: publicDeployment(),
             gatewayModel: 'soul_gateway/local-llms/local-llm/default',
@@ -497,12 +514,22 @@ export function createController({
             nextSeq: log.seq,
             gpu,
             runnerReport: parseReport(log.all().filter((line) => line.seq > runnerLogStart)),
-            context: deployment && definition?.describeContext
-                ? definition.describeContext(deployment.params, { profile: profile || 'dedicated' }) : null,
+            context: describeDeploymentContext(definition, deployment),
             lastCompletion,
             profile: profile || null,
             memoryGuard: guardStats ? { ...guardStats } : null,
         };
+    }
+
+    // A deployment recorded by an earlier controller may hold parameters this
+    // one does not accept: its context is then unknown, not an error.
+    function describeDeploymentContext(definition, deployment) {
+        if (!deployment || !definition?.describeContext) return null;
+        try {
+            return definition.describeContext(deployment.params, { profile: profile || 'dedicated' });
+        } catch {
+            return null;
+        }
     }
 
     function recordCompletion(stats = {}) {
@@ -1166,7 +1193,16 @@ export function createController({
                 throw new LocalLlmError(seedCatalog.some((model) => model.id === modelId) ? 'read_only' : 'unknown_model',
                     'Only user models can be removed; seed entries are read-only.');
             }
-            const model = validateModel(state.registry[index]);
+            let model;
+            try {
+                model = validateModel(state.registry[index]);
+            } catch {
+                // An entry this catalog cannot read (an earlier schema) is not
+                // offered and cannot be in use; remove it as it is.
+                state.registry.splice(index, 1);
+                save();
+                return { removed: modelId, note: 'The entry was not supported by this catalog; downloaded weights, if any, stay on disk.' };
+            }
             for (const [format, source] of Object.entries(model.sources)) {
                 if (inUse(artifactKey(source))) {
                     throw new LocalLlmError('in_use', 'This model is in use; stop it or cancel its download first.');

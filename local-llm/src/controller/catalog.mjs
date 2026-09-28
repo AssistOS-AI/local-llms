@@ -342,6 +342,22 @@ export function loadSeedCatalog(file = path.join(import.meta.dirname, '..', '..'
  * Seed entries first, then valid user entries whose ids do not shadow a seed
  * or an earlier user entry (two can exist after a downgrade hid one).
  */
+/**
+ * Registry entries the catalog cannot read (an earlier schema, or invalid),
+ * with the reason, so the overview can say so instead of hiding them silently.
+ */
+export function unsupportedRegistryEntries(registry = []) {
+    const unsupported = [];
+    for (const entry of registry) {
+        try {
+            validateModel(entry, { seed: false });
+        } catch (error) {
+            unsupported.push({ id: typeof entry?.id === 'string' ? entry.id.slice(0, 64) : null, reason: error.message });
+        }
+    }
+    return unsupported;
+}
+
 export function mergeCatalog(seed, registry = []) {
     const seenIds = new Set(seed.map((model) => model.id));
     const user = [];
