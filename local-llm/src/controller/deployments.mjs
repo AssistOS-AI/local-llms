@@ -191,6 +191,12 @@ export function createController({
     let job = null;
     // The acquisition planning of the Run being admitted, which Stop, Cancel and drain can abort (F5).
     let planning = null;
+    // Stop and Cancel invalidate every Run submitted before them, queued or
+    // running (DS001): a Run keeps the generation it was submitted in, and each
+    // Stop or Cancel starts a new one. `submittedRuns` counts the current
+    // generation's Runs that have not finished their command yet.
+    let stopGeneration = 0;
+    let submittedRuns = 0;
     // Every hardware snapshot stops when the agent drains (DS001).
     const hardwareStop = new AbortController();
     // One runner install at a time, beside the deployment job.
@@ -1132,7 +1138,13 @@ export function createController({
     // ------------------------------------------------------------- commands
 
     function run({ requestId, modelId, runnerId, params, replace = false } = {}) {
-        return queue.run(async () => {
+        // The Run's generation is taken when it is submitted, before it waits in the queue:
+        // a Stop or Cancel invoked after this, even while the Run still waits, invalidates it.
+        const generation = stopGeneration;
+        submittedRuns += 1;
+        const stale = () => generation !== stopGeneration;
+        const cancelled = () => new LocalLlmError('cancelled', 'The Run was stopped before it started.');
+        const command = queue.run(async () => {
             if (typeof requestId !== 'string' || !REQUEST_ID_RE.test(requestId)) {
                 throw new LocalLlmError('invalid_request', 'requestId must be 8-128 letters, digits, dash or underscore.');
             }
@@ -1140,30 +1152,46 @@ export function createController({
             if (state.requests[requestId]) {
                 return { duplicate: true, deployment: publicDeployment() };
             }
+            // Submitted before a Stop or Cancel: nothing is read or recorded.
+            if (stale()) throw cancelled();
             // Until its job starts, a Run can be stopped: Stop, Cancel and drain abort `planning` before
             // they queue behind it (F5), which ends a hardware snapshot or the /shared walk in progress.
             // The Run then fails with `cancelled` and records nothing, so the same request can be sent again.
             const planAbort = new AbortController();
             planning = planAbort;
             try {
-                return await admitRun(planAbort.signal, { requestId, modelId, runnerId, params, replace });
+                return await admitRun(planAbort.signal, { requestId, modelId, runnerId, params, replace, stale });
             } catch (error) {
                 // A drain met in a snapshot keeps its answer; any other stop of a pending Run is `cancelled`.
                 if (error.code === 'shutting_down') throw error;
-                if (planAbort.signal.aborted) throw new LocalLlmError('cancelled', 'The Run was stopped before it started.');
+                if (planAbort.signal.aborted || stale()) throw cancelled();
                 throw error;
             } finally {
                 if (planning === planAbort) planning = null;
             }
         });
+        const settled = () => {
+            if (!stale()) submittedRuns -= 1;
+        };
+        command.then(settled, settled);
+        return command;
+    }
+
+    // A Stop or Cancel invalidates every Run submitted so far; it reports whether any was still pending or queued.
+    function invalidateSubmittedRuns() {
+        const pending = submittedRuns > 0;
+        stopGeneration += 1;
+        submittedRuns = 0;
+        planning?.abort();
+        return pending;
     }
 
     // A Run from its profile to its job's start. `signal` is the pending Run's:
     // after every step that waits it is checked, and the last check comes
     // right before anything is recorded; from there to the job's start nothing waits.
-    async function admitRun(signal, { requestId, modelId, runnerId, params, replace }) {
+    async function admitRun(signal, { requestId, modelId, runnerId, params, replace, stale }) {
         const checkpoint = () => {
-            if (signal.aborted) throw new LocalLlmError('aborted', 'Stopped before the Run started.');
+            if (signal.aborted || stale()) throw new LocalLlmError('aborted', 'Stopped before the Run started.');
         };
         await requireProfile(signal);
         checkpoint();
@@ -1247,7 +1275,7 @@ export function createController({
     }
 
     function stop() {
-        planning?.abort();
+        invalidateSubmittedRuns();
         return queue.run(async () => {
             await stopEverything('stop');
             // Stop also clears a failed or paused deployment (a paused partial stays on disk).
@@ -1259,14 +1287,13 @@ export function createController({
     }
 
     function cancelDownload() {
-        // A Cancel that stops a Run's acquisition planning has done its work: that Run fails with `cancelled`
-        // and no download starts, so there is nothing left to cancel once this command's turn comes.
-        const stoppedPlanning = planning !== null && !planning.signal.aborted;
-        planning?.abort();
+        // A Cancel that stops a Run submitted before it (queued, or planning) has done its work: that Run
+        // fails with `cancelled` and no download starts, so there may be nothing left to cancel at this command's turn.
+        const stoppedRuns = invalidateSubmittedRuns();
         return queue.run(async () => {
             const deployment = state.deployment;
             if (!deployment || !job || !(TRANSFER_PHASES.has(deployment.phase) || deployment.phase === 'starting')) {
-                if (stoppedPlanning) return { deployment: publicDeployment() };
+                if (stoppedRuns) return { deployment: publicDeployment() };
                 throw new LocalLlmError('not_downloading', 'No download is in progress.');
             }
             await stopEverything('cancel');
