@@ -31,7 +31,14 @@ import {
     verifyArtifact,
     verifySnapshotFile,
 } from './downloader.mjs';
-import { readMemory as readHostMemory, readMemoryPressure, readSnapshot } from './hardware.mjs';
+import {
+    readMemory as readHostMemory,
+    readMemoryPressure,
+    readSnapshot,
+    stoppedQueriesSettled,
+    unreapedQueries as hardwareUnreaped,
+    untilStopped,
+} from './hardware.mjs';
 import { UNIFIED, profileOf } from './profiles.mjs';
 import { createRunnerInstaller, runTool } from './runnerInstaller.mjs';
 import { loadRunnerLock } from './runnerLock.mjs';
@@ -46,6 +53,7 @@ const TRANSFER_PHASES = new Set(['downloading', 'copying', 'verifying']);
 const REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
 const PROBE_TIMEOUT_MS = 10_000;
 const IMAGE_CONTRACT = '/opt/local-llm/source.contract';
+const PROFILE_UNDECIDED = 'No usable GPU has been seen yet, so the hardware profile is not decided; run again once the GPU can be read.';
 
 /**
  * What the image says about itself (`/opt/local-llm/source.contract`, one
@@ -119,7 +127,12 @@ export function createController({
     hfBaseUrl = env.LOCAL_LLM_HF_BASE_URL || 'https://huggingface.co',
     stateStore = createStateStore({ dataDir }),
     runners = RUNNERS,
-    snapshot = () => readSnapshot({ dataDir }),
+    // A snapshot's queries stop when `signal` aborts (a Stop, a Cancel or the drain).
+    snapshot = ({ signal } = {}) => readSnapshot({ dataDir, signal }),
+    // Stopped hardware queries that have not exited yet (logged by the drain),
+    // and a promise that settles once every stopped query has exited or been recorded.
+    unreapedQueries = hardwareUnreaped,
+    settleStoppedQueries = stoppedQueriesSettled,
     download = downloadArtifact,
     inspect = inspectArtifact,
     remove = removeArtifact,
@@ -178,6 +191,8 @@ export function createController({
     let job = null;
     // The acquisition planning of the Run being admitted, which Stop, Cancel and drain can abort (F5).
     let planning = null;
+    // Every hardware snapshot stops when the agent drains (DS001).
+    const hardwareStop = new AbortController();
     // One runner install at a time, beside the deployment job.
     let installJob = null;
     // Installable through the controller: in the image's runner lock and with
@@ -253,19 +268,63 @@ export function createController({
 
     // The profile is fixed by the first snapshot that shows a usable GPU; a
     // transient failure (a cold nvidia-smi, a GPU not attached yet) leaves it
-    // undecided, and without a usable GPU every Run is refused anyway.
+    // undecided. Parameters are normalized, admitted, launched and guarded
+    // under the one committed profile: a Run is refused while it is undecided.
+    function commitProfile(snap) {
+        if (!profile && snap?.gpu?.available) {
+            profile = profileOf(snap);
+            log.append('controller', `hardware profile: ${profile}${snap.gpu.name ? ` (${snap.gpu.name})` : ''}`);
+        }
+        return profile;
+    }
+
+    // A fresh snapshot that stops with the drain and, for a pending Run or a
+    // job, with it. A stop answers at once, whatever stage the snapshot is in
+    // (a query, the free-disk read) and even if the snapshot ignores its signal;
+    // its late answer or failure is handled and never used, so after a stop
+    // nothing is admitted or launched from it.
+    async function takeSnapshot(signal = null) {
+        const stop = signal ? AbortSignal.any([hardwareStop.signal, signal]) : hardwareStop.signal;
+        let snap;
+        try {
+            snap = await untilStopped(Promise.resolve().then(() => snapshot({ signal: stop })), stop);
+        } catch (error) {
+            if (!stop.aborted) throw error;
+        }
+        // The drain first: a Run that meets it in a snapshot refuses as shutting down (DS001).
+        if (hardwareStop.signal.aborted) {
+            throw new LocalLlmError('shutting_down', 'The agent is restarting; run the model again once it is back.');
+        }
+        if (signal?.aborted) throw new LocalLlmError('aborted', 'Stopped while starting.');
+        return snap;
+    }
+
     async function currentProfile() {
         if (!profile) {
             let snap = null;
             try {
-                snap = await snapshot();
+                snap = await takeSnapshot();
             } catch {}
-            if (!profile && snap?.gpu?.available) {
-                profile = profileOf(snap);
-                log.append('controller', `hardware profile: ${profile}${snap.gpu.name ? ` (${snap.gpu.name})` : ''}`);
-            }
+            commitProfile(snap);
         }
         return profile;
+    }
+
+    // A Run's profile, or its refusal. Nothing is recorded when it is refused,
+    // so the same request can be sent again once the GPU can be read.
+    async function requireProfile(signal = null) {
+        if (profile) return profile;
+        let snap = null;
+        try {
+            snap = await takeSnapshot(signal);
+        } catch (error) {
+            // A stop is not a missing GPU.
+            if (error.code === 'shutting_down' || error.code === 'aborted') throw error;
+        }
+        if (commitProfile(snap)) return profile;
+        const gpuReason = snap?.gpu?.reason ? `${String(snap.gpu.reason).replace(/\.$/, '')}. ` : '';
+        const admission = { status: 'incompatible', reason: `${gpuReason}${PROFILE_UNDECIDED}`, estimate: { isEstimate: true }, warnings: [] };
+        throw new LocalLlmError('admission_incompatible', admission.reason, { admission });
     }
 
     // The models offered in this profile (catalog v3 `profiles`).
@@ -298,13 +357,18 @@ export function createController({
     }
 
     // Admission with the checks the controller owns (availability, the image's
-    // GPUs, the profile) before the runner's own policy.
-    function admitHere({ definition, model, source, params, snap, remainingDownloadBytes = 0 }) {
+    // GPUs, the profile) before the runner's own policy. `params` were
+    // normalized for `selected`; without a committed profile nothing is
+    // admitted, so a later snapshot cannot pick rules those params do not match.
+    function admitHere({ definition, model, source, params, snap, remainingDownloadBytes = 0, selected = profile }) {
+        const refuse = (reason) => ({ status: 'incompatible', reason, estimate: { isEstimate: true }, warnings: [] });
         const availability = availabilityOf(definition);
-        if (!availability.available) return { status: 'incompatible', reason: availability.reason, estimate: { isEstimate: true }, warnings: [] };
+        if (!availability.available) return refuse(availability.reason);
         const mismatch = gpuMismatch(snap);
-        if (mismatch) return { status: 'incompatible', reason: mismatch, estimate: { isEstimate: true }, warnings: [] };
-        return admit({ runner: definition, model, source, params, snapshot: snap, remainingDownloadBytes, profile: profile || undefined });
+        if (mismatch) return refuse(mismatch);
+        // A snapshot without a GPU is refused by admit() with the GPU's own reason.
+        if (!selected && snap?.gpu?.available) return refuse(PROFILE_UNDECIDED);
+        return admit({ runner: definition, model, source, params, snapshot: snap, remainingDownloadBytes, profile: selected || undefined });
     }
 
     function findModel(modelId) {
@@ -431,7 +495,6 @@ export function createController({
     // Admission for the Run form's current values, before anything is saved
     // or downloaded. Parameter errors come back as data for the form.
     async function previewRun({ modelId, runnerId, params } = {}, snap) {
-        await currentProfile();
         const model = findModel(modelId);
         const definition = getRunner(runnerId);
         const source = sourceFor(model, definition);
@@ -452,15 +515,17 @@ export function createController({
             modelId,
             runnerId,
             params: normalized,
-            context: definition.describeContext ? definition.describeContext(normalized, { model, profile }) : null,
+            context: definition.describeContext ? definition.describeContext(normalized, { model, profile: profile || 'dedicated' }) : null,
             acquisition,
             admission: admitHere({ definition, model, source, params: normalized, snap, remainingDownloadBytes: acquisition.bytesNeeded }),
         };
     }
 
     async function overview({ preview = null } = {}) {
-        await currentProfile();
-        const snap = await snapshot();
+        // One snapshot decides the profile and is admitted against, so the
+        // parameters shown are normalized for the rules that admit them.
+        const snap = await takeSnapshot();
+        commitProfile(snap);
         const runnerList = [];
         for (const definition of Object.values(runners)) {
             const gate = gateOf(definition);
@@ -514,7 +579,7 @@ export function createController({
                     size: source?.size ?? null,
                     download: disk,
                     params,
-                    context: params && definition.describeContext ? definition.describeContext(params, { model, profile }) : null,
+                    context: params && definition.describeContext ? definition.describeContext(params, { model, profile: profile || 'dedicated' }) : null,
                     admission: !availabilityOf(definition).available
                         ? admitHere({ definition, model, source, params: {}, snap })
                         : !gate.enabled ? disabledAdmission(gate) : paramError
@@ -557,7 +622,7 @@ export function createController({
         const lines = log.since(Number(sinceSeq) || 0);
         let gpu = null;
         try {
-            const snap = await snapshot();
+            const snap = await takeSnapshot();
             gpu = snap.gpu;
         } catch {}
         const definition = deployment && Object.hasOwn(runners, deployment.runnerId) ? runners[deployment.runnerId] : null;
@@ -581,7 +646,7 @@ export function createController({
     function describeDeploymentContext(definition, deployment) {
         if (!deployment || !definition?.describeContext) return null;
         try {
-            return definition.describeContext(deployment.params, { profile: profile || 'dedicated' });
+            return definition.describeContext(deployment.params, { profile: deployment.profile || profile || 'dedicated' });
         } catch {
             return null;
         }
@@ -738,7 +803,7 @@ export function createController({
     // It is a backstop, not protection: one load allocates faster than any
     // sampling can follow, so admission must cover the whole known allocation.
     function startMemoryGuard(deployment, current) {
-        const unified = profile === 'unified';
+        const unified = deployment.profile === 'unified';
         const floor = unified ? UNIFIED.floorBytes : deployment.admission?.estimate?.ramFloorBytes;
         if (!Number.isFinite(floor) || floor <= 0) return () => {};
         let timer = null;
@@ -840,10 +905,15 @@ export function createController({
         save();
     }
 
-    async function recheckAdmission(deployment, model) {
+    // Admission again, from a fresh snapshot, under the profile the Run was
+    // admitted with. The job's `signal` stops the snapshot's queries at once.
+    async function recheckAdmission(deployment, model, { remainingDownloadBytes = 0, signal = null } = {}) {
         const definition = getRunner(deployment.runnerId);
         const source = deployment.artifact;
-        const result = admitHere({ definition, model, source, params: deployment.params, snap: await snapshot() });
+        const snap = await takeSnapshot(signal);
+        const result = admitHere({
+            definition, model, source, params: deployment.params, snap, remainingDownloadBytes, selected: deployment.profile,
+        });
         deployment.admission = result;
         if (result.status !== 'ok') {
             throw new LocalLlmError(`admission_${result.status.replace('-', '_')}`, result.reason, { admission: result });
@@ -861,7 +931,8 @@ export function createController({
         return Object.freeze({
             runner: definition,
             model,
-            profile: profile || 'dedicated',
+            // The profile the Run was normalized and admitted under.
+            profile: deployment.profile,
             params: deployment.params,
             artifact: deployment.artifact,
             weights,
@@ -885,7 +956,7 @@ export function createController({
                 Object.assign(deployment, fields);
                 save();
             },
-            recheckAdmission: () => recheckAdmission(deployment, model),
+            recheckAdmission: () => recheckAdmission(deployment, model, { signal }),
             throwIfAborted: () => throwIfAborted(signal),
         });
     }
@@ -917,7 +988,8 @@ export function createController({
                     }
                 } catch {}
             }
-            await recheckAdmission(deployment, model);
+            // An early refusal before the runner is prepared; the check that counts is the last one, below.
+            await recheckAdmission(deployment, model, { signal });
             throwIfAborted(signal);
         }
         setPhase('starting');
@@ -943,6 +1015,15 @@ export function createController({
             for (const note of checked.notes || []) log.append('controller', note);
             throwIfAborted(signal);
         }
+        // The last admission, after the runner is prepared and the weights
+        // checked for the last time (which can take minutes of hashing):
+        // memory or disk taken meanwhile refuses the start instead of
+        // launching into it. Weights a runner fetches itself still need disk.
+        const remainingDownloadBytes = store.fetchedBy === 'controller'
+            ? 0 : (await acquisitionOf(deployment.artifact, null, signal)).bytesNeeded;
+        throwIfAborted(signal);
+        await recheckAdmission(deployment, model, { remainingDownloadBytes, signal });
+        throwIfAborted(signal);
         const details = await definition.start(startContext(deployment, model, signal, weights, runnerDir));
         throwIfAborted(signal);
         if (!runner || runner.deploymentId !== deployment.id) {
@@ -1052,7 +1133,6 @@ export function createController({
 
     function run({ requestId, modelId, runnerId, params, replace = false } = {}) {
         return queue.run(async () => {
-            await currentProfile();
             if (typeof requestId !== 'string' || !REQUEST_ID_RE.test(requestId)) {
                 throw new LocalLlmError('invalid_request', 'requestId must be 8-128 letters, digits, dash or underscore.');
             }
@@ -1060,88 +1140,110 @@ export function createController({
             if (state.requests[requestId]) {
                 return { duplicate: true, deployment: publicDeployment() };
             }
-            const model = findModel(modelId);
-            const definition = getRunner(runnerId);
-            const source = sourceFor(model, definition);
-            if (!definition.supported) {
-                const result = admit({ runner: definition, model, source, params: {}, snapshot: {} });
-                throw new LocalLlmError('runner_unsupported', result.reason);
-            }
-            // Before anything is downloaded: a runner this image does not have (DS005).
-            const availability = availabilityOf(definition);
-            if (!availability.available) throw new LocalLlmError('runner_unavailable', availability.reason, { runner: runnerId });
-            assertEnabled(definition);
-            if (!source) throw new LocalLlmError('no_source', `${model.displayName} has no ${definition.displayName} source.`);
-            if (installJob?.runnerId === runnerId) {
-                throw new LocalLlmError('busy', `${definition.displayName} is being installed; run it once the install finishes.`);
-            }
-            if (installable(runnerId) && !(await installer.describe(runnerId)).installed) {
-                throw new LocalLlmError('runner_not_installed', `${definition.displayName} is not installed; install it first.`);
-            }
-            const store = storeFor(source);
-            if (!store.isPinned(source)) {
-                throw new LocalLlmError('unpinned', 'The model source is not pinned to a commit; update the model entry.');
-            }
-            const normalized = effectiveParams(model, runnerId, params);
-            const current = state.deployment;
-            if (current && (ACTIVE_PHASES.has(current.phase) || job)) {
-                if (!replace) {
-                    throw new LocalLlmError('busy', `${current.modelId} on ${current.runnerId} is ${current.phase}; `
-                        + 'stop it first or run with replace.');
-                }
-                await stopEverything('replace');
-            }
-            const disk = await weightsState(source);
-            // Planning walks /shared: Stop, Cancel and drain abort it before they queue behind this Run (F5).
+            // Until its job starts, a Run can be stopped: Stop, Cancel and drain abort `planning` before
+            // they queue behind it (F5), which ends a hardware snapshot or the /shared walk in progress.
+            // The Run then fails with `cancelled` and records nothing, so the same request can be sent again.
             const planAbort = new AbortController();
             planning = planAbort;
-            const stopped = () => new LocalLlmError('cancelled', 'The Run was stopped while it was looking for the model files.');
-            let acquisition;
             try {
-                acquisition = await acquisitionOf(source, null, planAbort.signal);
+                return await admitRun(planAbort.signal, { requestId, modelId, runnerId, params, replace });
             } catch (error) {
-                if (planAbort.signal.aborted) throw stopped();
+                // A drain met in a snapshot keeps its answer; any other stop of a pending Run is `cancelled`.
+                if (error.code === 'shutting_down') throw error;
+                if (planAbort.signal.aborted) throw new LocalLlmError('cancelled', 'The Run was stopped before it started.');
                 throw error;
             } finally {
                 if (planning === planAbort) planning = null;
             }
-            // A walk with nothing left to read (an empty or missing root) returns normally after an abort.
-            if (planAbort.signal.aborted) throw stopped();
-            const admission = admitHere({
-                definition, model, source, params: normalized, snap: await snapshot(), remainingDownloadBytes: acquisition.bytesNeeded,
-            });
-            if (admission.status !== 'ok') {
-                throw new LocalLlmError(`admission_${admission.status.replace('-', '_')}`, admission.reason, { admission });
-            }
-            state.params[paramsKey(model.id, runnerId)] = normalized;
-            const at = now().toISOString();
-            // The job holds this immutable copy: later registry edits cannot redirect it.
-            if (draining) {
-                throw new LocalLlmError('shutting_down', 'The agent is restarting; run the model again once it is back.');
-            }
-            state.deployment = {
-                id: crypto.randomUUID(),
-                requestId,
-                modelId: model.id,
-                runnerId,
-                params: normalized,
-                artifact: structuredClone(source),
-                phase: store.fetchedBy === 'runner' ? 'starting' : 'downloading',
-                admission,
-                acquisition: acquisition.files.map(({ file, method, bytesNeeded }) => ({ file, method, bytesNeeded })),
-                download: { bytes: disk?.bytes || 0, total: disk?.total ?? null, rate: 0, etaSeconds: null, transferred: 0 },
-                error: null,
-                pausedReason: null,
-                runner: null,
-                logSeqStart: log.seq,
-                createdAt: at,
-                updatedAt: at,
-            };
-            state.requests[requestId] = { deploymentId: state.deployment.id, at };
-            save();
-            startJob(state.deployment, model);
-            return { accepted: true, deployment: publicDeployment() };
         });
+    }
+
+    // A Run from its profile to its job's start. `signal` is the pending Run's:
+    // after every step that waits it is checked, and the last check comes
+    // right before anything is recorded; from there to the job's start nothing waits.
+    async function admitRun(signal, { requestId, modelId, runnerId, params, replace }) {
+        const checkpoint = () => {
+            if (signal.aborted) throw new LocalLlmError('aborted', 'Stopped before the Run started.');
+        };
+        await requireProfile(signal);
+        checkpoint();
+        const model = findModel(modelId);
+        const definition = getRunner(runnerId);
+        const source = sourceFor(model, definition);
+        if (!definition.supported) {
+            const result = admit({ runner: definition, model, source, params: {}, snapshot: {} });
+            throw new LocalLlmError('runner_unsupported', result.reason);
+        }
+        // Before anything is downloaded: a runner this image does not have (DS005).
+        const availability = availabilityOf(definition);
+        if (!availability.available) throw new LocalLlmError('runner_unavailable', availability.reason, { runner: runnerId });
+        assertEnabled(definition);
+        if (!source) throw new LocalLlmError('no_source', `${model.displayName} has no ${definition.displayName} source.`);
+        if (installJob?.runnerId === runnerId) {
+            throw new LocalLlmError('busy', `${definition.displayName} is being installed; run it once the install finishes.`);
+        }
+        if (installable(runnerId) && !(await installer.describe(runnerId)).installed) {
+            throw new LocalLlmError('runner_not_installed', `${definition.displayName} is not installed; install it first.`);
+        }
+        checkpoint();
+        const store = storeFor(source);
+        if (!store.isPinned(source)) {
+            throw new LocalLlmError('unpinned', 'The model source is not pinned to a commit; update the model entry.');
+        }
+        const normalized = effectiveParams(model, runnerId, params);
+        const current = state.deployment;
+        if (current && (ACTIVE_PHASES.has(current.phase) || job)) {
+            if (!replace) {
+                throw new LocalLlmError('busy', `${current.modelId} on ${current.runnerId} is ${current.phase}; `
+                    + 'stop it first or run with replace.');
+            }
+            await stopEverything('replace');
+            checkpoint();
+        }
+        const disk = await weightsState(source);
+        checkpoint();
+        // Planning walks /shared; a walk with nothing left to read (an empty or missing root) returns normally after an abort.
+        const acquisition = await acquisitionOf(source, null, signal);
+        checkpoint();
+        const snap = await takeSnapshot(signal);
+        // The last check: from here to the job's start nothing waits, so a Stop or Cancel cannot fall in between.
+        checkpoint();
+        const admission = admitHere({
+            definition, model, source, params: normalized, snap, remainingDownloadBytes: acquisition.bytesNeeded,
+        });
+        if (admission.status !== 'ok') {
+            throw new LocalLlmError(`admission_${admission.status.replace('-', '_')}`, admission.reason, { admission });
+        }
+        state.params[paramsKey(model.id, runnerId)] = normalized;
+        const at = now().toISOString();
+        // The job holds this immutable copy: later registry edits cannot redirect it.
+        if (draining) {
+            throw new LocalLlmError('shutting_down', 'The agent is restarting; run the model again once it is back.');
+        }
+        state.deployment = {
+            id: crypto.randomUUID(),
+            requestId,
+            modelId: model.id,
+            runnerId,
+            // Launch, the last admission and the memory guard use this profile.
+            profile,
+            params: normalized,
+            artifact: structuredClone(source),
+            phase: store.fetchedBy === 'runner' ? 'starting' : 'downloading',
+            admission,
+            acquisition: acquisition.files.map(({ file, method, bytesNeeded }) => ({ file, method, bytesNeeded })),
+            download: { bytes: disk?.bytes || 0, total: disk?.total ?? null, rate: 0, etaSeconds: null, transferred: 0 },
+            error: null,
+            pausedReason: null,
+            runner: null,
+            logSeqStart: log.seq,
+            createdAt: at,
+            updatedAt: at,
+        };
+        state.requests[requestId] = { deploymentId: state.deployment.id, at };
+        save();
+        startJob(state.deployment, model);
+        return { accepted: true, deployment: publicDeployment() };
     }
 
     function stop() {
@@ -1446,13 +1548,24 @@ export function createController({
     async function drain() {
         draining = true;
         planning?.abort();
+        // The active job, then every hardware query (the job's, a command's or
+        // the overview's), stop at once: a snapshot's nvidia-smi queries can
+        // take 10 s each. A killed query is waited for during the command wait
+        // below (HARDWARE_QUERY_REAP_MS), so the drain's worst case is unchanged.
+        const active = job;
+        if (active && !active.abort.signal.aborted) {
+            active.cancelReason = 'drain';
+            active.abort.abort();
+        }
+        hardwareStop.abort();
         // Let a command that is already running finish first (a Run refuses to
         // start a job once draining is set); bounded so it cannot block the drain.
         const waited = new AbortController();
         await Promise.race([queue.close(), sleep(DRAIN_QUEUE_WAIT_MS, waited.signal)]);
         waited.abort();
+        if (active) await active.promise;
         if (job) {
-            job.cancelReason = 'drain';
+            job.cancelReason ??= 'drain';
             job.abort.abort();
             await job.promise;
         }
@@ -1465,6 +1578,12 @@ export function createController({
             const stopping = runner;
             runner = null;
             await stopping.stop({ graceMs: runnerGraceMs() });
+        }
+        // A stopped query that has not exited (a hung driver) is left to the host, never forgotten.
+        // Every query was stopped when the drain began, so this waits at most HARDWARE_QUERY_REAP_MS from then.
+        await settleStoppedQueries();
+        for (const pid of unreapedQueries()) {
+            log.append('controller', `nvidia-smi (pid ${pid}) was killed but has not exited; the drain goes on without it`);
         }
         if (state.deployment) {
             if (TRANSFER_PHASES.has(state.deployment.phase)) {

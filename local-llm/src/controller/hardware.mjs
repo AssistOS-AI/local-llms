@@ -12,15 +12,104 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 
+import { HARDWARE_QUERY_REAP_MS } from '../drainBudget.mjs';
+
 // The Box GPU wiring binds the host nvidia-smi here (the override is a test seam).
 export const NVIDIA_SMI = process.env.LOCAL_LLM_NVIDIA_SMI || '/usr/local/nvidia/bin/nvidia-smi';
 const MIB = 1024 * 1024;
+const QUERY_TIMEOUT_MS = 10_000;
 
-function run(execFileImpl, command, args, timeoutMs = 10_000) {
-    return new Promise((resolve) => {
-        execFileImpl(command, args, { timeout: timeoutMs, encoding: 'utf8' }, (error, stdout, stderr) => {
-            resolve({ ok: !error, stdout: String(stdout || ''), stderr: String(stderr || ''), error });
+// Stopped queries that had not exited when their wait ended, by pid, until they exit.
+const unreaped = new Set();
+// Stopped queries still inside their wait (at most HARDWARE_QUERY_REAP_MS each).
+const stopping = new Set();
+
+/** The pids of stopped hardware queries that have not exited yet (a drain logs them). */
+export function unreapedQueries() {
+    return [...unreaped];
+}
+
+/**
+ * Settles once every query stopped so far has exited or been recorded as not
+ * exiting: at most HARDWARE_QUERY_REAP_MS after its stop. A snapshot answers
+ * a stop without waiting for this, so the drain waits here before it reports.
+ */
+export function stoppedQueriesSettled() {
+    return Promise.all([...stopping]).then(() => undefined);
+}
+
+function stoppedError() {
+    return Object.assign(new Error('The hardware query was stopped.'), { name: 'AbortError', code: 'ABORT_ERR' });
+}
+
+/**
+ * `promise`'s outcome, or an AbortError as soon as `signal` aborts. The work
+ * behind `promise` may not be cancellable (statfs): after a stop its late
+ * result or failure is handled and dropped, never used and never unhandled.
+ */
+export function untilStopped(promise, signal) {
+    if (!signal) return promise;
+    return new Promise((resolve, reject) => {
+        const onAbort = () => reject(stoppedError());
+        if (signal.aborted) {
+            promise.catch(() => {});
+            onAbort();
+            return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+        promise.then((value) => {
+            signal.removeEventListener('abort', onAbort);
+            resolve(value);
+        }, (error) => {
+            signal.removeEventListener('abort', onAbort);
+            reject(error);
         });
+    });
+}
+
+// One query. A stop (`signal`) kills it at once with SIGKILL (a read-only
+// query has nothing to save) and answers once it has exited, or after
+// HARDWARE_QUERY_REAP_MS; one still running then is recorded until it exits.
+// execFile's own `signal` answers before the child has exited, so it is not used.
+function run(execFileImpl, command, args, { timeoutMs = QUERY_TIMEOUT_MS, signal } = {}) {
+    return new Promise((resolve) => {
+        if (signal?.aborted) {
+            resolve({ ok: false, aborted: true, stdout: '', stderr: '', error: stoppedError() });
+            return;
+        }
+        let settled = false;
+        let reapTimer = null;
+        let child = null;
+        let reaped = null;
+        const finish = (result) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(reapTimer);
+            signal?.removeEventListener('abort', onAbort);
+            reaped?.();
+            resolve(signal?.aborted ? { ok: false, aborted: true, stdout: '', stderr: '', error: stoppedError() } : result);
+        };
+        function onAbort() {
+            const wait = new Promise((done) => { reaped = done; });
+            stopping.add(wait);
+            void wait.then(() => stopping.delete(wait));
+            try {
+                child?.kill('SIGKILL');
+            } catch {}
+            reapTimer = setTimeout(() => {
+                if (child?.pid && child.exitCode === null && child.signalCode === null) {
+                    unreaped.add(child.pid);
+                    child.once('exit', () => unreaped.delete(child.pid));
+                }
+                finish(null);
+            }, HARDWARE_QUERY_REAP_MS);
+            reapTimer.unref?.();
+        }
+        signal?.addEventListener('abort', onAbort, { once: true });
+        // The callback runs once the child has exited and its output is closed.
+        child = execFileImpl(command, args, { timeout: timeoutMs, killSignal: 'SIGKILL', encoding: 'utf8' }, (error, stdout, stderr) => {
+            finish({ ok: !error, stdout: String(stdout || ''), stderr: String(stderr || ''), error });
+        }) || null;
     });
 }
 
@@ -42,8 +131,9 @@ const UNIFIED_ADDRESSING = Object.freeze(['ATS', 'HMM']);
 // so an older driver that does not know a field here loses only these values.
 export const DEVICE_QUERY_FIELDS = 'pci.device_id,compute_cap,addressing_mode,utilization.gpu,power.draw,temperature.gpu';
 
-async function readDevice(execFileImpl, nvidiaSmi) {
-    const query = await run(execFileImpl, nvidiaSmi, [`--query-gpu=${DEVICE_QUERY_FIELDS}`, '--format=csv,noheader,nounits']);
+async function readDevice(execFileImpl, nvidiaSmi, signal) {
+    const query = await run(execFileImpl, nvidiaSmi, [`--query-gpu=${DEVICE_QUERY_FIELDS}`, '--format=csv,noheader,nounits'], { signal });
+    if (query.aborted) throw query.error;
     if (!query.ok) return null;
     const [row] = csvRows(query.stdout);
     if (!row || row.length < 6) return null;
@@ -79,11 +169,17 @@ function csvRows(text) {
         .map((line) => line.split(',').map((cell) => cell.trim()));
 }
 
-export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI, env = process.env } = {}) {
+/**
+ * The GPU as nvidia-smi reports it: up to three queries in turn. A stop
+ * (`signal`) ends the query in progress at once and throws an AbortError,
+ * never a GPU that looks unavailable.
+ */
+export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI, env = process.env, signal } = {}) {
     const query = await run(execFileImpl, nvidiaSmi, [
         '--query-gpu=name,memory.total,memory.used,memory.free,driver_version',
         '--format=csv,noheader,nounits',
-    ]);
+    ], { signal });
+    if (query.aborted) throw query.error;
     if (!query.ok) {
         // Ploinky starts this agent without the GPU device when the Box has no
         // GPU for it, and says why (containerSecurity.gpu, Ploinky D14).
@@ -104,7 +200,7 @@ export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI,
     const [name, total, used, free, driver] = first;
     const memory = { totalBytes: mib(total), usedBytes: mib(used), freeBytes: mib(free) };
     const memoryNumeric = Object.values(memory).every(Number.isFinite);
-    const facts = await readDevice(execFileImpl, nvidiaSmi);
+    const facts = await readDevice(execFileImpl, nvidiaSmi, signal);
     const memoryModel = memoryModelOf({ memoryNumeric, device: facts?.device });
     if (memoryModel === 'unknown') {
         // Admission sizes every runner from the memory figures, so a GPU that
@@ -123,7 +219,8 @@ export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI,
     const apps = await run(execFileImpl, nvidiaSmi, [
         '--query-compute-apps=pid,process_name,used_memory',
         '--format=csv,noheader,nounits',
-    ]);
+    ], { signal });
+    if (apps.aborted) throw apps.error;
     const processes = apps.ok
         ? csvRows(apps.stdout).map(([pid, processName, usedMemory]) => ({
             pid: Number(pid), name: processName, usedBytes: Number(usedMemory) * MIB,
@@ -294,11 +391,17 @@ export async function readDisk(dataDir, { statfs = (target) => fs.promises.statf
     return { freeBytes: Number(stats.bavail) * Number(stats.bsize), totalBytes: Number(stats.blocks) * Number(stats.bsize) };
 }
 
-export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs } = {}) {
-    const [gpu, disk] = await Promise.all([
-        readGpu({ execFileImpl }),
-        readDisk(dataDir, { statfs }).catch((error) => ({ freeBytes: null, totalBytes: null, error: error.message })),
-    ]);
+/**
+ * The resources a model competes for. A stop (`signal`) throws an AbortError:
+ * the GPU queries are killed (readGpu), and the free-disk read, which cannot
+ * be cancelled, is not waited for; its late answer is dropped.
+ */
+export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signal } = {}) {
+    if (signal?.aborted) throw stoppedError();
+    // Read alongside the GPU queries; it never rejects.
+    const pendingDisk = readDisk(dataDir, { statfs }).catch((error) => ({ freeBytes: null, totalBytes: null, error: error.message }));
+    const gpu = await readGpu({ execFileImpl, signal });
+    const disk = await untilStopped(pendingDisk, signal);
     return {
         at: new Date().toISOString(),
         gpu,

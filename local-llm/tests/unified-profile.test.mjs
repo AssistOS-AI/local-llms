@@ -25,14 +25,14 @@ const GGUF = Object.freeze({
     type: 'huggingface', repo: 'ggml-org/gpt-oss-120b-GGUF', file: 'gpt-oss-120b-MXFP4.gguf', revision: 'main',
     commit: 'a'.repeat(40), size: 63387346208, sha256: 'b'.repeat(64),
 });
-// A model measured on unified memory: 128k x 4 slots, and 256k x 1 with MTP.
+// A model measured on unified memory with dio: 128k x 4 slots, and 256k x 1 with MTP.
 const MEASURED = validateModel({
     id: 'big-moe', displayName: 'Big MoE', architecture: 'moe', contextLength: 131072, sources: { gguf: GGUF },
     profiles: ['unified'],
     recommended: { unified: { 'llama.cpp': { ctxSize: 32768 } } },
     unified: { envelope: [
-        { runner: 'llama.cpp', maxCtx: 131072, maxParallel: 4, mtp: false, bufferBytes: 66 * GIB, transientBytes: 13 * GIB },
-        { runner: 'llama.cpp', maxCtx: 262144, maxParallel: 1, mtp: true, bufferBytes: 70 * GIB, transientBytes: 2 * GIB },
+        { runner: 'llama.cpp', loadMode: 'dio', maxCtx: 131072, maxParallel: 4, mtp: false, bufferBytes: 66 * GIB, transientBytes: 13 * GIB },
+        { runner: 'llama.cpp', loadMode: 'dio', maxCtx: 262144, maxParallel: 1, mtp: true, bufferBytes: 70 * GIB, transientBytes: 2 * GIB },
     ] },
 }, { seed: true });
 const GB10 = Object.freeze({
@@ -115,7 +115,7 @@ test('unified admission: the measured envelope, the whole known allocation, the 
     assert.equal(inside.status, 'ok', inside.reason);
     const need = 66 * GIB + 13 * GIB + UNIFIED.runtimeBytes + UNIFIED.cacheRamMiB * MIB;
     assert.equal(inside.estimate.unifiedBytes, need);
-    assert.deepEqual(inside.estimate.envelope, { maxCtx: 131072, maxParallel: 4, mtp: false });
+    assert.deepEqual(inside.estimate.envelope, { loadMode: 'dio', maxCtx: 131072, maxParallel: 4, mtp: false });
     assert.equal(inside.estimate.cacheRamBytes, 8192 * MIB);
     // The corner's figures cover every configuration inside the rectangle.
     assert.equal(decide({ ctxSize: 8192, parallel: 1 }).estimate.unifiedBytes, need);
@@ -123,14 +123,14 @@ test('unified admission: the measured envelope, the whole known allocation, the 
     assert.equal(decide({ ctxSize: 65536, parallel: 1, mtp: true }).estimate.envelope.maxCtx, 262144);
     const outside = decide({ ctxSize: 131072, parallel: 8 });
     assert.equal(outside.status, 'incompatible');
-    assert.match(outside.reason, /measured on unified memory with llama\.cpp only up to context 131072 x 4 slots; context 262144 x 1 slot \(MTP allowed\); context 131072 x 8 slots is outside it/);
+    assert.match(outside.reason, /measured on unified memory with llama\.cpp only up to context 131072 x 4 slots with load mode dio; context 262144 x 1 slot \(MTP allowed\) with load mode dio; context 131072 x 8 slots with load mode dio is outside it/);
     // Less available than need plus the floor: busy now, naming the numbers.
     const busy = decide({ ctxSize: 131072, parallel: 4 }, unifiedSnapshot({ available: need + UNIFIED.floorBytes - GIB }));
     assert.equal(busy.status, 'insufficient-now');
     assert.match(busy.reason, /Other processes on this machine hold the rest/);
     // More than the pool less the host reserve: never.
     const huge = validateModel({ ...structuredClone(MEASURED), unified: { envelope: [
-        { runner: 'llama.cpp', maxCtx: 131072, maxParallel: 1, mtp: false, bufferBytes: 100 * GIB, transientBytes: 0 },
+        { runner: 'llama.cpp', loadMode: 'dio', maxCtx: 131072, maxParallel: 1, mtp: false, bufferBytes: 100 * GIB, transientBytes: 0 },
     ] } }, { seed: true });
     const never = admit({ runner, model: huge, source: GGUF, params: runner.normalizeParams({}, { model: huge, profile: 'unified' }),
         snapshot: unifiedSnapshot(), profile: 'unified' });
@@ -146,7 +146,7 @@ test('unified admission: the measured envelope, the whole known allocation, the 
     const blind = decide({}, { ...unifiedSnapshot(), memory: { totalBytes: null, availableBytes: null } });
     assert.equal(blind.status, 'incompatible');
     assert.match(blind.reason, /cannot be read/);
-    assert.equal(envelopeFor(MEASURED, 'ollama', { ctxSize: 1, parallel: 1 }), null);
+    assert.equal(envelopeFor(MEASURED, 'ollama', { ctxSize: 1, parallel: 1, loadMode: 'dio' }), null);
 });
 
 test('a profile that no longer matches the GPU refuses every Run until the agent restarts', () => {

@@ -1,6 +1,7 @@
 // Model catalog: the read-only seed shipped with the agent plus the user
-// registry persisted under /data. Every entry is validated here; the same
-// rules apply to seed entries (at load) and to user entries (at add/update).
+// registry persisted under /data. Every entry is validated here; seed entries
+// (at load) and user entries (at add/update) share the shape, but only the
+// seed may certify measurements (below).
 //
 // Schema v3 keys a model's sources by weight format (every runner declares
 // the format it reads, so runners that read the same GGUF file share one
@@ -8,12 +9,18 @@
 // by runner (DS005), says in which profiles the model is offered, and carries
 // the unified profile's measured envelope. Entries of earlier schemas are not
 // migrated: a registry entry that is not valid v3 is hidden.
+//
+// Trust boundary (DS005): `unified.envelope` admits runs on unified memory and
+// `validated` says what was measured, so both come only from the seed: the
+// shipped catalog or the operator's LOCAL_LLM_CATALOG_FILE, whose provenance
+// is controlled outside the model-management API. A user entry (model add or
+// update) that carries either is refused, and a stored one is not offered.
 
 import fs from 'node:fs';
 import path from 'node:path';
 
 import { LocalLlmError } from '../errors.mjs';
-import { PROFILES } from './profiles.mjs';
+import { PROFILES, UNIFIED_LOAD_MODES } from './profiles.mjs';
 
 export const CATALOG_SCHEMA = 'local-llm.catalog/v3';
 
@@ -285,6 +292,7 @@ function validateMemory(value) {
  * Validate one catalog or registry entry. Seed entries must pin every
  * Hugging Face source (commit, size, sha256); user entries are pinned when
  * they are added, by resolving the revision through the Hugging Face API.
+ * Only a seed entry may carry a unified envelope or `validated` labels.
  */
 export function validateModel(value, { seed = false } = {}) {
     if (!plainObject(value)) throw invalid('A model must be an object', 'model');
@@ -319,6 +327,7 @@ export function validateModel(value, { seed = false } = {}) {
         return entry;
     });
     const validated = validatePerProfile(value.validated, 'validated', (entry, field) => optionalText(entry, field, 600));
+    if (!seed) assertNoCertification(value, validated);
     return Object.freeze({
         id: value.id,
         displayName: optionalText(value.displayName, 'displayName', 120) || value.id,
@@ -339,6 +348,18 @@ export function validateModel(value, { seed = false } = {}) {
     });
 }
 
+// A user entry cannot certify itself. Stored user entries carry the empty
+// forms (`unified: null`, `validated: {}`) that validation writes back, so
+// only an actual envelope or label is refused.
+function assertNoCertification(value, validated) {
+    const trusted = 'only the trusted seed catalog (the shipped catalog or the operator\'s LOCAL_LLM_CATALOG_FILE) may provide it';
+    if (value.unified !== undefined && value.unified !== null) {
+        throw invalid(`unified is a measured envelope; ${trusted}`, 'unified');
+    }
+    const labelled = Object.entries(validated).find(([, byRunner]) => Object.keys(byRunner).length > 0);
+    if (labelled) throw invalid(`validated records measurements; ${trusted}`, `validated.${labelled[0]}`);
+}
+
 // `recommended` and `validated`: { <profile>: { <runner id>: value } }.
 function validatePerProfile(value, field, validateEntry) {
     if (value === undefined || value === null) return Object.freeze({});
@@ -353,12 +374,13 @@ function validatePerProfile(value, field, validateEntry) {
     return Object.freeze(structuredClone(out));
 }
 
-const ENVELOPE_KEYS = Object.freeze(['runner', 'maxCtx', 'maxParallel', 'mtp', 'bufferBytes', 'transientBytes', 'measured']);
+const ENVELOPE_KEYS = Object.freeze(['runner', 'loadMode', 'maxCtx', 'maxParallel', 'mtp', 'bufferBytes', 'transientBytes', 'measured']);
 
 /**
  * The unified profile's measured envelope (DS005): rectangles of context and
- * parallel slots, each measured at its corner, with the deterministic buffer
- * bytes llama.cpp logged there and the measured transient margin beyond them.
+ * parallel slots, each measured at its corner in one load mode, with the
+ * deterministic buffer bytes llama.cpp logged there and the measured transient
+ * margin beyond them. A mode measured separately is a rectangle of its own.
  * A model without an envelope is refused on unified memory.
  */
 function validateUnified(value) {
@@ -374,8 +396,12 @@ function validateUnified(value) {
         onlyKeys(entry, ENVELOPE_KEYS, at);
         if (typeof entry.runner !== 'string' || !entry.runner) throw invalid(`${at}.runner must name a runner`, `${at}.runner`);
         if (typeof entry.mtp !== 'boolean') throw invalid(`${at}.mtp must be true or false`, `${at}.mtp`);
+        if (!UNIFIED_LOAD_MODES.includes(entry.loadMode)) {
+            throw invalid(`${at}.loadMode must be the load mode it was measured with (${UNIFIED_LOAD_MODES.join(' or ')})`, `${at}.loadMode`);
+        }
         return Object.freeze({
             runner: entry.runner,
+            loadMode: entry.loadMode,
             maxCtx: requiredInteger(entry.maxCtx, `${at}.maxCtx`, 512, 2 ** 22),
             maxParallel: requiredInteger(entry.maxParallel, `${at}.maxParallel`, 1, 16),
             mtp: entry.mtp,

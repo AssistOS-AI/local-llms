@@ -49,17 +49,19 @@ The image says what it contains: `/opt/local-llm/source.contract` (key=value lin
 
 ### Choosing the profile
 
-The controller decides the profile from the first hardware snapshot that shows a usable GPU (a transient failure, such as a cold nvidia-smi, leaves it undecided, and without a usable GPU every Run is refused anyway), logs it (`hardware profile: unified (NVIDIA GB10)`) and keeps it for the container's lifetime; the overview and `local_llm_status` report it. A later snapshot whose memory model disagrees is not acted on: admission refuses every Run as `incompatible`, saying the agent must be restarted. The catalog's `profiles` (DS002) decide which models are offered; `recommended` and `validated` are read for the current profile.
+The controller decides the profile from the first hardware snapshot that shows a usable GPU, logs it (`hardware profile: unified (NVIDIA GB10)`) and keeps it for the container's lifetime; the overview and `local_llm_status` report it. A transient failure, such as a cold nvidia-smi or a snapshot that cannot be read, leaves it undecided. The overview decides it from the one snapshot it reads and normalizes, describes and admits every row against that same snapshot; while it is undecided the rows use the dedicated defaults for display and none is admitted (a snapshot without a usable GPU is `incompatible` with the GPU's reason).
+
+A Run is normalized, admitted, launched and guarded under one committed profile, which the deployment records (`deployment.profile`). While no snapshot has shown a usable GPU, `local_llm_run` reads a fresh one; if that one does not show a usable GPU either, the Run is refused with `admission_incompatible` ("… the hardware profile is not decided; run again once the GPU can be read", after the GPU's own reason when it gave one) before any model lookup, and nothing is recorded, saved, downloaded or started, so the same request can be sent again. A profile that became usable in between is committed by that Run and used for all of it: parameters are never normalized for the dedicated defaults and then admitted, launched or guarded by the unified rules, or the reverse. A later snapshot whose memory model disagrees is not acted on: admission refuses every Run as `incompatible`, saying the agent must be restarted. The catalog's `profiles` (DS002) decide which models are offered; `recommended` and `validated` are read for the current profile.
 
 ### llama.cpp on unified memory
 
-Only llama.cpp has a unified-memory policy in this release; every other runner is `incompatible` there. Its unified parameters (`paramSchemaFor('unified')`) are `ctxSize` (up to 262,144 and the model's training context per slot), `parallel`, `loadMode` (`dio`, the default, or `none`), `mtp` (`--spec-type draft-mtp --spec-draft-n-max 3`, only for models measured with it), `threads` and `chatTemplateKwargs` (`reasoning_effort`, `preserve_thinking`). Every flag that changes memory is fixed at the values the envelopes were measured with: `-ngl 999 -fa on`, f16 K and V, `-b 2048 -ub 2048`, `--kv-unified` above one slot, and `--cache-ram 8192`. Threads default to the high-performance cores (10 on DGX Spark, capped by a cgroup CPU quota), else physical cores minus 2.
+Only llama.cpp has a unified-memory policy in this release; every other runner is `incompatible` there. Its unified parameters (`paramSchemaFor('unified')`) are `ctxSize` (up to 262,144 and the model's training context per slot), `parallel`, `loadMode` (`dio`, the default, or `none`; each is admitted only where the envelope was measured with it, below), `mtp` (`--spec-type draft-mtp --spec-draft-n-max 3`, only for models measured with it), `threads` and `chatTemplateKwargs` (`reasoning_effort`, `preserve_thinking`). Every flag that changes memory is fixed at the values the envelopes were measured with: `-ngl 999 -fa on`, f16 K and V, `-b 2048 -ub 2048`, `--kv-unified` above one slot, and `--cache-ram 8192`. Threads default to the high-performance cores (10 on DGX Spark, capped by a cgroup CPU quota), else physical cores minus 2.
 
 `dio` loaded a cold gpt-oss-20b in 4.1–4.5 s with +0.8 GiB of page cache; `none` took 8.7 s and added 12.1 GiB (gpt-oss-120b: 16 s vs 51 s, +0.9 vs +37 GiB). After a controller download is verified, the file is dropped from the page cache (`dd iflag=nocache count=0`, which calls `posix_fadvise(DONTNEED)`; best effort).
 
 ### Unified admission
 
-A run is admitted only inside the model's measured envelope (`unified.envelope`, DS002): rectangles of total context and parallel slots, each measured at its corner, with MTP allowed or not. Anything outside is `incompatible`, naming the measured rectangles. The need is the corner's figures, which cover every configuration inside the rectangle:
+A run is admitted only inside the model's measured envelope (`unified.envelope`, DS002): rectangles of total context and parallel slots, each measured at its corner in one load mode (`loadMode`, `dio` or `none`, required), with MTP allowed or not. The requested load mode must be the rectangle's: a mode measured separately is a rectangle of its own with its own figures, and no rectangle stands in for a mode it was not measured with. Anything outside is `incompatible`, naming the measured rectangles with their load modes. The need is the corner's figures, which cover every configuration inside the rectangle:
 
 need = `bufferBytes` (the model, KV, recurrent-state, output and compute buffers llama.cpp logs at `-lv 4`, on the GPU and the host) + `transientBytes` (measured memory beyond those buffers during load, prefill and parallel requests with the prompt cache at 1 MiB, times 1.25) + 1.5 GiB (the CUDA context and the runner process) + the prompt cache's bound (`--cache-ram`, 8192 MiB).
 
@@ -67,11 +69,15 @@ llama-server's prompt cache lives in host memory, is bounded by `--cache-ram` (i
 
 | Verdict | When |
 | --- | --- |
-| `incompatible` | outside the envelope; need above MemTotal less a 16 GiB host reserve; `/proc/meminfo` unreadable |
+| `incompatible` | outside the envelope (context, slots, MTP or load mode); need above MemTotal less a 16 GiB host reserve; `/proc/meminfo` unreadable |
 | `insufficient-now` | need above MemAvailable less the 8 GiB floor (other processes on the machine hold the rest), or the download does not fit the disk |
 | `ok` | otherwise |
 
 No CPU offload (`nCpuMoe`) in this profile. The reserve, floor and runtime constant are provisional until the stop-latency and headroom measurements are in.
+
+Admission runs again from a fresh snapshot after the download, and last immediately before the runner starts, after the runner is prepared and the weights are checked for the last time (DS003). Memory taken meanwhile refuses the start as `insufficient-now`: the guard's floor is far below a run's need, so it would not stop a runner that starts into too little memory.
+
+**Who may certify an envelope.** `unified.envelope` and the `validated` labels come only from the trusted seed: the catalog shipped with the agent, or the operator's `LOCAL_LLM_CATALOG_FILE`, whose provenance is controlled outside the model-management API. `local_llm_model_add` and `_update` refuse an entry that carries an envelope or any `validated` label (`invalid_model`); the empty forms a stored entry carries (`unified: null`, `validated: {}`) are accepted. A registry entry stored with either before this rule is kept in the state file as it is, reported in the overview's `unsupportedModels` and the log, never offered, and can be removed. A user entry that names a seed's own file does not inherit the seed's envelope: an envelope belongs to the catalog entry, not to the artifact. No envelope is shipped in this release, and this rule approves none.
 
 ### Memory guard
 
@@ -89,6 +95,14 @@ On unified memory the Local LLMs dashboard shows one "Unified memory available" 
 
 Response: The addressing mode alone is not a unified-memory signal (GH200 reports ATS with dedicated HBM), and `[N/A]` memory is how this driver reports GB10 today. A future driver that reports numbers for GB10 would otherwise turn it into a dedicated GPU with a pool the size of system memory. The device id keeps GB10 unified whatever the driver reports; the addressing mode covers other GPUs that share memory, which the image then accepts or refuses by compute capability (DS000).
 
+### Question #2: Why can a user entry not carry a unified envelope?
+
+Response: On unified memory the envelope is the control that admission relies on, and `validated` tells an admin what was measured. An envelope sent through `local_llm_model_add` or `_update` carries no evidence of where its numbers came from, so any configuration, even a seed's own file at a larger context, would become admissible on a shared host with only the guard behind it. Certification therefore stays with inputs whose provenance the operator controls outside the model-management API: the shipped catalog and `LOCAL_LLM_CATALOG_FILE`. Admin-measured envelopes would need a recorded owner decision and a provenance field; this release has neither. Stored entries are reported rather than migrated or deleted, because they are the admin's data.
+
+### Question #3: Why is the load mode part of an envelope rectangle?
+
+Response: The two unified load modes use memory very differently: `none` added 12.1 GiB of page cache for gpt-oss-20b and 37 GiB for gpt-oss-120b, against 0.8–0.9 GiB for `dio`. A rectangle measured with one mode says nothing about the other, so each names the mode it was measured with and admits only that mode. There is no default and no inference from an older envelope; a mode that has not been measured is refused.
+
 ## Conclusion
 
-The agent picks the dedicated or unified profile from what nvidia-smi reports, refuses a GPU whose memory model it cannot tell, runs only what the image contains, and admits unified runs only inside measured envelopes sized to their whole known allocation, with a 250 ms guard as a backstop.
+The agent picks the dedicated or unified profile from what nvidia-smi reports, refuses a GPU whose memory model it cannot tell, normalizes, admits, launches and guards each Run under one committed profile, runs only what the image contains, and admits unified runs only inside trusted measured envelopes, keyed on the load mode and sized to their whole known allocation, rechecked immediately before the runner starts, with a 250 ms guard as a backstop.
