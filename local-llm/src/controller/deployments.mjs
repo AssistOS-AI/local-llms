@@ -1095,17 +1095,18 @@ export function createController({
             // Planning walks /shared: Stop, Cancel and drain abort it before they queue behind this Run (F5).
             const planAbort = new AbortController();
             planning = planAbort;
+            const stopped = () => new LocalLlmError('cancelled', 'The Run was stopped while it was looking for the model files.');
             let acquisition;
             try {
                 acquisition = await acquisitionOf(source, null, planAbort.signal);
             } catch (error) {
-                if (planAbort.signal.aborted) {
-                    throw new LocalLlmError('cancelled', 'The Run was stopped while it was looking for the model files.');
-                }
+                if (planAbort.signal.aborted) throw stopped();
                 throw error;
             } finally {
                 if (planning === planAbort) planning = null;
             }
+            // A walk with nothing left to read (an empty or missing root) returns normally after an abort.
+            if (planAbort.signal.aborted) throw stopped();
             const admission = admitHere({
                 definition, model, source, params: normalized, snap: await snapshot(), remainingDownloadBytes: acquisition.bytesNeeded,
             });
@@ -1156,10 +1157,14 @@ export function createController({
     }
 
     function cancelDownload() {
+        // A Cancel that stops a Run's acquisition planning has done its work: that Run fails with `cancelled`
+        // and no download starts, so there is nothing left to cancel once this command's turn comes.
+        const stoppedPlanning = planning !== null && !planning.signal.aborted;
         planning?.abort();
         return queue.run(async () => {
             const deployment = state.deployment;
             if (!deployment || !job || !(TRANSFER_PHASES.has(deployment.phase) || deployment.phase === 'starting')) {
+                if (stoppedPlanning) return { deployment: publicDeployment() };
                 throw new LocalLlmError('not_downloading', 'No download is in progress.');
             }
             await stopEverything('cancel');

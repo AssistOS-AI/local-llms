@@ -337,3 +337,76 @@ test('21. a Stop during acquisition planning stops the lookup after the pending 
     assert.equal(opened, 1, 'no directory opened after the Stop');
     assert.equal(h.launches.length, 0);
 });
+
+// Holds the first open of /shared/models until released, so a Stop, Cancel or drain lands during planning.
+function holdSharedOpen(t, s) {
+    const original = fs.promises.opendir;
+    const hold = { opened: 0 };
+    const gate = new Promise((resolve) => { hold.release = resolve; });
+    hold.started = new Promise((resolve) => { hold.entered = resolve; });
+    let held = false;
+    fs.promises.opendir = async (dir, options) => {
+        hold.opened += 1;
+        if (dir === s.shared && !held) {
+            held = true;
+            hold.entered();
+            await gate;
+        }
+        return original(dir, options);
+    };
+    t.after(() => { fs.promises.opendir = original; });
+    return hold;
+}
+
+const lowDisk = {
+    snapshot: async () => ({
+        gpu: { available: true, name: 'Test GPU', totalBytes: 24 * GIB, usedBytes: 0, freeBytes: 24 * GIB, processes: [] },
+        memory: { totalBytes: 64 * GIB, availableBytes: 60 * GIB },
+        disk: { freeBytes: 1024, totalBytes: 500 * GIB },
+        cpus: 8,
+    }),
+};
+
+test('21b. a Stop or drain during an EMPTY lookup still fails the Run with cancelled: no job, no admission verdict', async (t) => {
+    for (const [how, extra] of [['stop', {}], ['stop', lowDisk], ['drain', {}]]) {
+        await t.test(`${how}${extra === lowDisk ? ', disk below the model size' : ''}`, async (tt) => {
+            const s = setup(tt);
+            const hold = holdSharedOpen(tt, s);
+            const h = controllerFor(tt, s, extra);
+            const running = h.controller.run({ requestId: `request-emptystop-${how}`, ...h.run }).catch((error) => error);
+            await hold.started;
+            const settling = how === 'drain' ? h.controller.drain() : h.controller.stop();
+            hold.release();
+            const outcome = await running;
+            await settling;
+            assert.equal(outcome.code, 'cancelled', `the Run reports cancelled, not ${outcome.code ?? 'accepted'}`);
+            assert.equal(h.controller.state.deployment ?? null, null, 'no deployment was created');
+            assert.equal(s.requests.length, 0);
+            assert.equal(h.launches.length, 0);
+            assert.equal(hold.opened, 1);
+        });
+    }
+});
+
+test('21c. a Cancel during acquisition planning succeeds, empty or not; an idle Cancel is still not_downloading', async (t) => {
+    for (const [kind, subdirs, extra] of [['empty', 0, lowDisk], ['empty', 0, {}], ['nonempty', 20, {}]]) {
+        await t.test(`${kind}${extra === lowDisk ? ', disk below the model size' : ''}`, async (tt) => {
+            const s = setup(tt);
+            for (let index = 0; index < subdirs; index += 1) fs.mkdirSync(path.join(s.shared, `d${index}`));
+            const hold = holdSharedOpen(tt, s);
+            const h = controllerFor(tt, s, extra);
+            const running = h.controller.run({ requestId: `request-plancancel-${kind}-${subdirs}`, ...h.run }).catch((error) => error);
+            await hold.started;
+            const cancelling = h.controller.cancelDownload();
+            hold.release();
+            const outcome = await running;
+            const cancelled = await cancelling;
+            assert.equal(outcome.code, 'cancelled');
+            assert.equal(cancelled.deployment, null, 'the Cancel succeeded and no deployment exists');
+            assert.equal(hold.opened, 1, 'no directory opened after the Cancel');
+            assert.equal(s.requests.length, 0);
+            assert.equal(h.launches.length, 0);
+            await assert.rejects(h.controller.cancelDownload(), (error) => error.code === 'not_downloading');
+        });
+    }
+});

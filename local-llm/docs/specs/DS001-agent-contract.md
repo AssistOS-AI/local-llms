@@ -56,7 +56,7 @@ Every tool is declared in `mcp-config.json` with `command: "node"`, `args: ["/co
 | `local_llm_status` | `status`: deployment phase, progress and log lines after `sinceSeq`, the hardware profile and, on unified memory, the memory guard's lowest MemAvailable, highest pressure and sample count |
 | `local_llm_run` | `run`: `requestId`, `modelId`, `runnerId`, `params` (validated against the runner's schema for the profile), `replace`; a runner the image does not include is refused with `runner_unavailable` before anything downloads |
 | `local_llm_stop` | `stop` |
-| `local_llm_download_cancel` | `cancelDownload`: keeps the partial file |
+| `local_llm_download_cancel` | `cancelDownload`: keeps the partial file; also stops a Run that is still looking for its files (DS002), and then succeeds; `not_downloading` when nothing is transferring or being looked up |
 | `local_llm_weights_delete` | `deleteWeights` |
 | `local_llm_model_add` / `_update` / `_remove` | registry edits; seed entries are read-only |
 | `local_llm_test_prompt` | an admin smoke chat against the active runner on loopback; the one inference-routing exception (Question #3) |
