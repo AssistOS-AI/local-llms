@@ -458,7 +458,7 @@ test('an envelope measured with dio does not stand in for none, which is sized b
     const none = decide(model, { loadMode: 'none' });
     assert.equal(none.status, 'ok', none.reason);
     assert.equal(none.estimate.envelope, null);
-    assert.match(none.warnings[0], /^Outside the catalog's measured envelope \(context 131072 x 4 slots with load mode dio\): context 32768 x 1 slot with load mode none is sized by estimate/);
+    assert.match(none.warnings[0], /^Outside the catalog's envelope \(context 131072 x 4 slots with load mode dio\): context 32768 x 1 slot with load mode none is sized by estimate/);
     assert.equal(envelopeFor(model, 'llama.cpp', { ctxSize: 512, parallel: 1, mtp: false, loadMode: 'none' }), null);
     assert.equal(envelopeFor(model, 'llama.cpp', { ctxSize: 512, parallel: 1, mtp: false }), null, 'no mode is no match');
 });

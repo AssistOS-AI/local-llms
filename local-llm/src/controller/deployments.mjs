@@ -339,6 +339,12 @@ export function createController({
         return mergeCatalog(seedCatalog, state.registry).filter((model) => model.profiles.includes(current));
     }
 
+    // Whether this image could ever run on unified memory (DS005): the arm64
+    // image says `architecture=arm64` in its source.contract; the amd64 image
+    // has no architecture line and only ever serves GPUs of its own. Without a
+    // contract (tests, development) it is not known, so it counts as possible.
+    const unifiedPossible = !imageContract || imageContract.architecture === 'arm64';
+
     // Whether this image can run a runner at all (DS005): its executable is in
     // the image, or the image's runner lock lists it. Without a source.contract
     // (tests, development) every runner counts as available.
@@ -417,9 +423,12 @@ export function createController({
     // use only: an environment switch the operator sets with `ploinky var`;
     // DS001 says who else can). Runners without a switch are always enabled.
     // A switch may depend on the committed hardware profile (vLLM on unified
-    // memory, DS005); null means not decided yet.
+    // memory, DS005). While it is undecided, an image that can never run on
+    // unified memory counts as dedicated; otherwise the switch sees null.
     function gateOf(definition) {
-        const gate = typeof definition.enabled === 'function' ? definition.enabled(env, profile ?? null) : null;
+        const gate = typeof definition.enabled === 'function'
+            ? definition.enabled(env, profile ?? (unifiedPossible ? null : 'dedicated'))
+            : null;
         return gate && gate.enabled === false
             ? { enabled: false, reason: gate.reason || `${definition.displayName} is not enabled on this deployment.` }
             : { enabled: true, reason: null };
@@ -1520,8 +1529,9 @@ export function createController({
             if (!installable(runnerId)) {
                 throw new LocalLlmError('not_installable', `No installable runner '${String(runnerId)}' in this image's runner lock.`);
             }
-            // A switch may depend on the profile (vLLM on unified memory): decide it first if a snapshot can.
-            await currentProfile();
+            // A switch may depend on the profile (vLLM on unified memory): on an image that could
+            // run there, decide it first if a snapshot can.
+            if (unifiedPossible) await currentProfile();
             assertEnabled(getRunner(runnerId));
             if (draining) throw new LocalLlmError('shutting_down', 'The agent is restarting; install again once it is back.');
             const entry = installer.entryFor(runnerId);

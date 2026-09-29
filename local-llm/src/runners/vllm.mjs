@@ -120,17 +120,19 @@ function normalizeParams(params = {}, { model, profile = 'dedicated' } = {}) {
 }
 
 // The operator's switch (DS004) for unified memory. On a dedicated GPU vLLM is
-// not gated. Before the profile is decided (null) it fails closed like
-// unified: the controller decides the profile at the first overview or Run.
+// not gated. `null` means the profile is not decided and this image could run
+// on unified memory (the controller passes `dedicated` for an image that never
+// can): that fails closed, since the switch is what decides there.
 function enabled(env = {}, profile = 'dedicated') {
     if (profile === 'dedicated' || env[VLLM_UNIFIED_SWITCH] === UNIFIED_SWITCH_VALUE) return { enabled: true, reason: null };
+    const turnOn = `The operator can turn it on with ploinky var ${VLLM_UNIFIED_SWITCH} ${UNIFIED_SWITCH_VALUE}; `
+        + 'it has not been measured on this hardware.';
     return {
         enabled: false,
         reason: profile === 'unified'
-            ? 'vLLM is experimental on unified memory and is not enabled on this deployment. The operator can turn it on with '
-                + `ploinky var ${VLLM_UNIFIED_SWITCH} ${UNIFIED_SWITCH_VALUE}; it has not been measured on this hardware.`
-            : 'The hardware profile is not decided yet; open the overview and try again. On unified memory vLLM also needs the '
-                + `operator's ${VLLM_UNIFIED_SWITCH}=${UNIFIED_SWITCH_VALUE}.`,
+            ? `vLLM is experimental on unified memory and is not enabled on this deployment. ${turnOn}`
+            : 'vLLM is not enabled: this image runs on GPUs that share system memory, where vLLM is experimental and needs the '
+                + `operator's switch, and the GPU could not be read to tell. ${turnOn}`,
     };
 }
 

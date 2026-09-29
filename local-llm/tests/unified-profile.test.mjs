@@ -127,7 +127,7 @@ test('unified admission: the measured envelope, the whole known allocation, the 
     assert.equal(outside.status, 'ok', outside.reason);
     assert.equal(outside.estimate.envelope, null);
     assert.equal(outside.estimate.measured, false);
-    assert.match(outside.warnings[0], /^Outside the catalog's measured envelope \(context 131072 x 4 slots with load mode dio; context 262144 x 1 slot \(MTP allowed\) with load mode dio\): context 131072 x 8 slots with load mode dio is sized by estimate\./);
+    assert.match(outside.warnings[0], /^Outside the catalog's envelope \(context 131072 x 4 slots with load mode dio; context 262144 x 1 slot \(MTP allowed\) with load mode dio\): context 131072 x 8 slots with load mode dio is sized by estimate\./);
     // Less available than need plus the floor: busy now, naming the numbers.
     const busy = decide({ ctxSize: 131072, parallel: 4 }, unifiedSnapshot({ available: need + UNIFIED.floorBytes - GIB }));
     assert.equal(busy.status, 'insufficient-now');

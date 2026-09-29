@@ -215,9 +215,10 @@ const VLLM_RUNNER_RAM_BYTES = 3 * GIB;
 // 3 GiB, 13.0 GiB) admitted that. Two runs on one machine, so the estimate is
 // (1.81 x offload + 3.0 GiB) x 1.15, an offload run must leave max(4 GiB,
 // 10 % of RAM) available, and the controller's memory guard is the backstop.
-// The experimental unified vLLM policy (profiles.mjs) reuses the share cap and
-// the runner's resident RAM; on GB10 both are unmeasured.
-export { VLLM_MAX_UTILIZATION, VLLM_RUNNER_RAM_BYTES };
+// The experimental unified vLLM policy (profiles.mjs) reuses the share cap, the
+// overhead inside the share and the runner's resident RAM; on GB10 all three
+// are unmeasured.
+export { VLLM_MAX_UTILIZATION, VLLM_OVERHEAD_BYTES, VLLM_RUNNER_RAM_BYTES };
 const VLLM_OFFLOAD_RAM_FACTOR = 1.81;
 const VLLM_OFFLOAD_RESIDENT_BYTES = 3 * GIB;
 const VLLM_OFFLOAD_RAM_MARGIN = 1.15;

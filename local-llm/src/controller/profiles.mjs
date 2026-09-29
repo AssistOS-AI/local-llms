@@ -13,6 +13,7 @@ import {
     DEFAULT_KV_BYTES_PER_TOKEN,
     DEFAULT_LAYERS,
     VLLM_MAX_UTILIZATION,
+    VLLM_OVERHEAD_BYTES,
     VLLM_RUNNER_RAM_BYTES,
     computeBufferBytes,
 } from './admission.mjs';
@@ -110,6 +111,34 @@ function unreadable(memory) {
 
 const MEMORY_UNREADABLE = 'System memory cannot be read (/proc/meminfo), so nothing can be sized on unified memory.';
 
+// The sizing fields of an entry added at run time that feed an estimate. Only
+// the KV and MTP terms can be lowered this way: the weights are bound to the
+// pinned size and sha256, and the compute, runtime and cache terms are fixed.
+function userSizing(model, fields) {
+    if (model.seed) return [];
+    return fields.filter((field) => {
+        const [group, key] = field.split('.');
+        return model[group]?.[key] !== undefined && model[group]?.[key] !== null;
+    });
+}
+
+function userSizingWarning(fields) {
+    return `Sized with ${fields.join(', ')} from the model entry added at run time. Nothing checks these against the weights: `
+        + 'an understated value makes the estimate too small, and then only the memory guard stands behind the run.';
+}
+
+// Honest about what a default can miss (the defaults are DS003's).
+function defaultedWarning(defaulted) {
+    const notes = [];
+    if (defaulted.includes('memory.kvBytesPerToken')) {
+        notes.push(`memory.kvBytesPerToken (the ${DEFAULT_KV_BYTES_PER_TOKEN / 1024} KiB per token default can understate the KV cache `
+            + 'several times for large dense models)');
+    }
+    if (defaulted.includes('memory.layers')) notes.push(`memory.layers (${DEFAULT_LAYERS} assumed for the MTP draft)`);
+    if (defaulted.includes('contextLength')) notes.push('contextLength (the context is not capped at the model\'s training context)');
+    return `Estimated without ${notes.join(', ')}; ${METADATA_HINT}.`;
+}
+
 /**
  * What llama-server needs on unified memory when no trusted envelope covers
  * the parameters: an estimate from the model's data and the fixed unified
@@ -121,7 +150,7 @@ const MEMORY_UNREADABLE = 'System memory cannot be read (/proc/meminfo), so noth
  * cache's explicit bound. Inputs the entry lacks fall back to the dedicated
  * defaults and are named, so the admin can add them.
  */
-export function estimateUnifiedLlamaServer({ model, source, params }) {
+export function estimateUnifiedLlamaServer({ model, source, params, memory: host = {} }) {
     const memory = model.memory || {};
     const defaulted = [];
     const kvPerToken = memory.kvBytesPerToken ?? (defaulted.push('memory.kvBytesPerToken'), DEFAULT_KV_BYTES_PER_TOKEN);
@@ -145,12 +174,13 @@ export function estimateUnifiedLlamaServer({ model, source, params }) {
         runtimeBytes: UNIFIED.runtimeBytes,
         cacheRamBytes,
         unifiedBytes: needBytes,
-        poolBytes: memory.totalBytes ?? null,
+        poolBytes: host.totalBytes ?? null,
         floorBytes: UNIFIED.floorBytes,
         hostReserveBytes: UNIFIED.hostReserveBytes,
         envelope: null,
         measured: false,
         defaulted,
+        userSizing: userSizing(model, ['memory.kvBytesPerToken', 'memory.fixedKvBytes', ...(params.mtp ? ['memory.layers'] : [])]),
         basis: `estimate, not measured on this machine: pinned weight size, f16 KV cache for ctxSize at ${kvPerToken} bytes per token `
             + `(${defaulted.includes('memory.kvBytesPerToken') ? 'a default: the entry has no memory.kvBytesPerToken' : `from ${from}`}), `
             + `compute buffers${params.mtp ? ', an MTP draft context' : ''}, runtime and the prompt cache bound`,
@@ -184,24 +214,27 @@ export function admitUnifiedLlamaServer({ runnerId, model, source, params, memor
             poolBytes: memory.totalBytes ?? null,
             floorBytes: UNIFIED.floorBytes,
             envelope: { loadMode: rectangle.loadMode, maxCtx: rectangle.maxCtx, maxParallel: rectangle.maxParallel, mtp: rectangle.mtp },
-            basis: 'measured envelope (llama.cpp buffers at the measured corner, measured transient, prompt cache bound)',
+            measured: false,
+            basis: 'catalog envelope data (llama.cpp buffers logged at the rectangle\'s corner, its transient margin, runtime and the prompt '
+                + 'cache bound); not validated calibration for this host',
         };
+        warnings.push('Sized from the catalog\'s envelope figures, which are not validated calibration for this host; the memory guard '
+            + `stops the runner at once if available memory falls below ${gib(UNIFIED.floorBytes)}.`);
     } else {
         if (!(source.size > 0)) {
             return result('incompatible', `${model.displayName}'s weight size is unknown, so it cannot be sized on unified memory; `
                 + 'add the model again so its files are pinned.', {});
         }
-        estimate = estimateUnifiedLlamaServer({ model, source, params });
+        estimate = estimateUnifiedLlamaServer({ model, source, params, memory });
         const measured = describeEnvelope(model, runnerId);
         if (measured) {
-            warnings.push(`Outside the catalog's measured envelope (${measured}): context ${params.ctxSize} x ${slots(params.parallel)}`
+            warnings.push(`Outside the catalog's envelope (${measured}): context ${params.ctxSize} x ${slots(params.parallel)}`
                 + `${params.mtp ? ' with MTP' : ''} with load mode ${params.loadMode} is sized by estimate.`);
         }
         warnings.push(`Not measured on unified memory: about ${gib(estimate.unifiedBytes)} is an estimate. The memory guard stops `
             + `the runner at once if available memory falls below ${gib(UNIFIED.floorBytes)}.`);
-        if (estimate.defaulted.length) {
-            warnings.push(`Estimated without ${estimate.defaulted.join(', ')}; ${METADATA_HINT}.`);
-        }
+        if (estimate.defaulted.length) warnings.push(defaultedWarning(estimate.defaulted));
+        if (estimate.userSizing.length) warnings.push(userSizingWarning(estimate.userSizing));
     }
     if (unreadable(memory)) return result('incompatible', MEMORY_UNREADABLE, estimate, warnings);
     return poolVerdict({
@@ -226,16 +259,20 @@ export function admitUnifiedVllm({ model, source, params, memory, disk, remainin
     const defaulted = [];
     const kvPerToken = model.memory?.kvBytesPerToken ?? (defaulted.push('memory.kvBytesPerToken'), DEFAULT_KV_BYTES_PER_TOKEN);
     const kvBytes = Math.round(kvPerToken * params.maxModelLen * (params.kvCacheDtype === 'fp8' ? 0.5 : 1));
-    const modelBytes = weightsBytes + kvBytes;
+    // What the share must hold: weights, KV cache and vLLM's activations, CUDA context and allocator slack
+    // (VLLM_OVERHEAD_BYTES, as on a dedicated GPU). CUDA's total is the pool here, so no usable-share discount.
+    const modelBytes = weightsBytes + kvBytes + VLLM_OVERHEAD_BYTES;
+    const sizing = userSizing(model, ['memory.kvBytesPerToken']);
     const warnings = ['Experimental: vLLM has not been measured on unified memory. Its share and its RAM beyond it are estimates, '
         + `and the memory guard stops it at once if available memory falls below ${gib(UNIFIED.floorBytes)}.`];
-    if (defaulted.length) warnings.push(`Estimated without ${defaulted.join(', ')}; ${METADATA_HINT}.`);
+    if (defaulted.length) warnings.push(defaultedWarning(defaulted));
+    if (sizing.length) warnings.push(userSizingWarning(sizing));
     const base = {
-        weightsBytes, kvBytes, runnerRamBytes: VLLM_RUNNER_RAM_BYTES, floorBytes: UNIFIED.floorBytes,
+        weightsBytes, kvBytes, overheadBytes: VLLM_OVERHEAD_BYTES, runnerRamBytes: VLLM_RUNNER_RAM_BYTES, floorBytes: UNIFIED.floorBytes,
         hostReserveBytes: UNIFIED.hostReserveBytes, poolBytes: memory.totalBytes ?? null, envelope: null, measured: false,
-        experimental: true, defaulted,
+        experimental: true, defaulted, userSizing: sizing,
         basis: 'experimental estimate, not measured: vLLM\'s share of the shared pool plus its runner RAM (measured on a dedicated GPU); '
-            + `snapshot size and a KV cache for maxModelLen at ${kvPerToken} bytes per token`,
+            + `the share must hold the snapshot, a KV cache for maxModelLen at ${kvPerToken} bytes per token and vLLM's overhead`,
     };
     if (unreadable(memory)) return result('incompatible', MEMORY_UNREADABLE, base, warnings);
     if (!(weightsBytes > 0)) {
@@ -252,7 +289,7 @@ export function admitUnifiedVllm({ model, source, params, memory, disk, remainin
     // Whether it can ever fit: in the admin's share, or in the largest share the reserve allows.
     const ceilingBytes = adminSet ? budgetBytes : Math.max(0, maxShare) * memory.totalBytes;
     if (modelBytes > ceilingBytes) {
-        return result('incompatible', `Its weights and a KV cache for ${params.maxModelLen} tokens need about ${gib(modelBytes)}; `
+        return result('incompatible', `Its weights, a KV cache for ${params.maxModelLen} tokens and vLLM's overhead need about ${gib(modelBytes)}; `
             + (adminSet
                 ? `gpuMemoryUtilization ${share} gives vLLM about ${gib(budgetBytes)}. Raise it, or leave it empty.`
                 : `vLLM can have at most about ${gib(ceilingBytes)} of this pool. Reduce maxModelLen or pick a smaller model.`),
@@ -263,7 +300,7 @@ export function admitUnifiedVllm({ model, source, params, memory, disk, remainin
             + `${gib(memory.availableBytes)} is available now.`, estimate, warnings);
     }
     if (modelBytes > budgetBytes) {
-        return result('insufficient-now', `Its weights and KV cache need about ${gib(modelBytes)}; the ${share} share that is free now `
+        return result('insufficient-now', `Its weights, KV cache and vLLM's overhead need about ${gib(modelBytes)}; the ${share} share that is free now `
             + `gives about ${gib(budgetBytes)}.`, estimate, warnings);
     }
     return poolVerdict({

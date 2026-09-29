@@ -61,7 +61,7 @@ async function previewOf(h, request) {
 }
 
 /** A unified-memory controller; `dataDir` lets a second controller reload the first one's state. */
-function harness(t, { seed = SEED, available = () => 100 * GIB, env = {}, dataDir, installer, resolveHf } = {}) {
+function harness(t, { seed = SEED, available = () => 100 * GIB, env = {}, dataDir, installer, resolveHf, snapshot = null, imageContract = null } = {}) {
     const dir = dataDir || fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-runtime-models-'));
     if (!dataDir) t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
     const weights = path.join(dir, 'weights.gguf');
@@ -73,7 +73,7 @@ function harness(t, { seed = SEED, available = () => 100 * GIB, env = {}, dataDi
         env: { PATH: '/usr/bin', ...env },
         seedCatalog: seed,
         stateStore: createStateStore({ dataDir: dir }),
-        snapshot: async () => unifiedSnap(available()),
+        snapshot: async () => (snapshot ? snapshot() : unifiedSnap(available())),
         inspect: async () => ({ state: 'absent', bytes: 0 }),
         download: async () => { calls.download += 1; return { status: 'complete', path: weights, bytesTransferred: 0 }; },
         verify: async () => ({ notes: [] }),
@@ -82,7 +82,7 @@ function harness(t, { seed = SEED, available = () => 100 * GIB, env = {}, dataDi
         downloadSnapshot: async () => ({ status: 'complete', bytesTransferred: 0 }),
         resolveHf: resolveHf || (async () => { calls.resolveHf += 1; return { commit: 'c'.repeat(40), size: 20 * GIB, sha256: 'd'.repeat(64) }; }),
         sharedModelsRoot: null,
-        imageContract: null,
+        imageContract,
         installer: installer || { installable: () => false },
         shmDir: path.join(dir, 'shm'),
         detectRunner: (runner) => ({ installed: runner.supported, version: runner.pinnedVersion, reason: null }),
@@ -131,8 +131,11 @@ test('a bundled unified model without an envelope is admitted by a labelled esti
     assert.equal(estimate.isEstimate, true);
     assert.match(estimate.basis, /^estimate, not measured on this machine/);
     assert.deepEqual(estimate.defaulted, ['memory.kvBytesPerToken']);
+    assert.deepEqual(estimate.userSizing, [], 'a seed entry is not user sizing');
+    assert.equal(estimate.poolBytes, TOTAL, 'the pool is the host snapshot, not the model entry');
     assert.ok(result.warnings.some((warning) => /Not measured on unified memory: about .* is an estimate\. The memory guard stops/.test(warning)));
-    assert.ok(result.warnings.some((warning) => /Estimated without memory\.kvBytesPerToken; add them to the model entry/.test(warning)));
+    assert.ok(result.warnings.some((warning) => /^Estimated without memory\.kvBytesPerToken \(the 64 KiB per token default can understate the KV cache several times for large dense models\); add them to the model entry/.test(warning)));
+    assert.ok(!result.warnings.some((warning) => /Sized with .* from the model entry added at run time/.test(warning)));
     // The entry's own sizing data is used when it has it (gpt-oss-20b does).
     const small = seedModel('gpt-oss-20b');
     const smallEstimate = admitUnified(small, unifiedParams(small)).estimate;
@@ -174,12 +177,20 @@ test('a trusted envelope that covers the parameters still sizes the run; outside
     assert.equal(inside.status, 'ok');
     assert.equal(inside.estimate.unifiedBytes, 32 * GIB + UNIFIED.runtimeBytes + UNIFIED.cacheRamMiB * MIB);
     assert.equal(inside.estimate.envelope.maxCtx, 65536);
+    // Catalog envelope data, never presented as calibration for this host.
+    assert.equal(inside.estimate.measured, false);
+    assert.equal(Object.hasOwn(inside.estimate, 'validated'), false);
+    assert.match(inside.estimate.basis, /^catalog envelope data .*; not validated calibration for this host$/);
+    assert.doesNotMatch(inside.estimate.basis, /measured envelope/);
+    assert.match(inside.warnings[0], /^Sized from the catalog's envelope figures, which are not validated calibration for this host; the memory guard stops/);
+    assert.equal(inside.estimate.poolBytes, TOTAL);
     for (const params of [{ ctxSize: 131072 }, { ctxSize: 32768, loadMode: 'none' }]) {
         const outside = admitUnified(model, unifiedParams(model, params));
         assert.equal(outside.status, 'ok', 'outside the rectangle is not a refusal any more');
         assert.equal(outside.estimate.envelope, null);
         assert.equal(outside.estimate.measured, false);
-        assert.match(outside.warnings[0], /^Outside the catalog's measured envelope \(context 65536 x 2 slots with load mode dio\)/);
+        assert.equal(outside.estimate.poolBytes, TOTAL);
+        assert.match(outside.warnings[0], /^Outside the catalog's envelope \(context 65536 x 2 slots with load mode dio\)/);
     }
 });
 
@@ -303,6 +314,42 @@ test('an added model that does not fit now is refused before anything downloads;
     assert.match(never.admission.reason, /must keep 16\.0 GiB for the host/);
 });
 
+test('user sizing can lower only the KV and MTP terms, and every run it lowers says the memory guard is then the only backstop', async (t) => {
+    const h = harness(t);
+    // A 40 GiB dense entry that claims one byte per token of KV cache.
+    const huge = { commit: 'c'.repeat(40), size: 40 * GIB, sha256: 'd'.repeat(64) };
+    const understated = harness(t, { resolveHf: async () => huge });
+    await understated.controller.addModel({ ...structuredClone(ADDED), id: 'user-tiny-kv', architecture: 'dense', contextLength: 262144,
+        memory: { kvBytesPerToken: 1 } });
+    await understated.controller.addModel({ ...structuredClone(ADDED), id: 'user-no-sizing', architecture: 'dense', contextLength: 262144,
+        memory: undefined });
+    const params = { ctxSize: 262144 };
+    const tiny = (await previewOf(understated, { modelId: 'user-tiny-kv', runnerId: 'llama.cpp', params })).admission;
+    const defaulted = (await previewOf(understated, { modelId: 'user-no-sizing', runnerId: 'llama.cpp', params })).admission;
+    assert.equal(tiny.status, 'ok', 'user sizing is trusted as the admin\'s data, not refused');
+    assert.deepEqual(tiny.estimate.userSizing, ['memory.kvBytesPerToken']);
+    assert.ok(tiny.warnings.some((warning) => /^Sized with memory\.kvBytesPerToken from the model entry added at run time\. Nothing checks these against the weights: an understated value makes the estimate too small, and then only the memory guard stands behind the run\.$/.test(warning)));
+    assert.ok(!defaulted.warnings.some((warning) => /^Sized with/.test(warning)), 'a defaulted estimate has no user-sizing warning');
+    // Only the KV (and MTP) terms moved; weights, compute, runtime and the prompt cache are the same.
+    assert.ok(tiny.estimate.unifiedBytes < defaulted.estimate.unifiedBytes);
+    for (const term of ['weightsBytes', 'computeBytes', 'runtimeBytes', 'cacheRamBytes']) {
+        assert.equal(tiny.estimate[term], defaulted.estimate[term], term);
+    }
+    assert.equal(defaulted.estimate.unifiedBytes - tiny.estimate.unifiedBytes, defaulted.estimate.kvBytes - tiny.estimate.kvBytes);
+    // An added entry with a declared head and its own layers: layers feed the MTP draft, and are named.
+    await h.controller.addModel({ ...structuredClone(ADDED), id: 'user-mtp-sized', mtp: true });
+    const mtp = (await previewOf(h, { modelId: 'user-mtp-sized', runnerId: 'llama.cpp', params: { mtp: true } })).admission;
+    assert.deepEqual(mtp.estimate.userSizing, ['memory.kvBytesPerToken', 'memory.layers']);
+    // vLLM reads the same field, and says so too.
+    const vllmModel = validateModel({ ...structuredClone(ADDED), id: 'user-hf', profiles: ['unified'],
+        sources: { hf: { ...HF_MODEL.sources.hf } } }, { seed: false });
+    const vllm = admitUnified(vllmModel, vllmRunner.normalizeParams({}, { model: vllmModel, profile: 'unified' }), unifiedSnap(), vllmRunner,
+        vllmModel.sources.hf);
+    assert.deepEqual(vllm.estimate.userSizing, ['memory.kvBytesPerToken']);
+    assert.ok(vllm.warnings.some((warning) => /^Sized with memory\.kvBytesPerToken from the model entry added at run time/.test(warning)));
+    assert.equal(vllm.estimate.poolBytes, TOTAL);
+});
+
 test('malformed metadata is refused with the field to fix, and nothing is stored or resolved', async (t) => {
     const h = harness(t);
     for (const [change, field] of [
@@ -330,7 +377,8 @@ test('an added model without sizing data runs by estimate with named defaults; o
     const rows = Object.fromEntries((await h.controller.overview()).models.map((entry) => [entry.id, entry.runners['llama.cpp']]));
     assert.equal(rows['user-bare'].admission.status, 'ok');
     assert.deepEqual(rows['user-bare'].admission.estimate.defaulted, ['memory.kvBytesPerToken', 'contextLength']);
-    assert.ok(rows['user-bare'].admission.warnings.some((warning) => /Estimated without memory\.kvBytesPerToken, contextLength/.test(warning)));
+    assert.ok(rows['user-bare'].admission.warnings.some((warning) => /^Estimated without memory\.kvBytesPerToken \(the 64 KiB per token default can understate .*\), contextLength \(the context is not capped at the model's training context\)/.test(warning)));
+    assert.deepEqual(rows['user-bare'].admission.estimate.userSizing, [], 'no sizing supplied, so none to warn about');
     assert.equal(rows['user-mtp'].params.mtp, false, 'a declared head is not a default');
     const withMtp = await previewOf(h, { modelId: 'user-mtp', runnerId: 'llama.cpp', params: { mtp: true } });
     assert.equal(withMtp.params.mtp, true);
@@ -363,10 +411,45 @@ function vllmInstaller(runDir) {
         installable: (id) => id === 'vllm',
         describe: async () => ({ installed: true, runnable: true, version: '0.30.0', totalBytes: 1, files: 1, cache: { state: 'complete' }, licence: {} }),
         ensureRunnable: async () => ({ rebuilt: false, seconds: 0, bytes: 1 }),
-        entryFor: () => ({ id: 'vllm', version: '0.30.0' }),
+        entryFor: () => ({ id: 'vllm', version: '0.30.0', totalBytes: 1, licence: { name: 'Apache-2.0', requiresAcceptance: false } }),
         pathsFor: () => ({ runDir }),
     };
 }
+
+// The source.contract of each published image (container-image-builds): amd64 has no architecture line.
+const AMD64_CONTRACT = Object.freeze({ llama_cpp: 'b11159', llama_cpp_cuda: '12.8', ollama: '0.34.4', uv: '0.12.18' });
+const ARM64_CONTRACT = Object.freeze({ architecture: 'arm64', llama_cpp: 'b11159', llama_cpp_cuda: '13.4', gpu_compute_capabilities: '12.1', uv: '0.12.18' });
+const GPU_UNREADABLE = () => ({ gpu: { available: false, reason: 'nvidia-smi failed: the GPU grant was revoked' },
+    memory: { totalBytes: 32 * GIB, availableBytes: 28 * GIB }, disk: { freeBytes: 400 * GIB }, cpus: 16 });
+
+test('an image that can never run on unified memory keeps vLLM as before while the GPU cannot be read', async (t) => {
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-vllm-amd64-'));
+    t.after(() => fs.rmSync(runDir, { recursive: true, force: true }));
+    const h = harness(t, { installer: vllmInstaller(runDir), imageContract: AMD64_CONTRACT, snapshot: GPU_UNREADABLE });
+    const overview = await h.controller.overview();
+    const row = overview.runners.find((runner) => runner.id === 'vllm');
+    assert.equal(row.enabled, true, 'as at 50f39385: no switch on a dedicated-only image');
+    assert.equal(Object.hasOwn(row, 'disabledReason'), false);
+    // The install is not refused by the switch (here the stub reports it already installed and runnable).
+    const install = await h.controller.installRunner({ runnerId: 'vllm' });
+    assert.equal(install.installed, true);
+});
+
+test('an image that can run on unified memory keeps vLLM off while the GPU cannot be read, and says what turns it on', async (t) => {
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-vllm-arm64-'));
+    t.after(() => fs.rmSync(runDir, { recursive: true, force: true }));
+    for (const imageContract of [ARM64_CONTRACT, null]) {
+        const h = harness(t, { installer: vllmInstaller(runDir), imageContract, snapshot: GPU_UNREADABLE });
+        const row = (await h.controller.overview()).runners.find((runner) => runner.id === 'vllm');
+        assert.equal(row.enabled, false);
+        assert.match(row.disabledReason, new RegExp(`the GPU could not be read to tell\\. The operator can turn it on with ploinky var ${VLLM_UNIFIED_SWITCH} experimental`));
+        assert.doesNotMatch(row.disabledReason, /try again|open the overview/i, 'no retry that cannot succeed');
+        await assert.rejects(h.controller.installRunner({ runnerId: 'vllm' }), (error) => error.code === 'runner_disabled');
+        // With the operator's switch it is not refused by the gate.
+        const on = harness(t, { installer: vllmInstaller(runDir), imageContract, snapshot: GPU_UNREADABLE, env: { [VLLM_UNIFIED_SWITCH]: 'experimental' } });
+        assert.equal((await on.controller.installRunner({ runnerId: 'vllm' })).installed, true);
+    }
+});
 
 test('vLLM on unified memory stays off without the operator switch; no parameter, entry or runner choice turns it on', async (t) => {
     const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-vllm-off-'));
@@ -377,6 +460,11 @@ test('vLLM on unified memory stays off without the operator switch; no parameter
     assert.equal(row.admission.status, 'incompatible');
     assert.match(row.admission.reason, new RegExp(`experimental on unified memory.*ploinky var ${VLLM_UNIFIED_SWITCH} experimental`));
     assert.equal(overview.runners.find((runner) => runner.id === 'vllm').enabled, false);
+    // The Run form's preview is refused the same way, before anything is sized.
+    const preview = await previewOf(h, { modelId: HF_MODEL.id, runnerId: 'vllm', params: { gpuMemoryUtilization: 0.3 } });
+    assert.equal(preview.admission.status, 'incompatible');
+    assert.match(preview.admission.reason, new RegExp(`ploinky var ${VLLM_UNIFIED_SWITCH} experimental`));
+    assert.equal(preview.params, null);
     for (const env of [{}, { [VLLM_UNIFIED_SWITCH]: 'yes' }, { [VLLM_UNIFIED_SWITCH]: 'EXPERIMENTAL' }]) {
         const gated = harness(t, { installer: vllmInstaller(runDir), env });
         await gated.controller.overview();
