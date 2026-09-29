@@ -7,6 +7,7 @@
 // injected: no /proc, GPU, network or real model is used. Every number here is
 // synthetic; no envelope, margin or constant is approved by these tests.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -63,8 +64,9 @@ async function previewOf(h, request) {
 }
 
 /** A unified-memory controller; `dataDir` lets a second controller reload the first one's state. */
+// `hostArch` omitted leaves the controller's own default (process.arch).
 function harness(t, { seed = SEED, available = () => 100 * GIB, env = {}, dataDir, installer, resolveHf, snapshot = null, imageContract = null,
-    hostArch = 'arm64' } = {}) {
+    hostArch } = {}) {
     const dir = dataDir || fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-runtime-models-'));
     const weights = path.join(dir, 'weights.gguf');
     fs.writeFileSync(weights, 'x');
@@ -484,8 +486,9 @@ function vllmInstaller(runDir) {
 
 // The source.contract each published image writes (container-image-builds Dockerfile and Dockerfile.arm64): the
 // amd64 one has no architecture line and names ik_llama.cpp, which only it builds.
-const AMD64_CONTRACT = Object.freeze({ llama_cpp: 'b11159', llama_cpp_cuda: '12.8', ollama: '0.34.4', ik_llama_cpp: '20f7a72',
-    ik_llama_cpp_cuda: '12.8', uv: '0.12.18', lmstudio_sdk: '1.5.0' });
+// Keys and values as images/local-llm/Dockerfile writes them (lmstudio_sdk holds its $sdk_version).
+const AMD64_CONTRACT = Object.freeze({ llama_cpp: 'b11159', llama_cpp_cuda: '12.8', ollama: '0.34.4',
+    ik_llama_cpp: '20f7a72edd7049fe5a87eef2b5e9a50ae109ca4b', ik_llama_cpp_cuda: '12.8', uv: '0.12.18', lmstudio_sdk: '2.0.0' });
 const ARM64_CONTRACT = Object.freeze({ architecture: 'arm64', llama_cpp: 'b11159', llama_cpp_cuda: '13.4', llama_cpp_build: 'release',
     gpu_compute_capabilities: '12.1', uv: '0.12.18' });
 const GPU_UNREADABLE = () => ({ gpu: { available: false, reason: 'nvidia-smi failed: the GPU grant was revoked' },
@@ -511,6 +514,21 @@ test('an image that can never run on unified memory keeps vLLM as before while t
     }
 });
 
+test('a controller built without hostArch reads the CPU from process.arch', async (t) => {
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-vllm-hostarch-'));
+    t.after(() => fs.rmSync(runDir, { recursive: true, force: true }));
+    // An architecture-less contract without ik_llama.cpp: only an x64 CPU makes it the amd64 image.
+    const imageContract = { llama_cpp: 'b11159' };
+    const enabledOn = async (hostArch) => {
+        const h = harness(t, { installer: vllmInstaller(runDir), imageContract, hostArch, snapshot: GPU_UNREADABLE });
+        return (await h.controller.overview()).runners.find((runner) => runner.id === 'vllm').enabled;
+    };
+    const byDefault = await enabledOn(undefined);
+    assert.equal(byDefault, process.arch === 'x64', `process.arch is ${process.arch}`);
+    assert.equal(byDefault, await enabledOn(process.arch));
+    assert.notEqual(byDefault, await enabledOn(process.arch === 'x64' ? 'arm64' : 'x64'));
+});
+
 test('an install before any overview decides the profile first: a readable dedicated arm64 GPU installs, a readable GB10 needs the switch', async (t) => {
     const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-vllm-first-'));
     t.after(() => fs.rmSync(runDir, { recursive: true, force: true }));
@@ -528,8 +546,10 @@ test('an image that can run on unified memory keeps vLLM off while the GPU canno
     t.after(() => fs.rmSync(runDir, { recursive: true, force: true }));
     // arm64's contract, none (development), and on an arm64 CPU an empty, malformed or architecture-less one:
     // only positive evidence of the amd64 image opens the gate.
+    // A contract that says architecture=arm64 stays gated even if it also names ik_llama.cpp, or runs on an x64 CPU.
     for (const [imageContract, hostArch] of [[ARM64_CONTRACT, 'arm64'], [null, 'arm64'], [null, 'x64'], [{}, 'arm64'],
-        [{ llama_cpp: 'b11159', uv: '0.12.18' }, 'arm64']]) {
+        [{ llama_cpp: 'b11159', uv: '0.12.18' }, 'arm64'], [{ ...ARM64_CONTRACT, ik_llama_cpp: '20f7a72edd7049fe5a87eef2b5e9a50ae109ca4b' }, 'arm64'],
+        [ARM64_CONTRACT, 'x64']]) {
         const h = harness(t, { installer: vllmInstaller(runDir), imageContract, hostArch, snapshot: GPU_UNREADABLE });
         const row = (await h.controller.overview()).runners.find((runner) => runner.id === 'vllm');
         assert.equal(row.enabled, false, JSON.stringify({ imageContract, hostArch }));
@@ -642,18 +662,25 @@ test('a bundled entry\'s own sizing is not user sizing, for llama.cpp and vLLM a
 });
 
 test('vLLM\'s share must hold the weights, the KV cache and its 768 MiB overhead: just below refuses, just above admits', () => {
+    // The dedicated-GPU figure, reused unchanged: 768 MiB exactly.
+    assert.equal(VLLM_OVERHEAD_BYTES, 768 * MIB);
+    assert.equal(VLLM_OVERHEAD_BYTES, 805306368);
     const base = vllmAt({ gpuMemoryUtilization: 0.5 }).estimate;
-    assert.equal(base.overheadBytes, VLLM_OVERHEAD_BYTES);
-    const needed = base.weightsBytes + base.kvBytes + VLLM_OVERHEAD_BYTES;
+    assert.equal(base.overheadBytes, 805306368);
+    const needed = base.weightsBytes + base.kvBytes + 805306368;
+    // Shares 4 MiB of pool either side of the exact need: a resolution far finer than 16 MiB.
+    const step = (4 * MIB) / TOTAL;
     const exact = needed / TOTAL;
-    const below = vllmAt({ gpuMemoryUtilization: exact - 0.0005 });
-    const above = vllmAt({ gpuMemoryUtilization: exact + 0.0005 });
+    const below = vllmAt({ gpuMemoryUtilization: exact - step });
+    const above = vllmAt({ gpuMemoryUtilization: exact + step });
+    assert.ok(Math.abs(below.estimate.budgetBytes - (needed - 4 * MIB)) <= 1);
+    assert.ok(Math.abs(above.estimate.budgetBytes - (needed + 4 * MIB)) <= 1);
     assert.equal(below.status, 'incompatible', below.reason);
     assert.match(below.reason, /and vLLM's overhead need about/);
     assert.equal(above.status, 'ok', above.reason);
     // Just above the weights and KV cache alone, but short of the overhead: still refused.
     const withoutOverhead = (base.weightsBytes + base.kvBytes) / TOTAL;
-    assert.equal(vllmAt({ gpuMemoryUtilization: withoutOverhead + 0.0005 }).status, 'incompatible');
+    assert.equal(vllmAt({ gpuMemoryUtilization: withoutOverhead + step }).status, 'incompatible');
 });
 
 test('vLLM\'s automatic share keeps the host reserve and never exceeds 0.9', () => {
@@ -731,6 +758,17 @@ test('the llama-server estimate\'s basis names every defaulted input', () => {
     assert.doesNotMatch(sized.basis, /defaults used/);
 });
 
+test('the vLLM estimate\'s basis says when the per-token KV figure is a default', () => {
+    const { memory: _memory, ...bare } = structuredClone(ADDED);
+    const model = validateModel({ ...bare, id: 'user-hf-bare', sources: { hf: { ...HF_MODEL.sources.hf } } }, { seed: false });
+    const defaulted = vllmAt({}, unifiedSnap(), model).estimate;
+    assert.match(defaulted.basis, new RegExp(`at ${DEFAULT_KV_BYTES_PER_TOKEN} bytes per token \\(a default: the entry has no memory\\.kvBytesPerToken\\)`));
+    assert.match(defaulted.basis, /; defaults used for memory\.kvBytesPerToken$/);
+    const sized = vllmAt({}, unifiedSnap(), HF_MODEL).estimate;
+    assert.match(sized.basis, /bytes per token \(from the model entry\)/);
+    assert.doesNotMatch(sized.basis, /a default|defaults used/);
+});
+
 // ------------------------------------------------ complete install validation
 
 test('the install check compares every installed distribution with the lock: none extra, none missing, exact versions', () => {
@@ -768,6 +806,32 @@ test('a name installed twice (a stale copy beside the locked one) fails the inst
     // Pairs and the object form agree when nothing is duplicated.
     assert.deepEqual(compareInstalledDistributions(entry, [['foo.bar', '2.0'], ['vllm', '0.30.0']]).problems, []);
     assert.deepEqual(compareInstalledDistributions(entry, { 'foo.bar': '2.0', vllm: '0.30.0' }).problems, []);
+});
+
+const PYTHON3 = spawnSync('python3', ['-c', 'pass'], { encoding: 'utf8' });
+test('the install check\'s own Python listing keeps every installed copy of one name', {
+    skip: PYTHON3.status === 0 ? false : `python3 is not available: ${PYTHON3.error?.message ?? PYTHON3.stderr}`,
+}, (t) => {
+    // The exact listing the tool runs, read from its source so the tool itself is not changed for the test.
+    const tool = fs.readFileSync(new URL('../tools/runner_install_check.mjs', import.meta.url), 'utf8');
+    const listing = tool.match(/const all = spawnSync\(python, \['-c', '([^']*m\.distributions\(\)[^']*)'\]/)?.[1];
+    assert.ok(listing, 'the listing is found in tools/runner_install_check.mjs');
+    const site = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-dist-listing-'));
+    t.after(() => fs.rmSync(site, { recursive: true, force: true }));
+    for (const [dir, name, version] of [['foo_bar-2.0.dist-info', 'foo.bar', '2.0'], ['Foo_Bar-1.0.dist-info', 'Foo_Bar', '1.0']]) {
+        fs.mkdirSync(path.join(site, dir));
+        fs.writeFileSync(path.join(site, dir, 'METADATA'), `Metadata-Version: 2.1\nName: ${name}\nVersion: ${version}\n`);
+    }
+    // -S leaves out the interpreter's own site-packages; PYTHONPATH puts the planted ones on sys.path.
+    const run = spawnSync('python3', ['-S', '-c', listing], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: '/tmp', PYTHONPATH: site } });
+    assert.equal(run.status, 0, run.stderr);
+    const listed = JSON.parse(run.stdout);
+    assert.ok(Array.isArray(listed), 'pairs, not an object that keeps one copy per name');
+    const planted = listed.filter(([name]) => /^foo[-_.]bar$/i.test(name));
+    assert.deepEqual(planted.map((pair) => pair.join(' ')).sort(), ['Foo_Bar 1.0', 'foo.bar 2.0']);
+    const result = compareInstalledDistributions({ files: [{ name: 'foo.bar-2.0-py3-none-any.whl' }] }, planted);
+    assert.equal(result.duplicated.length, 1);
+    assert.ok(result.problems.some((problem) => /^installed more than once under one name: foo-bar/.test(problem)), result.problems.join(' | '));
 });
 
 // ------------------------------------------------ the tool entry's operations

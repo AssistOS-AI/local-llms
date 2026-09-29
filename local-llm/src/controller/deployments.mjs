@@ -344,8 +344,10 @@ export function createController({
     // Whether this image could ever run on unified memory (DS005). Only positive
     // evidence of the amd64 image rules it out: a source.contract that does not
     // say `architecture=arm64` and either names ik_llama.cpp (built only into
-    // the amd64 image) or runs on an x64 CPU. No contract (tests, development),
-    // or an empty, malformed or architecture-less one on arm64, counts as possible.
+    // the amd64 image) or runs on an x64 CPU. `architecture=arm64` always counts
+    // as possible, even alongside an ik_llama_cpp key or on an x64 CPU, and so
+    // does no contract (tests, development) or an empty, malformed or
+    // architecture-less one without ik_llama_cpp on arm64.
     const amd64Only = Boolean(imageContract) && imageContract.architecture !== 'arm64'
         && (Object.hasOwn(imageContract, 'ik_llama_cpp') || hostArch === 'x64');
     const unifiedPossible = !amd64Only;

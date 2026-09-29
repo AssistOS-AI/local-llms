@@ -279,7 +279,10 @@ export function admitUnifiedVllm({ model, source, params, memory, disk, remainin
         hostReserveBytes: UNIFIED.hostReserveBytes, poolBytes: memory.totalBytes ?? null, envelope: null, measured: false,
         experimental: true, defaulted, userSizing: sizing,
         basis: 'experimental estimate, not measured: vLLM\'s share of the shared pool plus its runner RAM (measured on a dedicated GPU); '
-            + `the share must hold the snapshot, a KV cache for maxModelLen at ${kvPerToken} bytes per token and vLLM's overhead`,
+            + `the share must hold the snapshot, a KV cache for maxModelLen at ${kvPerToken} bytes per token `
+            + `(${defaulted.includes('memory.kvBytesPerToken') ? 'a default: the entry has no memory.kvBytesPerToken' : 'from the model entry'}) `
+            + 'and vLLM\'s overhead'
+            + (defaulted.length ? `; defaults used for ${defaulted.join(', ')}` : ''),
     };
     if (unreadable(memory)) return result('incompatible', MEMORY_UNREADABLE, base, warnings);
     if (!(weightsBytes > 0)) {
