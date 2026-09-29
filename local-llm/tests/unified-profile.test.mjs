@@ -25,9 +25,10 @@ const GGUF = Object.freeze({
     type: 'huggingface', repo: 'ggml-org/gpt-oss-120b-GGUF', file: 'gpt-oss-120b-MXFP4.gguf', revision: 'main',
     commit: 'a'.repeat(40), size: 63387346208, sha256: 'b'.repeat(64),
 });
-// A model measured on unified memory with dio: 128k x 4 slots, and 256k x 1 with MTP.
+// A model measured on unified memory with dio: 128k x 4 slots, and 256k x 1
+// with MTP, which its weights' declared prediction head (mtp) allows.
 const MEASURED = validateModel({
-    id: 'big-moe', displayName: 'Big MoE', architecture: 'moe', contextLength: 131072, sources: { gguf: GGUF },
+    id: 'big-moe', displayName: 'Big MoE', architecture: 'moe', contextLength: 131072, mtp: true, sources: { gguf: GGUF },
     profiles: ['unified'],
     recommended: { unified: { 'llama.cpp': { ctxSize: 32768 } } },
     unified: { envelope: [
@@ -121,9 +122,12 @@ test('unified admission: the measured envelope, the whole known allocation, the 
     assert.equal(decide({ ctxSize: 8192, parallel: 1 }).estimate.unifiedBytes, need);
     // MTP only where it was measured.
     assert.equal(decide({ ctxSize: 65536, parallel: 1, mtp: true }).estimate.envelope.maxCtx, 262144);
+    // Outside the rectangles the run is sized by estimate, not refused (owner, 2026-09-29: no benchmark gate).
     const outside = decide({ ctxSize: 131072, parallel: 8 });
-    assert.equal(outside.status, 'incompatible');
-    assert.match(outside.reason, /measured on unified memory with llama\.cpp only up to context 131072 x 4 slots with load mode dio; context 262144 x 1 slot \(MTP allowed\) with load mode dio; context 131072 x 8 slots with load mode dio is outside it/);
+    assert.equal(outside.status, 'ok', outside.reason);
+    assert.equal(outside.estimate.envelope, null);
+    assert.equal(outside.estimate.measured, false);
+    assert.match(outside.warnings[0], /^Outside the catalog's measured envelope \(context 131072 x 4 slots with load mode dio; context 262144 x 1 slot \(MTP allowed\) with load mode dio\): context 131072 x 8 slots with load mode dio is sized by estimate\./);
     // Less available than need plus the floor: busy now, naming the numbers.
     const busy = decide({ ctxSize: 131072, parallel: 4 }, unifiedSnapshot({ available: need + UNIFIED.floorBytes - GIB }));
     assert.equal(busy.status, 'insufficient-now');
@@ -136,12 +140,13 @@ test('unified admission: the measured envelope, the whole known allocation, the 
         snapshot: unifiedSnapshot(), profile: 'unified' });
     assert.equal(never.status, 'incompatible');
     assert.match(never.reason, /must keep 16\.0 GiB for the host/);
-    // A model never measured here is refused, whatever its size.
+    // A model never measured here runs by a labelled estimate, still inside the reserve and the floor.
     const [gpt] = SEED;
     const unmeasured = admit({ runner, model: gpt, source: gpt.sources.gguf, params: runner.normalizeParams({}, { model: gpt, profile: 'unified' }),
         snapshot: unifiedSnapshot(), profile: 'unified' });
-    assert.equal(unmeasured.status, 'incompatible');
-    assert.match(unmeasured.reason, /has not been measured on unified memory/);
+    assert.equal(unmeasured.status, 'ok', unmeasured.reason);
+    assert.equal(unmeasured.estimate.measured, false);
+    assert.match(unmeasured.warnings[0], /^Not measured on unified memory/);
     // No readable pool: refused.
     const blind = decide({}, { ...unifiedSnapshot(), memory: { totalBytes: null, availableBytes: null } });
     assert.equal(blind.status, 'incompatible');

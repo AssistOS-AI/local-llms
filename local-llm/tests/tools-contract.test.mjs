@@ -6,6 +6,7 @@ import { TOOL_NAMES, TOOL_OPERATIONS, assertAdmin, authInfoFromEnvelope, handleT
 import { buildRunnerRequest, completionStats, respond } from '../src/chatResponder.mjs';
 import { GATEWAY_MODEL, runTestPrompt } from '../src/testPrompt.mjs';
 import { LMSTUDIO_SWITCH } from '../src/runners/lmStudio.mjs';
+import { VLLM_UNIFIED_SWITCH } from '../src/runners/vllm.mjs';
 
 const ROOT = new URL('..', import.meta.url);
 const read = (file) => JSON.parse(fs.readFileSync(new URL(file, ROOT), 'utf8'));
@@ -231,7 +232,10 @@ test('the manifest declares the LM Studio switch as an optional variable that is
         HF_TOKEN: { required: false }, [LMSTUDIO_SWITCH]: { required: false },
         // The chat budget and deadline an operator may set (DS001).
         LOCAL_LLM_MAX_COMPLETION_TOKENS: { required: false }, LOCAL_LLM_RUNNER_TIMEOUT_MS: { required: false },
+        // The operator's switch for experimental vLLM on unified memory (DS004), off by default.
+        [VLLM_UNIFIED_SWITCH]: { required: false },
     });
+    assert.match(manifest.description, new RegExp(`ploinky var ${VLLM_UNIFIED_SWITCH} experimental`));
     assert.match(manifest.description, /LM Studio/);
     assert.match(manifest.description, /internal use only/);
     assert.match(manifest.description, new RegExp(`ploinky var ${LMSTUDIO_SWITCH} internal-use`));

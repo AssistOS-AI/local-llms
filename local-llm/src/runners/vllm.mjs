@@ -3,12 +3,20 @@
 // snapshot (weight format hf), listens on loopback with a per-start key, and
 // is admitted only when its weights and KV cache fit the GPU unless the admin
 // explicitly offloads weights to RAM (admitVllm).
+//
+// On unified memory (DS005) vLLM is experimental: it runs only when the
+// deployment's operator turns it on (LOCAL_LLM_VLLM_UNIFIED=experimental,
+// set with `ploinky var`); no catalog entry, parameter or runner choice can
+// turn it on. It is then sized by admitUnifiedVllm, from a fresh snapshot,
+// and watched by the unified memory guard like every runner there.
 
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { admitVllm } from '../controller/admission.mjs';
+import { admissionResult, admitVllm } from '../controller/admission.mjs';
+import { admitUnifiedVllm } from '../controller/profiles.mjs';
 import {
+    ParamError,
     assertAbsolutePath,
     assertApiKey,
     assertPort,
@@ -17,6 +25,9 @@ import {
     recommendedFor,
     validateParams
 } from './params.mjs';
+
+export const VLLM_UNIFIED_SWITCH = 'LOCAL_LLM_VLLM_UNIFIED';
+const UNIFIED_SWITCH_VALUE = 'experimental';
 
 const ID = 'vllm';
 const PORT = 18082;
@@ -82,12 +93,49 @@ const paramSchema = deepFreeze({
     }
 });
 
-function normalizeParams(params = {}, { model } = {}) {
-    return validateParams(paramSchema, params, { defaults: recommendedFor(model, ID) });
+// Unified memory has one pool, so there is nothing to offload weights to.
+const { cpuOffloadGb: _offload, ...unifiedProperties } = paramSchema.properties;
+const unifiedParamSchema = deepFreeze({
+    ...paramSchema,
+    properties: {
+        ...unifiedProperties,
+        gpuMemoryUtilization: {
+            ...paramSchema.properties.gpuMemoryUtilization,
+            description: 'Share of the shared memory pool vLLM may use for weights and KV cache; empty takes what is free now, '
+                + 'keeping the host reserve and the floor (at most 0.9).',
+        },
+    },
+});
+
+const schemas = Object.freeze({ dedicated: paramSchema, unified: unifiedParamSchema });
+
+function paramSchemaFor(profile = 'dedicated') {
+    return schemas[profile] ?? null;
 }
 
-function describeContext(params = {}, { model } = {}) {
-    const { maxModelLen, maxNumSeqs } = normalizeParams(params, { model });
+function normalizeParams(params = {}, { model, profile = 'dedicated' } = {}) {
+    const schema = paramSchemaFor(profile);
+    if (!schema) throw new ParamError('(runner)', `vLLM has no parameters for the ${profile} profile`);
+    return validateParams(schema, params, { defaults: recommendedFor(model, ID, profile) });
+}
+
+// The operator's switch (DS004) for unified memory. On a dedicated GPU vLLM is
+// not gated. Before the profile is decided (null) it fails closed like
+// unified: the controller decides the profile at the first overview or Run.
+function enabled(env = {}, profile = 'dedicated') {
+    if (profile === 'dedicated' || env[VLLM_UNIFIED_SWITCH] === UNIFIED_SWITCH_VALUE) return { enabled: true, reason: null };
+    return {
+        enabled: false,
+        reason: profile === 'unified'
+            ? 'vLLM is experimental on unified memory and is not enabled on this deployment. The operator can turn it on with '
+                + `ploinky var ${VLLM_UNIFIED_SWITCH} ${UNIFIED_SWITCH_VALUE}; it has not been measured on this hardware.`
+            : 'The hardware profile is not decided yet; open the overview and try again. On unified memory vLLM also needs the '
+                + `operator's ${VLLM_UNIFIED_SWITCH}=${UNIFIED_SWITCH_VALUE}.`,
+    };
+}
+
+function describeContext(params = {}, { model, profile = 'dedicated' } = {}) {
+    const { maxModelLen, maxNumSeqs } = normalizeParams(params, { model, profile });
     // vLLM's paged KV pool is shared by all sequences; each may grow up to maxModelLen.
     return { totalContext: maxModelLen, perRequestContext: maxModelLen, parallel: maxNumSeqs, kvUnified: true };
 }
@@ -110,8 +158,9 @@ function assertModelId(model) {
     return model.id;
 }
 
-function buildLaunch({ runnerDir, artifactPath, params, port, apiKey, model, gpuMemoryUtilization, cacheDir, rpcDir = RPC_DIR } = {}) {
-    const values = normalizeParams(params, { model });
+function buildLaunch({ runnerDir, artifactPath, params, port, apiKey, model, gpuMemoryUtilization, cacheDir, rpcDir = RPC_DIR,
+    profile = 'dedicated' } = {}) {
+    const values = normalizeParams(params, { model, profile });
     const utilization = values.gpuMemoryUtilization ?? gpuMemoryUtilization;
     if (typeof utilization !== 'number' || !(utilization >= 0.1 && utilization <= 0.95)) {
         throw codedError('invalid_launch', 'gpuMemoryUtilization must come from the parameters or from admission', { field: 'gpuMemoryUtilization' });
@@ -199,6 +248,7 @@ async function start(ctx) {
         gpuMemoryUtilization: ctx.admission?.estimate?.gpuMemoryUtilization,
         cacheDir,
         rpcDir,
+        profile: ctx.profile,
     }));
     const base = `http://127.0.0.1:${ctx.port}`;
     await ctx.waitForHttp(`${base}/health`, { process });
@@ -235,6 +285,7 @@ const vllmRuntime = Object.freeze({
     port: PORT,
     apiKey: true,
     paramSchema,
+    paramSchemaFor,
     basicParams: Object.freeze(['maxModelLen', 'cpuOffloadGb']),
     moeParams: Object.freeze([]),
     normalizeParams,
@@ -243,7 +294,9 @@ const vllmRuntime = Object.freeze({
     buildLaunch,
     start,
     chatModel: (deployment) => deployment.modelId,
+    enabled,
     admit: admitVllm,
+    admitUnified: (input) => admitUnifiedVllm(input, admissionResult),
     parseReport,
 });
 

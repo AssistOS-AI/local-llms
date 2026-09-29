@@ -156,6 +156,23 @@
                     <span class="form-label">Ollama tag</span>
                     <input class="form-input" name="tag" placeholder="granite4:tiny-h">
                 </label>
+                <p class="settings-card-meta">Optional sizing data from the model card or GGUF metadata. Without it the memory estimate uses defaults and says which.</p>
+                <label class="local-llm-field">
+                    <span class="form-label">Context length (tokens)</span>
+                    <input class="form-input" name="contextLength" type="number" min="512" step="1" placeholder="262144">
+                </label>
+                <label class="local-llm-field">
+                    <span class="form-label">Layers</span>
+                    <input class="form-input" name="layers" type="number" min="1" max="1024" step="1" placeholder="40">
+                </label>
+                <label class="local-llm-field">
+                    <span class="form-label">KV cache bytes per token (f16)</span>
+                    <input class="form-input" name="kvBytesPerToken" type="number" min="1" step="1" placeholder="2 x layers x KV heads x head size x 2">
+                </label>
+                <label class="local-llm-field">
+                    <span class="form-label">Multi-token-prediction head</span>
+                    <input type="checkbox" name="mtp" value="true">
+                </label>
                 <div class="modal-actions local-llm-form-actions">
                     <button type="button" class="gray-button" data-local-action="cancelAddModel">Cancel</button>
                     <button type="submit" class="general-button">Add model</button>

@@ -1,7 +1,7 @@
 {
   "name": "local-llm",
-  "about": "Run open-weight LLMs on this workspace's GPU (x86: llama.cpp, ik_llama.cpp, Ollama, vLLM, TabbyAPI, LM Studio for internal use only; NVIDIA DGX Spark: llama.cpp on unified memory); weights download only on Run",
-  "description": "Runs open-source LLMs on this machine's GPU. On x86 hosts with a GPU of its own: llama.cpp, ik_llama.cpp or Ollama, and vLLM or TabbyAPI once an admin installs them. On NVIDIA DGX Spark (arm64, GB10, memory shared with the system): llama.cpp only, for models measured there, sized against the shared memory pool. LM Studio is proprietary and for internal use only: it stays off unless the deployment's operator sets ploinky var LOCAL_LLM_LMSTUDIO internal-use and restarts local-llm, and an admin must then accept its Terms to install it. Admins pick a model and a runner in Settings; weights download only when Run is pressed. Its manifest declares GPU access (containerSecurity.gpu); on the host, ploinky gpu revoke --agent local-llms/local-llm takes it away and ploinky gpu grant --agent local-llms/local-llm restores it.",
+  "about": "Run open-weight LLMs on this workspace's GPU (x86: llama.cpp, ik_llama.cpp, Ollama, vLLM, TabbyAPI, LM Studio for internal use only; NVIDIA DGX Spark: llama.cpp on unified memory, vLLM as an experimental opt-in); weights download only on Run",
+  "description": "Runs open-source LLMs on this machine's GPU. On x86 hosts with a GPU of its own: llama.cpp, ik_llama.cpp or Ollama, and vLLM or TabbyAPI once an admin installs them. On NVIDIA DGX Spark (arm64, GB10, memory shared with the system): llama.cpp, for the listed models and models added at run time, sized by estimate against the shared memory pool and watched by a memory guard; vLLM is experimental there and stays off unless the operator sets ploinky var LOCAL_LLM_VLLM_UNIFIED experimental and an admin installs it. LM Studio is proprietary and for internal use only: it stays off unless the deployment's operator sets ploinky var LOCAL_LLM_LMSTUDIO internal-use and restarts local-llm, and an admin must then accept its Terms to install it. Admins pick a model and a runner in Settings; weights download only when Run is pressed. Its manifest declares GPU access (containerSecurity.gpu); on the host, ploinky gpu revoke --agent local-llms/local-llm takes it away and ploinky gpu grant --agent local-llms/local-llm restores it.",
   "container": "docker.io/assistos/local-llm@sha256:b6c79af2aad08b542339346f4a985c84d5cbcacc31e8c6df45f951da7ba0fbf7",
   "agent": "exec node /code/src/main.mjs",
   "readiness": {
@@ -58,6 +58,9 @@
           "required": false
         },
         "LOCAL_LLM_RUNNER_TIMEOUT_MS": {
+          "required": false
+        },
+        "LOCAL_LLM_VLLM_UNIFIED": {
           "required": false
         }
       }

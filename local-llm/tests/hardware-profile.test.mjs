@@ -234,7 +234,9 @@ test('memory: MemFree and Cached are read for display; PSI full avg10 is read wh
 test('until a runner has a unified-memory policy, a unified GPU refuses it by name, never with a figure of 0', async () => {
     const { gpu } = await read({ [GPU_QUERY[0]]: GB10_LINE, [DEVICE_QUERY[0]]: GB10_DEVICE, [APPS_QUERY[0]]: '' });
     const snapshot = { gpu, memory: { totalBytes: 125442396 * 1024, availableBytes: 106 * GIB }, disk: { freeBytes: 132 * 1000 ** 3 } };
-    for (const runnerId of ['ik_llama.cpp', 'ollama', 'vllm']) {
+    // vLLM has an experimental unified policy behind the operator's switch
+    // (tests/runtime-models-unified.test.mjs); these have none.
+    for (const runnerId of ['ik_llama.cpp', 'ollama']) {
         const runner = getRunner(runnerId);
         const source = GPT.sources[runner.weightFormat];
         const decision = admit({ runner, model: GPT, source, params: runner.normalizeParams({}, { model: GPT }), snapshot });

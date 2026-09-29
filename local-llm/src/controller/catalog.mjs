@@ -299,8 +299,12 @@ export function validateModel(value, { seed = false } = {}) {
     // `seed` may come back from an earlier validation; it is never taken from input.
     onlyKeys(value, [
         'id', 'displayName', 'description', 'license', 'architecture', 'totalParams', 'activeParams',
-        'contextLength', 'requiresJinja', 'profiles', 'sources', 'memory', 'recommended', 'validated', 'unified', 'seed',
+        'contextLength', 'requiresJinja', 'mtp', 'profiles', 'sources', 'memory', 'recommended', 'validated', 'unified', 'seed',
     ], 'model');
+    // A capability of the weights (a multi-token-prediction head), not a
+    // measurement, so a user entry may declare it too. Without it, MTP is
+    // refused for the model (DS005).
+    if (value.mtp !== undefined && typeof value.mtp !== 'boolean') throw invalid('mtp must be true or false', 'mtp');
     if (typeof value.id !== 'string' || !ID_RE.test(value.id)) {
         throw invalid('id must be 2-64 lowercase letters, digits, dot, dash or underscore', 'id');
     }
@@ -324,6 +328,9 @@ export function validateModel(value, { seed = false } = {}) {
     }
     const recommended = validatePerProfile(value.recommended, 'recommended', (entry, field) => {
         if (!plainObject(entry)) throw invalid(`${field} must be an object of parameters`, field);
+        if (entry.mtp === true && value.mtp !== true) {
+            throw invalid(`${field}.mtp recommends MTP for a model that does not declare a multi-token-prediction head (mtp)`, `${field}.mtp`);
+        }
         return entry;
     });
     const validated = validatePerProfile(value.validated, 'validated', (entry, field) => optionalText(entry, field, 600));
@@ -338,6 +345,7 @@ export function validateModel(value, { seed = false } = {}) {
         activeParams: optionalText(value.activeParams, 'activeParams', 16),
         contextLength: optionalInteger(value.contextLength, 'contextLength', 512, 2 ** 22),
         requiresJinja: value.requiresJinja === true,
+        mtp: value.mtp === true,
         sources: Object.freeze(sources),
         memory: validateMemory(value.memory),
         profiles: Object.freeze([...profiles]),
@@ -381,7 +389,7 @@ const ENVELOPE_KEYS = Object.freeze(['runner', 'loadMode', 'maxCtx', 'maxParalle
  * parallel slots, each measured at its corner in one load mode, with the
  * deterministic buffer bytes llama.cpp logged there and the measured transient
  * margin beyond them. A mode measured separately is a rectangle of its own.
- * A model without an envelope is refused on unified memory.
+ * A model without an envelope, or parameters outside it, are sized by estimate.
  */
 function validateUnified(value) {
     if (value === undefined || value === null) return null;

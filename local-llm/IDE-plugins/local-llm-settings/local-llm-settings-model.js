@@ -235,9 +235,22 @@ export function paramsFromForm(fields, raw = {}) {
     return { params, errors };
 }
 
+// An optional number from the form: absent when empty; the integer when it is
+// one; otherwise the text as typed, so the controller's validation names the
+// field instead of the form dropping it.
+function optionalNumber(value) {
+    const text = String(value ?? '').trim();
+    if (!text) return undefined;
+    const number = Number(text);
+    return Number.isInteger(number) ? number : text;
+}
+
 /**
  * A user registry entry from the Add model form: one GGUF file from a
- * Hugging Face repository (the gguf format), or one Ollama library tag.
+ * Hugging Face repository (the gguf format), or one Ollama library tag, and
+ * the optional sizing data the memory estimate uses (contextLength,
+ * memory.layers, memory.kvBytesPerToken) and whether its weights have a
+ * multi-token-prediction head (mtp).
  */
 export function modelEntryFromForm(raw = {}) {
     const id = String(raw.id || '').trim().toLowerCase();
@@ -260,6 +273,16 @@ export function modelEntryFromForm(raw = {}) {
         if (quantization) source.quantization = quantization;
         entry.sources.gguf = source;
     }
+    const contextLength = optionalNumber(raw.contextLength);
+    if (contextLength !== undefined) entry.contextLength = contextLength;
+    // The weights' multi-token-prediction head, which MTP needs (a checkbox).
+    if (raw.mtp === true || raw.mtp === 'true' || raw.mtp === 'on') entry.mtp = true;
+    const memory = {};
+    const layers = optionalNumber(raw.layers);
+    if (layers !== undefined) memory.layers = layers;
+    const kvBytesPerToken = optionalNumber(raw.kvBytesPerToken);
+    if (kvBytesPerToken !== undefined) memory.kvBytesPerToken = kvBytesPerToken;
+    if (Object.keys(memory).length) entry.memory = memory;
     return entry;
 }
 

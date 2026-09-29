@@ -4,6 +4,8 @@
 // exactly as the agent would (download, verify, rebuild the runnable copy
 // offline), then checks it without a GPU:
 //   - every distribution in the lock's check has its pinned version;
+//   - the environment holds exactly the lock's wheels: every installed
+//     distribution is one of them at its version, and none is missing;
 //   - every module in check.imports imports; modules in check.gpuImports
 //     are tried and listed, since they may need the NVIDIA driver;
 //   - every shared object in the runnable copy resolves its libraries. A
@@ -96,6 +98,44 @@ export function classifyMissingLibraries({ missing, provided, optional = {} }) {
     return { unresolved, optional: optionalFound, providedByEnvironment: [...providedFound].sort() };
 }
 
+// PEP 503 names: runs of -, _ and . are one dash, case-insensitive.
+function canonicalName(name) {
+    return String(name).replace(/[-_.]+/g, '-').toLowerCase();
+}
+
+/** The distributions a python entry's wheels install: canonical name to version, from each wheel's file name. */
+export function lockedDistributions(entry) {
+    const locked = {};
+    for (const file of entry.files) {
+        if (!file.name.endsWith('.whl')) continue;
+        const [name, version] = file.name.slice(0, -'.whl'.length).split('-');
+        locked[canonicalName(name)] = version;
+    }
+    return locked;
+}
+
+/**
+ * Every installed distribution against the lock's wheels, not only the few
+ * named in check.distributions: one the lock does not name, one it names at
+ * another version, or a locked one that is not installed fails the check.
+ * `installed` maps each distribution's metadata name to its version.
+ */
+export function compareInstalledDistributions(entry, installed) {
+    const locked = lockedDistributions(entry);
+    const seen = {};
+    for (const [name, version] of Object.entries(installed)) seen[canonicalName(name)] = version;
+    const extra = Object.keys(seen).filter((name) => !Object.hasOwn(locked, name)).sort();
+    const missing = Object.keys(locked).filter((name) => !Object.hasOwn(seen, name)).sort();
+    const mismatched = Object.keys(locked).filter((name) => Object.hasOwn(seen, name) && seen[name] !== locked[name]).sort()
+        .map((name) => `${name} ${seen[name]} (lock ${locked[name]})`);
+    const problems = [
+        ...(extra.length ? [`installed but not in the lock: ${extra.join(', ')}`] : []),
+        ...(missing.length ? [`in the lock but not installed: ${missing.join(', ')}`] : []),
+        ...(mismatched.length ? [`installed at another version than the lock: ${mismatched.join(', ')}`] : []),
+    ];
+    return { locked: Object.keys(locked).length, installed: Object.keys(seen).length, extra, missing, mismatched, problems };
+}
+
 /** Each pinned data file (`into`) must be in the runnable copy with the lock's bytes. */
 export function checkDataFiles(entry, runDir) {
     const placed = {};
@@ -154,6 +194,15 @@ async function main() {
         report.distributions = versions.status === 0 ? JSON.parse(versions.stdout) : { error: versions.stderr.trim().split('\n').at(-1) };
         for (const [name, expected] of Object.entries(entry.check.distributions)) {
             if (report.distributions[name] !== expected) report.problems.push(`${name} is ${report.distributions[name] ?? 'missing'}, not ${expected}`);
+        }
+        const all = spawnSync(python, ['-c', 'import importlib.metadata as m, json; print(json.dumps({d.metadata["Name"]: d.version for d in m.distributions()}))'],
+            { encoding: 'utf8', timeout: IMPORT_TIMEOUT_MS, env: { PATH: '/usr/bin:/bin', HOME: '/tmp' } });
+        if (all.status === 0) {
+            report.installedDistributions = compareInstalledDistributions(entry, JSON.parse(all.stdout));
+            report.problems.push(...report.installedDistributions.problems);
+        } else {
+            report.installedDistributions = { error: all.stderr.trim().split('\n').at(-1) };
+            report.problems.push('the installed distributions could not be listed');
         }
         report.imports = {};
         for (const module of [...entry.check.imports, ...entry.check.gpuImports]) {

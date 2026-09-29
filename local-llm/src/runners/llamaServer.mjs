@@ -136,7 +136,7 @@ export const LLAMA_SERVER_UNIFIED_PARAM_SCHEMA = deepFreeze({
         mtp: {
             type: 'boolean', default: false,
             title: 'MTP speculative decoding',
-            description: 'Draft with the model\'s own multi-token-prediction head (--spec-type draft-mtp --spec-draft-n-max 3); only for models measured with it.'
+            description: 'Draft with the model\'s own multi-token-prediction head (--spec-type draft-mtp --spec-draft-n-max 3); only for models that have one. On by default where the catalog recommends it (Qwen3.6 MTP).'
         },
         threads: {
             type: ['integer', 'null'], minimum: 1, maximum: 256, default: null,
@@ -147,7 +147,7 @@ export const LLAMA_SERVER_UNIFIED_PARAM_SCHEMA = deepFreeze({
     }
 });
 
-const UNIFIED_BATCH = 2048;
+const UNIFIED_BATCH = UNIFIED.batchSize;
 
 function assertModelId(model) {
     if (typeof model?.id !== 'string' || model.id.length === 0) {
@@ -204,6 +204,12 @@ export function createLlamaServerRunner({
         const values = validateParams(schema, params, { defaults: recommendedFor(model, id, profile) });
         if (profile === 'dedicated' && values.ubatchSize > values.batchSize) {
             throw new ParamError('ubatchSize', `must be <= batchSize (${values.batchSize})`);
+        }
+        // An explicit value wins over a default, but cannot make an unsupported
+        // configuration valid: MTP needs weights with a prediction head.
+        if (values.mtp && model?.mtp !== true) {
+            throw new ParamError('mtp', `${model?.displayName || 'This model'} has no multi-token-prediction head (its entry does not declare mtp), `
+                + 'so MTP cannot be turned on; set mtp to false, or declare mtp in the model entry if its weights have one');
         }
         if (Number.isInteger(model?.contextLength) && values.ctxSize > model.contextLength * values.parallel) {
             throw new ParamError('ctxSize', `must be <= ${model.contextLength * values.parallel} (the model's training context of `

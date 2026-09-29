@@ -28,7 +28,7 @@ This specification defines how `local-llm` presents itself to Ploinky: the manif
 | `ideSettings` | key `local-llm-settings`, scope `workspace`, plugin `local-llm/local-llm-settings`, `adminOnly: true` | Settings → Agents → Local LLMs. The entry is a launcher: it opens the dashboard below and closes itself. |
 | IDE plugin `local-llm-tool-button` (found in `IDE-plugins/`, not a manifest field) | `file-exp:toolbar`, `locationOrder` 295, `adminOnly: true`, `toolbarModal` `{mode: "component", component: "local-llm-dashboard"}` | The toolbar button, placed after Soul Gateway's. It opens the WebSkel dashboard `local-llm-dashboard` in Explorer's full-screen panel, which has cards for GPU, RAM, disk and the running model, and tabs for Models, Playground and Logs. The dashboard uses Explorer's tokens only, so it follows Explorer's light and dark themes. |
 | `endpoints.chatCompletions` | `node /code/src/chatResponder.mjs`, `supportsStream: true` | The model's only consumer-facing surface |
-| `profiles.default.env` | `HF_TOKEN` and `LOCAL_LLM_LMSTUDIO`, both `required: false` with no default | `HF_TOKEN` authenticates Hugging Face downloads (DS002). `LOCAL_LLM_LMSTUDIO=internal-use` is the operator's switch for LM Studio (below); unset, LM Studio is off. |
+| `profiles.default.env` | `HF_TOKEN`, `LOCAL_LLM_LMSTUDIO`, `LOCAL_LLM_MAX_COMPLETION_TOKENS`, `LOCAL_LLM_RUNNER_TIMEOUT_MS` and `LOCAL_LLM_VLLM_UNIFIED`, all `required: false` with no default | `HF_TOKEN` authenticates Hugging Face downloads (DS002). `LOCAL_LLM_LMSTUDIO=internal-use` is the operator's switch for LM Studio (below); unset, LM Studio is off. `LOCAL_LLM_VLLM_UNIFIED=experimental` is the operator's switch for vLLM on unified memory (below); unset, vLLM is off there. |
 
 The manifest declares no other `containerSecurity` field (and needs a Ploinky that knows `shmSize`, from ploinky 9512fd30), no `llmRuntime` block (so no `runtimePolicy` device entry and no `llmRuntime.enabled`), and no published ports.
 
@@ -102,6 +102,10 @@ If AgentServer exits on its own, the controller stops the runner and exits non-z
 ### LM Studio
 
 LM Studio (DS000, DS004) is for internal use only, and off unless the operator sets `LOCAL_LLM_LMSTUDIO=internal-use`. While it is off, `local_llm_runner_install` and `local_llm_run` refuse it with `runner_disabled`, and `local_llm_overview` reports `enabled: false` with the reason. Changing the switch needs a restart of local-llm, because the environment is read when the container starts. On this platform an Explorer admin can set it too, through the admin-only WebTTY Box shell, so the switch prevents accidental use; it does not keep admins out.
+
+### vLLM on unified memory
+
+vLLM on a GPU that shares system memory (DS005) is experimental and off unless the operator sets `LOCAL_LLM_VLLM_UNIFIED=experimental` (`ploinky var LOCAL_LLM_VLLM_UNIFIED experimental`, then a restart of local-llm). While it is off there, `local_llm_runner_install` and `local_llm_run` refuse vLLM with `runner_disabled`, and `local_llm_overview` reports `enabled: false` with the reason; a dedicated GPU is not affected. No model entry, parameter or saved value can turn it on. Like the LM Studio switch it prevents accidental use; admins who can reach the Box shell can set it.
 
 | Topic | Rule |
 | --- | --- |

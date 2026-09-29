@@ -54,7 +54,11 @@ function llamaWeightSplit(model, size, params) {
     return { gpuWeights, cpuWeights: Math.max(0, size - gpuWeights), profiled };
 }
 
-function computeBufferBytes(params) {
+// Shared with the unified estimates (profiles.mjs), which reuse these
+// formulas and defaults rather than inventing constants of their own.
+export { DEFAULT_KV_BYTES_PER_TOKEN, DEFAULT_LAYERS };
+
+export function computeBufferBytes(params) {
     const ubatch = params.ubatchSize || 512;
     if (params.flashAttn === 'off') {
         // Measured: 2,146 MiB at 16k context and a 512 ubatch without flash attention.
@@ -211,6 +215,9 @@ const VLLM_RUNNER_RAM_BYTES = 3 * GIB;
 // 3 GiB, 13.0 GiB) admitted that. Two runs on one machine, so the estimate is
 // (1.81 x offload + 3.0 GiB) x 1.15, an offload run must leave max(4 GiB,
 // 10 % of RAM) available, and the controller's memory guard is the backstop.
+// The experimental unified vLLM policy (profiles.mjs) reuses the share cap and
+// the runner's resident RAM; on GB10 both are unmeasured.
+export { VLLM_MAX_UTILIZATION, VLLM_RUNNER_RAM_BYTES };
 const VLLM_OFFLOAD_RAM_FACTOR = 1.81;
 const VLLM_OFFLOAD_RESIDENT_BYTES = 3 * GIB;
 const VLLM_OFFLOAD_RAM_MARGIN = 1.15;

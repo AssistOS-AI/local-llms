@@ -416,8 +416,10 @@ export function createController({
     // Whether this deployment allows the runner at all (LM Studio, internal
     // use only: an environment switch the operator sets with `ploinky var`;
     // DS001 says who else can). Runners without a switch are always enabled.
+    // A switch may depend on the committed hardware profile (vLLM on unified
+    // memory, DS005); null means not decided yet.
     function gateOf(definition) {
-        const gate = typeof definition.enabled === 'function' ? definition.enabled(env) : null;
+        const gate = typeof definition.enabled === 'function' ? definition.enabled(env, profile ?? null) : null;
         return gate && gate.enabled === false
             ? { enabled: false, reason: gate.reason || `${definition.displayName} is not enabled on this deployment.` }
             : { enabled: true, reason: null };
@@ -1518,6 +1520,8 @@ export function createController({
             if (!installable(runnerId)) {
                 throw new LocalLlmError('not_installable', `No installable runner '${String(runnerId)}' in this image's runner lock.`);
             }
+            // A switch may depend on the profile (vLLM on unified memory): decide it first if a snapshot can.
+            await currentProfile();
             assertEnabled(getRunner(runnerId));
             if (draining) throw new LocalLlmError('shutting_down', 'The agent is restarting; install again once it is back.');
             const entry = installer.entryFor(runnerId);

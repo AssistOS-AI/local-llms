@@ -366,12 +366,13 @@ test('a user alias of a trusted seed\'s file does not inherit its envelope; the 
     const overview = await h.controller.overview();
     const rows = Object.fromEntries(overview.models.map((entry) => [entry.id, entry.runners['llama.cpp'].admission]));
     assert.equal(rows['seed-moe'].status, 'ok', rows['seed-moe'].reason);
-    assert.equal(rows['alias-moe'].status, 'incompatible');
-    assert.match(rows['alias-moe'].reason, /alias-moe has not been measured on unified memory with llama\.cpp/);
-    await assert.rejects(() => h.controller.run({ requestId: 'request-alias-01', modelId: 'alias-moe', runnerId: 'llama.cpp' }),
-        { code: 'admission_incompatible' });
-    assert.equal(h.started.length, 0);
-    assert.equal(h.calls.download, 0);
+    assert.equal(rows['seed-moe'].estimate.envelope.loadMode, 'dio');
+    // Since the owner's 2026-09-29 decision an unmeasured model runs by estimate; the alias still never borrows the seed's envelope.
+    assert.equal(rows['alias-moe'].status, 'ok', rows['alias-moe'].reason);
+    assert.equal(rows['alias-moe'].estimate.envelope, null);
+    assert.equal(rows['alias-moe'].estimate.measured, false);
+    assert.notEqual(rows['alias-moe'].estimate.unifiedBytes, rows['seed-moe'].estimate.unifiedBytes);
+    assert.match(rows['alias-moe'].warnings[0], /^Not measured on unified memory/);
 });
 
 test('the operator catalog (LOCAL_LLM_CATALOG_FILE) is trusted: its envelope and labels are kept and admit', async (t) => {
@@ -449,14 +450,15 @@ function decide(model, params) {
     });
 }
 
-test('an envelope measured with dio only refuses none, naming the load mode', () => {
+test('an envelope measured with dio does not stand in for none, which is sized by estimate and says why', () => {
     const model = trustedModel();
     const dio = decide(model, { loadMode: 'dio' });
     assert.equal(dio.status, 'ok', dio.reason);
     assert.equal(dio.estimate.envelope.loadMode, 'dio');
     const none = decide(model, { loadMode: 'none' });
-    assert.equal(none.status, 'incompatible');
-    assert.match(none.reason, /only up to context 131072 x 4 slots with load mode dio; context 32768 x 1 slot with load mode none is outside it/);
+    assert.equal(none.status, 'ok', none.reason);
+    assert.equal(none.estimate.envelope, null);
+    assert.match(none.warnings[0], /^Outside the catalog's measured envelope \(context 131072 x 4 slots with load mode dio\): context 32768 x 1 slot with load mode none is sized by estimate/);
     assert.equal(envelopeFor(model, 'llama.cpp', { ctxSize: 512, parallel: 1, mtp: false, loadMode: 'none' }), null);
     assert.equal(envelopeFor(model, 'llama.cpp', { ctxSize: 512, parallel: 1, mtp: false }), null, 'no mode is no match');
 });
@@ -472,18 +474,22 @@ test('modes measured separately are rectangles of their own, each admitting only
     assert.equal(byMode.dio.estimate.unifiedBytes, unifiedNeed(dio));
     assert.equal(byMode.none.estimate.unifiedBytes, unifiedNeed(none));
     assert.notEqual(byMode.dio.estimate.unifiedBytes, byMode.none.estimate.unifiedBytes);
-    // Each rectangle bounds only its own mode: dio was measured only up to 64k.
-    assert.equal(decide(model, { loadMode: 'dio', ctxSize: 131072 }).status, 'incompatible');
-    assert.equal(decide(model, { loadMode: 'none', ctxSize: 131072 }).status, 'ok');
+    // Each rectangle bounds only its own mode: dio was measured only up to 64k, so 128k dio is an estimate, never the none figures.
+    const dioBeyond = decide(model, { loadMode: 'dio', ctxSize: 131072 });
+    assert.equal(dioBeyond.status, 'ok', dioBeyond.reason);
+    assert.equal(dioBeyond.estimate.envelope, null);
+    assert.equal(decide(model, { loadMode: 'none', ctxSize: 131072 }).estimate.envelope.loadMode, 'none');
 });
 
-test('a Run asking for an unmeasured load mode is refused before anything is downloaded', async (t) => {
+test('a Run in a load mode no rectangle covers is sized by estimate and launched in that mode', async (t) => {
     const model = trustedModel();
     const h = harness(t, { seed: [model], snap: () => unifiedSnap() });
-    await assert.rejects(() => h.controller.run({ requestId: 'request-none-01', modelId: model.id, runnerId: 'llama.cpp', params: { loadMode: 'none' } }),
-        (error) => error.code === 'admission_incompatible' && /with load mode none is outside it/.test(error.message));
-    assert.equal(h.calls.download, 0);
-    assert.equal(h.started.length, 0);
+    await h.controller.run({ requestId: 'request-none-01', modelId: model.id, runnerId: 'llama.cpp', params: { loadMode: 'none' } });
+    await until(() => h.controller.state.deployment?.phase === 'ready', 'ready');
+    const { args } = h.started[0];
+    assert.equal(args[args.indexOf('--load-mode') + 1], 'none');
+    assert.equal(h.controller.state.deployment.admission.estimate.envelope, null);
+    assert.equal(h.controller.state.deployment.admission.estimate.measured, false);
 });
 
 test('the envelope\'s load modes are exactly the unified parameter\'s, in the validator and the published schema', () => {

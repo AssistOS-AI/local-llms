@@ -147,6 +147,6 @@ test('the unified seed lists the models measured or to be measured on DGX Spark,
     // Qwen3.5-122B-A10B is a split GGUF: three shards, 74.7 GB together.
     assert.equal(byId['qwen3.5-122b-a10b'].sources.gguf.shards.length, 3);
     assert.equal(byId['qwen3.5-122b-a10b'].sources.gguf.size, 74664408608);
-    // Listed models without a measured envelope are refused on unified memory until measured.
+    // Listed models carry no measured envelope; on unified memory they are sized by estimate (DS005).
     for (const id of ['qwen3-coder-30b-a3b', 'glm-4.7-flash', 'qwen3.5-122b-a10b']) assert.equal(byId[id].unified, null, id);
 });

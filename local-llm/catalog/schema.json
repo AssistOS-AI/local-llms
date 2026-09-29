@@ -66,6 +66,10 @@
         "requiresJinja": {
           "type": "boolean"
         },
+        "mtp": {
+          "type": "boolean",
+          "description": "The weights carry a multi-token-prediction head, so MTP speculative decoding can be turned on (DS005). A capability, not a measurement; without it MTP is refused."
+        },
         "sources": {
           "type": "object",
           "minProperties": 1,
@@ -175,7 +179,7 @@
           "required": [
             "envelope"
           ],
-          "description": "The unified profile's measured envelope (DS005). A model without one is refused on unified memory. Seed entries only.",
+          "description": "The unified profile's measured envelope (DS005). Parameters inside a rectangle are sized from it; a model without one, or parameters outside it, are sized by estimate. Seed entries only.",
           "properties": {
             "envelope": {
               "type": "array",
