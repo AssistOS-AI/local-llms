@@ -9,6 +9,7 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 
+import { controllerHandlers } from './controlHandlers.mjs';
 import { newControlChannel, startControlServer } from './controlSocket.mjs';
 import { createController } from './controller/deployments.mjs';
 import { AGENT_SERVER_KILL_MS, DRAIN_DEADLINE_MS } from './drainBudget.mjs';
@@ -81,21 +82,7 @@ const startup = (async () => {
     control = await startControlServer({
         socketPath,
         token: channel.token,
-        handlers: {
-            overview: (args) => controller.overview(args),
-            status: (args) => controller.status(args),
-            run: (args) => controller.run(args),
-            stop: () => controller.stop(),
-            cancelDownload: () => controller.cancelDownload(),
-            deleteWeights: (args) => controller.deleteWeights(args),
-            addModel: (args) => controller.addModel(args.model),
-            updateModel: (args) => controller.updateModel(args.model),
-            removeModel: (args) => controller.removeModel(args),
-            installRunner: (args) => controller.installRunner(args),
-            uninstallRunner: (args) => controller.uninstallRunner(args),
-            chatTarget: () => controller.chatTarget(),
-            recordCompletion: (args) => controller.recordCompletion(args),
-        },
+        handlers: controllerHandlers(controller),
     });
     if (stopping) return;
     // The generic runtime owns MCP, invocation verification and tool dispatch.

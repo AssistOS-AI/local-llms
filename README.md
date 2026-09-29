@@ -3,9 +3,9 @@
 Ploinky repository with one agent, [`local-llm`](local-llm/), which runs open-weight large language models on the machine's NVIDIA GPU and serves them to the workspace's other agents through the local Soul Gateway (`soul_gateway/local-llms/local-llm/default`).
 
 - **x86 hosts with a GPU of their own:** llama.cpp, ik_llama.cpp and Ollama in the image; vLLM and TabbyAPI installed on demand; LM Studio for internal use only, behind an operator switch.
-- **NVIDIA DGX Spark** (arm64, GB10, memory shared with the system): llama.cpp, for models measured there, sized against the shared memory pool.
+- **NVIDIA DGX Spark** (arm64, GB10, memory shared with the system): llama.cpp for the listed models and models added at run time, sized by a labelled estimate against the shared memory pool, with a memory guard; no per-model benchmark is needed. vLLM is experimental there, installed on demand only after the operator sets `LOCAL_LLM_VLLM_UNIFIED=experimental`.
 
-Admins pick a model and a runner in Settings > Agents > Local LLMs. Weights download only when Run is pressed, pinned by commit, size and sha256. Admission says before anything downloads whether a model and its parameters fit.
+Admins pick a model and a runner in Settings > Agents > Local LLMs, and can add a model at run time (a Hugging Face GGUF file or an Ollama tag). Weights download only when Run is pressed, pinned by commit, size and sha256. Admission says before anything downloads whether a model and its parameters fit.
 
 The image is built in [`container-image-builds/images/local-llm`](https://github.com/AssistOS-AI/container-image-builds/tree/main/images/local-llm) as one multi-arch index (amd64 and arm64).
 

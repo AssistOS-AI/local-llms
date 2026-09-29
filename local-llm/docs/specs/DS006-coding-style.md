@@ -31,6 +31,7 @@ local-llms/
     manifest.json, mcp-config.json, package.json
     catalog/models.json, catalog/schema.json      seed catalog (DS002)
     src/main.mjs                                  controller process and AgentServer (DS001)
+    src/controlHandlers.mjs                       the control socket's operations on the controller (DS001)
     src/controller/                               state, admission, profiles, downloads, runner processes
     src/runners/                                  one adapter per runner
     tools/                                        MCP tool entry points and the CI install check

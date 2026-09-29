@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { controllerHandlers } from '../src/controlHandlers.mjs';
 import { admit, computeBufferBytes, DEFAULT_KV_BYTES_PER_TOKEN, VLLM_RUNNER_RAM_BYTES } from '../src/controller/admission.mjs';
 import { loadSeedCatalog, validateModel } from '../src/controller/catalog.mjs';
 import { createController } from '../src/controller/deployments.mjs';
@@ -19,6 +20,7 @@ import { UNIFIED, estimateUnifiedLlamaServer } from '../src/controller/profiles.
 import { createStateStore } from '../src/controller/stateStore.mjs';
 import { llamaCppRunner } from '../src/runners/llamaCpp.mjs';
 import { VLLM_UNIFIED_SWITCH, vllmRunner } from '../src/runners/vllm.mjs';
+import { TOOL_OPERATIONS, handleTool } from '../tools/local_llm_tool.mjs';
 import { compareInstalledDistributions, lockedDistributions } from '../tools/runner_install_check.mjs';
 import { modelEntryFromForm } from '../IDE-plugins/local-llm-settings/local-llm-settings-model.js';
 
@@ -312,6 +314,41 @@ test('an added model that does not fit now is refused before anything downloads;
     const never = await previewOf(enormous, { modelId: 'user-enormous', runnerId: 'llama.cpp' });
     assert.equal(never.admission.status, 'incompatible');
     assert.match(never.admission.reason, /must keep 16\.0 GiB for the host/);
+});
+
+test('the admin tools add a model at run time and plan and start its Run through the operations the agent serves', async (t) => {
+    const h = harness(t);
+    // main.mjs serves controllerHandlers(controller) on the control socket; each tool maps its input onto one operation.
+    const handlers = controllerHandlers(h.controller);
+    for (const { op } of Object.values(TOOL_OPERATIONS)) assert.equal(typeof handlers[op], 'function', op);
+    const ops = [];
+    // The socket carries JSON both ways; so does this stand-in.
+    const call = async (op, args) => {
+        ops.push(op);
+        return JSON.parse(JSON.stringify(await handlers[op](JSON.parse(JSON.stringify(args)))));
+    };
+    const admin = { user: { roles: ['admin'], email: 'admin@example.com' } };
+    const tool = (name, input, authInfo = admin) => handleTool(name, input, { authInfo, call });
+    await assert.rejects(tool('local_llm_model_add', { model: structuredClone(ADDED) }, { user: { roles: ['user'] } }),
+        (error) => error.code === 'admin_required');
+    assert.deepEqual(ops, [], 'refused before any operation');
+    const added = await tool('local_llm_model_add', { model: structuredClone(ADDED) });
+    assert.equal(added.model.id, 'user-moe');
+    assert.equal(added.model.sources.gguf.commit, 'c'.repeat(40));
+    const listed = (await tool('local_llm_overview', {})).models.find((entry) => entry.id === 'user-moe');
+    assert.equal(listed.runners['llama.cpp'].admission.status, 'ok');
+    assert.equal(listed.runners['llama.cpp'].admission.estimate.measured, false);
+    const { preview } = await tool('local_llm_overview', { preview: { modelId: 'user-moe', runnerId: 'llama.cpp', params: { ctxSize: 16384 } } });
+    assert.equal(preview.params.ctxSize, 16384, 'explicit parameters win');
+    assert.equal(preview.admission.status, 'ok');
+    const run = await tool('local_llm_run', { requestId: 'request-tool-01', modelId: 'user-moe', runnerId: 'llama.cpp', params: { ctxSize: 16384 } });
+    assert.equal(run.accepted, true);
+    await until(() => h.controller.state.deployment?.phase === 'ready', 'ready');
+    assert.equal(valueOf(h.started[0].args, '--ctx-size'), '16384');
+    const status = await tool('local_llm_status', {});
+    assert.equal(status.deployment.modelId, 'user-moe');
+    await tool('local_llm_stop', {});
+    assert.deepEqual(ops, ['addModel', 'overview', 'overview', 'run', 'status', 'stop']);
 });
 
 test('user sizing can lower only the KV and MTP terms, and every run it lowers says the memory guard is then the only backstop', async (t) => {
