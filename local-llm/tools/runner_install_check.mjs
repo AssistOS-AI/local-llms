@@ -117,23 +117,35 @@ export function lockedDistributions(entry) {
 /**
  * Every installed distribution against the lock's wheels, not only the few
  * named in check.distributions: one the lock does not name, one it names at
- * another version, or a locked one that is not installed fails the check.
- * `installed` maps each distribution's metadata name to its version.
+ * another version, a locked one that is not installed, or one canonical name
+ * installed more than once (a stale copy beside the locked one) fails the
+ * check. `installed` lists each distribution's metadata name and version, as
+ * [name, version] pairs (or an object of them); duplicates are kept.
  */
 export function compareInstalledDistributions(entry, installed) {
     const locked = lockedDistributions(entry);
+    const pairs = Array.isArray(installed) ? installed : Object.entries(installed);
     const seen = {};
-    for (const [name, version] of Object.entries(installed)) seen[canonicalName(name)] = version;
+    const copies = {};
+    for (const [name, version] of pairs) {
+        const canonical = canonicalName(name);
+        (copies[canonical] ||= []).push(`${name} ${version}`);
+        seen[canonical] = version;
+    }
+    const duplicated = Object.keys(copies).filter((name) => copies[name].length > 1).sort()
+        .map((name) => `${name} (${copies[name].join(', ')})`);
     const extra = Object.keys(seen).filter((name) => !Object.hasOwn(locked, name)).sort();
     const missing = Object.keys(locked).filter((name) => !Object.hasOwn(seen, name)).sort();
-    const mismatched = Object.keys(locked).filter((name) => Object.hasOwn(seen, name) && seen[name] !== locked[name]).sort()
+    const mismatched = Object.keys(locked)
+        .filter((name) => Object.hasOwn(seen, name) && copies[name].length === 1 && seen[name] !== locked[name]).sort()
         .map((name) => `${name} ${seen[name]} (lock ${locked[name]})`);
     const problems = [
+        ...(duplicated.length ? [`installed more than once under one name: ${duplicated.join('; ')}`] : []),
         ...(extra.length ? [`installed but not in the lock: ${extra.join(', ')}`] : []),
         ...(missing.length ? [`in the lock but not installed: ${missing.join(', ')}`] : []),
         ...(mismatched.length ? [`installed at another version than the lock: ${mismatched.join(', ')}`] : []),
     ];
-    return { locked: Object.keys(locked).length, installed: Object.keys(seen).length, extra, missing, mismatched, problems };
+    return { locked: Object.keys(locked).length, installed: pairs.length, duplicated, extra, missing, mismatched, problems };
 }
 
 /** Each pinned data file (`into`) must be in the runnable copy with the lock's bytes. */
@@ -195,7 +207,7 @@ async function main() {
         for (const [name, expected] of Object.entries(entry.check.distributions)) {
             if (report.distributions[name] !== expected) report.problems.push(`${name} is ${report.distributions[name] ?? 'missing'}, not ${expected}`);
         }
-        const all = spawnSync(python, ['-c', 'import importlib.metadata as m, json; print(json.dumps({d.metadata["Name"]: d.version for d in m.distributions()}))'],
+        const all = spawnSync(python, ['-c', 'import importlib.metadata as m, json; print(json.dumps([[d.metadata["Name"], d.version] for d in m.distributions()]))'],
             { encoding: 'utf8', timeout: IMPORT_TIMEOUT_MS, env: { PATH: '/usr/bin:/bin', HOME: '/tmp' } });
         if (all.status === 0) {
             report.installedDistributions = compareInstalledDistributions(entry, JSON.parse(all.stdout));

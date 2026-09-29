@@ -175,6 +175,8 @@ export function createController({
     profile: fixedProfile = null,
     // What the image contains; null (no source.contract) makes every runner available.
     imageContract = readImageContract(),
+    // The CPU architecture this process runs on (tests may choose it).
+    hostArch = process.arch,
     fileExists = (file) => fs.existsSync(file),
     dropCache = dropPageCache,
     // The workspace's shared model directory (C12, DS002): Ploinky mounts
@@ -339,11 +341,14 @@ export function createController({
         return mergeCatalog(seedCatalog, state.registry).filter((model) => model.profiles.includes(current));
     }
 
-    // Whether this image could ever run on unified memory (DS005): the arm64
-    // image says `architecture=arm64` in its source.contract; the amd64 image
-    // has no architecture line and only ever serves GPUs of its own. Without a
-    // contract (tests, development) it is not known, so it counts as possible.
-    const unifiedPossible = !imageContract || imageContract.architecture === 'arm64';
+    // Whether this image could ever run on unified memory (DS005). Only positive
+    // evidence of the amd64 image rules it out: a source.contract that does not
+    // say `architecture=arm64` and either names ik_llama.cpp (built only into
+    // the amd64 image) or runs on an x64 CPU. No contract (tests, development),
+    // or an empty, malformed or architecture-less one on arm64, counts as possible.
+    const amd64Only = Boolean(imageContract) && imageContract.architecture !== 'arm64'
+        && (Object.hasOwn(imageContract, 'ik_llama_cpp') || hostArch === 'x64');
+    const unifiedPossible = !amd64Only;
 
     // Whether this image can run a runner at all (DS005): its executable is in
     // the image, or the image's runner lock lists it. Without a source.contract

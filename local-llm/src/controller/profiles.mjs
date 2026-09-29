@@ -122,9 +122,15 @@ function userSizing(model, fields) {
     });
 }
 
-function userSizingWarning(fields) {
-    return `Sized with ${fields.join(', ')} from the model entry added at run time. Nothing checks these against the weights: `
-        + 'an understated value makes the estimate too small, and then only the memory guard stands behind the run.';
+// llama-server's need grows with the KV and MTP terms; vLLM's need is its share
+// plus its runner RAM, so there these fields only decide whether the model is
+// judged to fit the share.
+function userSizingWarning(fields, runner = 'llama-server') {
+    const prefix = `Sized with ${fields.join(', ')} from the model entry added at run time. Nothing checks these against the weights: `;
+    return runner === 'vllm'
+        ? `${prefix}an understated value only loosens the check that the weights and KV cache fit vLLM's share, so vLLM may fail `
+            + 'to start; its memory need (the share plus its runner RAM) does not depend on it.'
+        : `${prefix}an understated value makes the estimate too small, and then only the memory guard stands behind the run.`;
 }
 
 // Honest about what a default can miss (the defaults are DS003's).
@@ -183,7 +189,8 @@ export function estimateUnifiedLlamaServer({ model, source, params, memory: host
         userSizing: userSizing(model, ['memory.kvBytesPerToken', 'memory.fixedKvBytes', ...(params.mtp ? ['memory.layers'] : [])]),
         basis: `estimate, not measured on this machine: pinned weight size, f16 KV cache for ctxSize at ${kvPerToken} bytes per token `
             + `(${defaulted.includes('memory.kvBytesPerToken') ? 'a default: the entry has no memory.kvBytesPerToken' : `from ${from}`}), `
-            + `compute buffers${params.mtp ? ', an MTP draft context' : ''}, runtime and the prompt cache bound`,
+            + `compute buffers${params.mtp ? ', an MTP draft context' : ''}, runtime and the prompt cache bound`
+            + (defaulted.length ? `; defaults used for ${defaulted.join(', ')}` : ''),
     };
 }
 
@@ -266,7 +273,7 @@ export function admitUnifiedVllm({ model, source, params, memory, disk, remainin
     const warnings = ['Experimental: vLLM has not been measured on unified memory. Its share and its RAM beyond it are estimates, '
         + `and the memory guard stops it at once if available memory falls below ${gib(UNIFIED.floorBytes)}.`];
     if (defaulted.length) warnings.push(defaultedWarning(defaulted));
-    if (sizing.length) warnings.push(userSizingWarning(sizing));
+    if (sizing.length) warnings.push(userSizingWarning(sizing, 'vllm'));
     const base = {
         weightsBytes, kvBytes, overheadBytes: VLLM_OVERHEAD_BYTES, runnerRamBytes: VLLM_RUNNER_RAM_BYTES, floorBytes: UNIFIED.floorBytes,
         hostReserveBytes: UNIFIED.hostReserveBytes, poolBytes: memory.totalBytes ?? null, envelope: null, measured: false,

@@ -13,7 +13,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { controllerHandlers } from '../src/controlHandlers.mjs';
-import { admit, computeBufferBytes, DEFAULT_KV_BYTES_PER_TOKEN, VLLM_RUNNER_RAM_BYTES } from '../src/controller/admission.mjs';
+import { admit, computeBufferBytes, DEFAULT_KV_BYTES_PER_TOKEN, VLLM_OVERHEAD_BYTES, VLLM_RUNNER_RAM_BYTES } from '../src/controller/admission.mjs';
 import { loadSeedCatalog, validateModel } from '../src/controller/catalog.mjs';
 import { createController } from '../src/controller/deployments.mjs';
 import { UNIFIED, estimateUnifiedLlamaServer } from '../src/controller/profiles.mjs';
@@ -63,9 +63,9 @@ async function previewOf(h, request) {
 }
 
 /** A unified-memory controller; `dataDir` lets a second controller reload the first one's state. */
-function harness(t, { seed = SEED, available = () => 100 * GIB, env = {}, dataDir, installer, resolveHf, snapshot = null, imageContract = null } = {}) {
+function harness(t, { seed = SEED, available = () => 100 * GIB, env = {}, dataDir, installer, resolveHf, snapshot = null, imageContract = null,
+    hostArch = 'arm64' } = {}) {
     const dir = dataDir || fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-runtime-models-'));
-    if (!dataDir) t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
     const weights = path.join(dir, 'weights.gguf');
     fs.writeFileSync(weights, 'x');
     const started = [];
@@ -85,6 +85,7 @@ function harness(t, { seed = SEED, available = () => 100 * GIB, env = {}, dataDi
         resolveHf: resolveHf || (async () => { calls.resolveHf += 1; return { commit: 'c'.repeat(40), size: 20 * GIB, sha256: 'd'.repeat(64) }; }),
         sharedModelsRoot: null,
         imageContract,
+        hostArch,
         installer: installer || { installable: () => false },
         shmDir: path.join(dir, 'shm'),
         detectRunner: (runner) => ({ installed: runner.supported, version: runner.pinnedVersion, reason: null }),
@@ -110,8 +111,26 @@ function harness(t, { seed = SEED, available = () => 100 * GIB, env = {}, dataDi
         unifiedGuardMs: 5,
         dropCache: () => true,
     });
-    t.after(() => controller.drain());
+    cleanupAfter(t, controller, dataDir ? null : dir);
     return { controller, started, calls, dataDir: dir };
+}
+
+// One cleanup per test: every controller of the test drains (and saves its
+// state) before any of the test's directories is removed, so no drain can
+// recreate a directory that was already removed.
+const cleanups = new WeakMap();
+function cleanupAfter(t, controller, dir) {
+    let entry = cleanups.get(t);
+    if (!entry) {
+        entry = { controllers: [], dirs: [] };
+        cleanups.set(t, entry);
+        t.after(async () => {
+            for (const each of entry.controllers) await each.drain().catch(() => {});
+            for (const each of entry.dirs) fs.rmSync(each, { recursive: true, force: true });
+        });
+    }
+    entry.controllers.push(controller);
+    if (dir) entry.dirs.push(dir);
 }
 
 const valueOf = (args, flag) => args[args.indexOf(flag) + 1];
@@ -425,8 +444,18 @@ test('an added model without sizing data runs by estimate with named defaults; o
 });
 
 test('the Add model form carries the optional sizing data and the MTP head; malformed numbers reach validation', () => {
+    // What the dashboard's Add model form sends: its inputs' names, and the MTP checkbox's value when it is checked.
+    const html = fs.readFileSync(new URL('../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard.html',
+        import.meta.url), 'utf8');
+    const inputs = [...html.matchAll(/<input\b[^>]*>/g)].map(([tag]) => ({
+        name: /\bname="([^"]+)"/.exec(tag)?.[1], type: /\btype="([^"]+)"/.exec(tag)?.[1], value: /\bvalue="([^"]*)"/.exec(tag)?.[1] }));
+    for (const name of ['contextLength', 'layers', 'kvBytesPerToken']) {
+        assert.equal(inputs.filter((input) => input.name === name && input.type === 'number').length, 1, name);
+    }
+    const mtpInputs = inputs.filter((input) => input.name === 'mtp');
+    assert.deepEqual(mtpInputs, [{ name: 'mtp', type: 'checkbox', value: 'true' }]);
     const base = { id: 'Form-Model', sourceKind: 'huggingface', repo: 'u/m', file: 'm.gguf' };
-    const full = modelEntryFromForm({ ...base, contextLength: '65536', layers: '40', kvBytesPerToken: '40960', mtp: 'on' });
+    const full = modelEntryFromForm({ ...base, contextLength: '65536', layers: '40', kvBytesPerToken: '40960', mtp: mtpInputs[0].value });
     assert.equal(full.contextLength, 65536);
     assert.deepEqual(full.memory, { layers: 40, kvBytesPerToken: 40960 });
     assert.equal(full.mtp, true);
@@ -453,37 +482,63 @@ function vllmInstaller(runDir) {
     };
 }
 
-// The source.contract of each published image (container-image-builds): amd64 has no architecture line.
-const AMD64_CONTRACT = Object.freeze({ llama_cpp: 'b11159', llama_cpp_cuda: '12.8', ollama: '0.34.4', uv: '0.12.18' });
-const ARM64_CONTRACT = Object.freeze({ architecture: 'arm64', llama_cpp: 'b11159', llama_cpp_cuda: '13.4', gpu_compute_capabilities: '12.1', uv: '0.12.18' });
+// The source.contract each published image writes (container-image-builds Dockerfile and Dockerfile.arm64): the
+// amd64 one has no architecture line and names ik_llama.cpp, which only it builds.
+const AMD64_CONTRACT = Object.freeze({ llama_cpp: 'b11159', llama_cpp_cuda: '12.8', ollama: '0.34.4', ik_llama_cpp: '20f7a72',
+    ik_llama_cpp_cuda: '12.8', uv: '0.12.18', lmstudio_sdk: '1.5.0' });
+const ARM64_CONTRACT = Object.freeze({ architecture: 'arm64', llama_cpp: 'b11159', llama_cpp_cuda: '13.4', llama_cpp_build: 'release',
+    gpu_compute_capabilities: '12.1', uv: '0.12.18' });
 const GPU_UNREADABLE = () => ({ gpu: { available: false, reason: 'nvidia-smi failed: the GPU grant was revoked' },
     memory: { totalBytes: 32 * GIB, availableBytes: 28 * GIB }, disk: { freeBytes: 400 * GIB }, cpus: 16 });
+// A readable arm64 GPU with memory of its own (GH200-like) and a readable GB10.
+const GH200_LIKE = () => ({ gpu: { available: true, name: 'NVIDIA GH200', memoryModel: 'dedicated', totalBytes: 96 * GIB, freeBytes: 95 * GIB,
+    usedBytes: GIB, processes: [], device: { computeCapability: '12.1' } }, memory: { totalBytes: 480 * GIB, availableBytes: 470 * GIB },
+disk: { freeBytes: 400 * GIB }, cpus: 72 });
 
 test('an image that can never run on unified memory keeps vLLM as before while the GPU cannot be read', async (t) => {
     const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-vllm-amd64-'));
     t.after(() => fs.rmSync(runDir, { recursive: true, force: true }));
-    const h = harness(t, { installer: vllmInstaller(runDir), imageContract: AMD64_CONTRACT, snapshot: GPU_UNREADABLE });
-    const overview = await h.controller.overview();
-    const row = overview.runners.find((runner) => runner.id === 'vllm');
-    assert.equal(row.enabled, true, 'as at 50f39385: no switch on a dedicated-only image');
-    assert.equal(Object.hasOwn(row, 'disabledReason'), false);
-    // The install is not refused by the switch (here the stub reports it already installed and runnable).
-    const install = await h.controller.installRunner({ runnerId: 'vllm' });
-    assert.equal(install.installed, true);
+    // The real amd64 contract (positive evidence: ik_llama.cpp) on any CPU, or an architecture-less contract on an x64 CPU.
+    for (const [imageContract, hostArch] of [[AMD64_CONTRACT, 'arm64'], [AMD64_CONTRACT, 'x64'], [{ llama_cpp: 'b11159' }, 'x64']]) {
+        const h = harness(t, { installer: vllmInstaller(runDir), imageContract, hostArch, snapshot: GPU_UNREADABLE });
+        const overview = await h.controller.overview();
+        const row = overview.runners.find((runner) => runner.id === 'vllm');
+        assert.equal(row.enabled, true, 'as at 50f39385: no switch on a dedicated-only image');
+        assert.equal(Object.hasOwn(row, 'disabledReason'), false);
+        // The install is not refused by the switch (here the stub reports it already installed and runnable).
+        const install = await h.controller.installRunner({ runnerId: 'vllm' });
+        assert.equal(install.installed, true);
+    }
+});
+
+test('an install before any overview decides the profile first: a readable dedicated arm64 GPU installs, a readable GB10 needs the switch', async (t) => {
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-vllm-first-'));
+    t.after(() => fs.rmSync(runDir, { recursive: true, force: true }));
+    const dedicated = harness(t, { installer: vllmInstaller(runDir), imageContract: ARM64_CONTRACT, hostArch: 'arm64', snapshot: GH200_LIKE });
+    assert.equal((await dedicated.controller.installRunner({ runnerId: 'vllm' })).installed, true);
+    assert.equal((await dedicated.controller.overview()).profile, 'dedicated');
+    const gb10 = harness(t, { installer: vllmInstaller(runDir), imageContract: ARM64_CONTRACT, hostArch: 'arm64' });
+    await assert.rejects(gb10.controller.installRunner({ runnerId: 'vllm' }), (error) => error.code === 'runner_disabled'
+        && /^vLLM is experimental on unified memory and is not enabled on this deployment/.test(error.message)
+        && !/could not be read/.test(error.message));
 });
 
 test('an image that can run on unified memory keeps vLLM off while the GPU cannot be read, and says what turns it on', async (t) => {
     const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-vllm-arm64-'));
     t.after(() => fs.rmSync(runDir, { recursive: true, force: true }));
-    for (const imageContract of [ARM64_CONTRACT, null]) {
-        const h = harness(t, { installer: vllmInstaller(runDir), imageContract, snapshot: GPU_UNREADABLE });
+    // arm64's contract, none (development), and on an arm64 CPU an empty, malformed or architecture-less one:
+    // only positive evidence of the amd64 image opens the gate.
+    for (const [imageContract, hostArch] of [[ARM64_CONTRACT, 'arm64'], [null, 'arm64'], [null, 'x64'], [{}, 'arm64'],
+        [{ llama_cpp: 'b11159', uv: '0.12.18' }, 'arm64']]) {
+        const h = harness(t, { installer: vllmInstaller(runDir), imageContract, hostArch, snapshot: GPU_UNREADABLE });
         const row = (await h.controller.overview()).runners.find((runner) => runner.id === 'vllm');
-        assert.equal(row.enabled, false);
-        assert.match(row.disabledReason, new RegExp(`the GPU could not be read to tell\\. The operator can turn it on with ploinky var ${VLLM_UNIFIED_SWITCH} experimental`));
+        assert.equal(row.enabled, false, JSON.stringify({ imageContract, hostArch }));
+        assert.match(row.disabledReason, new RegExp(`the GPU could not be read, so it is not known whether it shares system memory, where vLLM is experimental and needs the operator's switch\\. The operator can turn it on with ploinky var ${VLLM_UNIFIED_SWITCH} experimental`));
+        assert.doesNotMatch(row.disabledReason, /this image runs on GPUs that share/, 'no claim about the hardware it could not read');
         assert.doesNotMatch(row.disabledReason, /try again|open the overview/i, 'no retry that cannot succeed');
         await assert.rejects(h.controller.installRunner({ runnerId: 'vllm' }), (error) => error.code === 'runner_disabled');
         // With the operator's switch it is not refused by the gate.
-        const on = harness(t, { installer: vllmInstaller(runDir), imageContract, snapshot: GPU_UNREADABLE, env: { [VLLM_UNIFIED_SWITCH]: 'experimental' } });
+        const on = harness(t, { installer: vllmInstaller(runDir), imageContract, hostArch, snapshot: GPU_UNREADABLE, env: { [VLLM_UNIFIED_SWITCH]: 'experimental' } });
         assert.equal((await on.controller.installRunner({ runnerId: 'vllm' })).installed, true);
     }
 });
@@ -571,6 +626,111 @@ test('experimental vLLM admission: an admin share that cannot hold the model is 
     assert.equal(vllmRunner.paramSchemaFor('dedicated').properties.cpuOffloadGb.default, 0);
 });
 
+const vllmAt = (params, snap = unifiedSnap(), model = HF_MODEL) => admitUnified(model,
+    vllmRunner.normalizeParams(params, { model, profile: 'unified' }), snap, vllmRunner, model.sources.hf);
+
+test('a bundled entry\'s own sizing is not user sizing, for llama.cpp and vLLM alike', () => {
+    const bundled = seedModel('gpt-oss-20b');
+    assert.ok(Number.isInteger(bundled.memory.kvBytesPerToken) && Number.isInteger(bundled.memory.fixedKvBytes));
+    const llama = admitUnified(bundled, unifiedParams(bundled));
+    const vllm = vllmAt({}, unifiedSnap(), bundled);
+    for (const result of [llama, vllm]) {
+        assert.deepEqual(result.estimate.userSizing, []);
+        assert.ok(!result.warnings.some((warning) => /^Sized with/.test(warning)), result.warnings.join(' | '));
+    }
+    assert.equal(llama.estimate.kvBytes, bundled.memory.kvBytesPerToken * 32768 + bundled.memory.fixedKvBytes, 'its sizing is used');
+});
+
+test('vLLM\'s share must hold the weights, the KV cache and its 768 MiB overhead: just below refuses, just above admits', () => {
+    const base = vllmAt({ gpuMemoryUtilization: 0.5 }).estimate;
+    assert.equal(base.overheadBytes, VLLM_OVERHEAD_BYTES);
+    const needed = base.weightsBytes + base.kvBytes + VLLM_OVERHEAD_BYTES;
+    const exact = needed / TOTAL;
+    const below = vllmAt({ gpuMemoryUtilization: exact - 0.0005 });
+    const above = vllmAt({ gpuMemoryUtilization: exact + 0.0005 });
+    assert.equal(below.status, 'incompatible', below.reason);
+    assert.match(below.reason, /and vLLM's overhead need about/);
+    assert.equal(above.status, 'ok', above.reason);
+    // Just above the weights and KV cache alone, but short of the overhead: still refused.
+    const withoutOverhead = (base.weightsBytes + base.kvBytes) / TOTAL;
+    assert.equal(vllmAt({ gpuMemoryUtilization: withoutOverhead + 0.0005 }).status, 'incompatible');
+});
+
+test('vLLM\'s automatic share keeps the host reserve and never exceeds 0.9', () => {
+    // A small pool with ample free memory: the reserve (with the runner's RAM) binds.
+    const small = vllmAt({}, unifiedSnap(39 * GIB, 40 * GIB));
+    const reserveShare = Math.floor(((40 * GIB - UNIFIED.hostReserveBytes - VLLM_RUNNER_RAM_BYTES) / (40 * GIB)) * 100) / 100;
+    const freeShare = Math.floor(((39 * GIB - UNIFIED.floorBytes - VLLM_RUNNER_RAM_BYTES) / (40 * GIB)) * 100) / 100;
+    assert.ok(reserveShare < freeShare && reserveShare < 0.9);
+    assert.equal(small.status, 'ok', small.reason);
+    assert.equal(small.estimate.gpuMemoryUtilization, reserveShare);
+    assert.ok(small.estimate.unifiedBytes <= 40 * GIB - UNIFIED.hostReserveBytes);
+    // A large pool, nearly all free: the 0.9 cap binds.
+    const large = vllmAt({}, unifiedSnap(990 * GIB, 1000 * GIB));
+    assert.equal(large.status, 'ok', large.reason);
+    assert.equal(large.estimate.gpuMemoryUtilization, 0.9);
+});
+
+test('vLLM\'s fp8 KV cache is half the size of the default one', () => {
+    const auto = vllmAt({ maxModelLen: 8192 }).estimate;
+    const fp8 = vllmAt({ maxModelLen: 8192, kvCacheDtype: 'fp8' }).estimate;
+    assert.equal(auto.kvBytes, HF_MODEL.memory.kvBytesPerToken * 8192);
+    assert.equal(fp8.kvBytes, Math.round(auto.kvBytes / 2));
+});
+
+test('the MTP draft context is exactly one more layer of KV cache plus one more set of compute buffers', () => {
+    const model = validateModel({ ...structuredClone(ADDED), id: 'user-mtp-exact', mtp: true,
+        sources: { gguf: { ...ADDED.sources.gguf, commit: 'c'.repeat(40), size: 20 * GIB, sha256: 'd'.repeat(64) } } }, { seed: false });
+    const params = unifiedParams(model, { mtp: true, ctxSize: 32768 });
+    const estimate = estimateUnifiedLlamaServer({ model, source: model.sources.gguf, params, memory: { totalBytes: TOTAL } });
+    const compute = Math.round(computeBufferBytes({ ubatchSize: UNIFIED.batchSize, flashAttn: 'on' }));
+    assert.equal(estimate.kvBytes, 40960 * 32768);
+    assert.equal(estimate.mtpBytes, Math.round(estimate.kvBytes / 40 + compute));
+});
+
+test('vLLM refuses to size anything when the pool cannot be read, whatever the share', () => {
+    for (const memory of [
+        { totalBytes: Number.NaN, availableBytes: 100 * GIB },
+        { totalBytes: TOTAL, availableBytes: Number.NaN },
+        { totalBytes: Number.POSITIVE_INFINITY, availableBytes: 100 * GIB },
+        { totalBytes: TOTAL, availableBytes: undefined },
+    ]) {
+        for (const params of [{}, { gpuMemoryUtilization: 0.3 }]) {
+            const result = vllmAt(params, { ...unifiedSnap(), memory });
+            assert.equal(result.status, 'incompatible', JSON.stringify({ memory, params }));
+            assert.match(result.reason, /cannot be read/);
+        }
+    }
+});
+
+test('the vLLM switch fails closed for a caller that names no profile', () => {
+    assert.equal(vllmRunner.enabled({}).enabled, false);
+    assert.equal(vllmRunner.enabled({}, undefined).enabled, false);
+    assert.equal(vllmRunner.enabled({}, 'dedicated').enabled, true);
+    assert.equal(vllmRunner.enabled({ [VLLM_UNIFIED_SWITCH]: 'experimental' }).enabled, true);
+});
+
+test('the vLLM user-sizing warning says what an understated value does there: a looser fit check, not a smaller need', () => {
+    const model = validateModel({ ...structuredClone(ADDED), id: 'user-hf-sized', sources: { hf: { ...HF_MODEL.sources.hf } } }, { seed: false });
+    const result = vllmAt({}, unifiedSnap(), model);
+    assert.ok(result.warnings.some((warning) => warning === 'Sized with memory.kvBytesPerToken from the model entry added at run time. '
+        + 'Nothing checks these against the weights: an understated value only loosens the check that the weights and KV cache fit '
+        + 'vLLM\'s share, so vLLM may fail to start; its memory need (the share plus its runner RAM) does not depend on it.'),
+    result.warnings.join(' | '));
+});
+
+test('the llama-server estimate\'s basis names every defaulted input', () => {
+    const { memory: _memory, contextLength: _context, ...bare } = structuredClone(ADDED);
+    const model = validateModel({ ...bare, id: 'user-bare-basis', mtp: true,
+        sources: { gguf: { ...ADDED.sources.gguf, commit: 'c'.repeat(40), size: 20 * GIB, sha256: 'd'.repeat(64) } } }, { seed: false });
+    const estimate = estimateUnifiedLlamaServer({ model, source: model.sources.gguf, params: unifiedParams(model, { mtp: true }), memory: { totalBytes: TOTAL } });
+    assert.deepEqual(estimate.defaulted, ['memory.kvBytesPerToken', 'memory.layers', 'contextLength']);
+    assert.match(estimate.basis, /; defaults used for memory\.kvBytesPerToken, memory\.layers, contextLength$/);
+    const sized = estimateUnifiedLlamaServer({ model: seedModel('gpt-oss-20b'), source: seedModel('gpt-oss-20b').sources.gguf,
+        params: unifiedParams(seedModel('gpt-oss-20b')), memory: { totalBytes: TOTAL } });
+    assert.doesNotMatch(sized.basis, /defaults used/);
+});
+
 // ------------------------------------------------ complete install validation
 
 test('the install check compares every installed distribution with the lock: none extra, none missing, exact versions', () => {
@@ -590,4 +750,37 @@ test('the install check compares every installed distribution with the lock: non
     assert.deepEqual(drift.missing, ['jinja2']);
     assert.deepEqual(drift.mismatched, ['typing-extensions 4.14.0 (lock 4.15.0)']);
     assert.equal(drift.problems.length, 3);
+});
+
+test('a name installed twice (a stale copy beside the locked one) fails the install check, whatever the order', () => {
+    const entry = { files: [{ name: 'foo.bar-2.0-py3-none-any.whl' }, { name: 'vllm-0.30.0-cp38-abi3-manylinux_2_28_aarch64.whl' }] };
+    for (const installed of [
+        [['foo.bar', '2.0'], ['Foo_Bar', '1.0'], ['vllm', '0.30.0']],
+        [['Foo_Bar', '1.0'], ['foo.bar', '2.0'], ['vllm', '0.30.0']],
+        [['foo-bar', '2.0'], ['foo-bar', '2.0'], ['vllm', '0.30.0']],
+    ]) {
+        const result = compareInstalledDistributions(entry, installed);
+        assert.equal(result.duplicated.length, 1, JSON.stringify(installed));
+        assert.match(result.duplicated[0], /^foo-bar \(/);
+        assert.ok(result.problems.some((problem) => /^installed more than once under one name: foo-bar/.test(problem)));
+        assert.equal(result.installed, 3);
+    }
+    // Pairs and the object form agree when nothing is duplicated.
+    assert.deepEqual(compareInstalledDistributions(entry, [['foo.bar', '2.0'], ['vllm', '0.30.0']]).problems, []);
+    assert.deepEqual(compareInstalledDistributions(entry, { 'foo.bar': '2.0', vllm: '0.30.0' }).problems, []);
+});
+
+// ------------------------------------------------ the tool entry's operations
+
+test('the operations main.mjs serves are exactly those the tools and the chat responder call', () => {
+    const called = new Set(Object.values(TOOL_OPERATIONS).map(({ op }) => op));
+    for (const file of ['../src/chatResponder.mjs', '../src/testPrompt.mjs']) {
+        const source = fs.readFileSync(new URL(file, import.meta.url), 'utf8');
+        for (const [, op] of source.matchAll(/\bcall\('([A-Za-z]+)'/g)) called.add(op);
+    }
+    assert.ok(called.has('chatTarget') && called.has('recordCompletion'));
+    const served = Object.keys(controllerHandlers({}));
+    assert.deepEqual(served.sort(), [...called].sort());
+    const main = fs.readFileSync(new URL('../src/main.mjs', import.meta.url), 'utf8');
+    assert.match(main, /handlers: controllerHandlers\(controller\)/);
 });
