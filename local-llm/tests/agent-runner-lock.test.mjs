@@ -65,30 +65,88 @@ test('the runner-lock check runs for pull requests and on demand only, on both a
     // Never a push: pushing the feature branch must not start CI.
     assert.deepEqual(blockKeys(text, 'on'), ['pull_request', 'workflow_dispatch']);
     assert.doesNotMatch(text, /^\s{2}(push|schedule|workflow_run|pull_request_target):/m);
-    // A pull request starts it only when a lock or the installer code changes.
-    const paths = text.slice(text.indexOf('paths:'), text.indexOf('workflow_dispatch:'));
-    for (const file of [
-        'local-llm/catalog/runners.lock.linux-*.json',
-        'local-llm/src/controller/runnerInstaller.mjs',
-        'local-llm/src/controller/runnerLock.mjs',
-        'local-llm/tools/runner_install_check.mjs',
-        '.github/workflows/runner-lock-check.yml',
-    ]) {
-        assert.ok(paths.includes(`'${file}'`), file);
-    }
+    // No workflow-level path filter: a required check must report on every pull request (the first job decides what is needed).
+    const triggers = text.slice(text.indexOf('\non:'), text.indexOf('\npermissions:'));
+    assert.doesNotMatch(triggers, /paths(-ignore)?:|branches(-ignore)?:|tags(-ignore)?:/);
     assert.match(text, /^permissions:\n {2}contents: read$/m);
-    // One job per architecture, each on its own runner.
+    // Three jobs: what changed, the install check per architecture (only when needed), and the one job to require.
+    assert.deepEqual(blockKeys(text, 'jobs'), ['changes', 'install-check', 'runner-lock-check']);
+    assert.match(text, /install-check:\n(?:.*\n)*?    needs: changes\n    if: \$\{\{ needs\.changes\.outputs\.needed == 'true' \}\}\n/);
     assert.match(text, /- arch: amd64\n\s+runs-on: ubuntu-24\.04\n/);
     assert.match(text, /- arch: arm64\n\s+runs-on: ubuntu-24\.04-arm\n/);
-    // The published image and the repository's own installer code and lock, mounted read-only.
+    // The aggregate always runs and is red only for a needed check that did not pass: a skipped matrix job must not leave a name pending.
+    assert.match(text, /\n  runner-lock-check:\n(?:.*\n)*?    name: runner-lock-check\n    needs: \[changes, install-check\]\n    if: \$\{\{ always\(\) \}\}\n/);
+    assert.match(text, /\[ "\$DETECTED" = success \] \|\| \{ echo "the change could not be classified"; exit 1; \}/);
+    assert.match(text, /\[ "\$INSTALLED" = success \] \|\| \{ echo "the install check did not pass on every architecture"; exit 1; \}/);
+    // The published image and the repository's own installer code and lock, mounted read-only; the binary is proven, not only unpacked.
     assert.match(text, /IMAGE: docker\.io\/assistos\/local-llm:latest/);
     assert.match(text, /-v "\$PWD\/local-llm:\/code:ro"/);
-    assert.match(text, /node \/code\/tools\/runner_install_check\.mjs "\$runner"/);
+    assert.match(text, /node \/code\/tools\/runner_install_check\.mjs "\$runner" "\$\{mode\[@\]\}" --require-executable/);
     assert.match(text, /--lock "\/code\/catalog\/runners\.lock\.linux-\$\{ARCH\}\.json"/);
     // Every entry of the platform's lock is installed, and a proprietary one is never downloaded.
     assert.match(text, /Object\.keys\(require\(process\.argv\[1\]\)\.runners\)/);
     assert.match(text, /--validate-only/);
     assert.match(text, /--network=none/);
+});
+
+// The Detect step's own script, run against small repositories: a pull request's merge commit has the base as its first parent.
+function detectScript() {
+    const lines = fs.readFileSync(WORKFLOW, 'utf8').split('\n');
+    const at = lines.findIndex((line) => line.trim() === 'id: detect');
+    const run = lines.findIndex((line, index) => index > at && line.trim() === 'run: |');
+    const indent = lines[run + 1].match(/^ */)[0].length;
+    const body = [];
+    for (const line of lines.slice(run + 1)) {
+        if (line.trim() !== '' && line.match(/^ */)[0].length < indent) break;
+        body.push(line.slice(indent));
+    }
+    return body.join('\n');
+}
+
+function needed(t, { event, changed, commits = 2 }) {
+    const repo = tempDir(t, 'detect');
+    const git = (...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.org', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, stdio: 'pipe' });
+    git('init', '-q');
+    fs.writeFileSync(path.join(repo, 'README.md'), 'base\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'base');
+    if (commits === 2) {
+        for (const file of changed) {
+            fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
+            fs.writeFileSync(path.join(repo, file), 'changed\n');
+        }
+        git('add', '-A');
+        git('commit', '-q', '-m', 'the change');
+    }
+    const output = path.join(repo, '..', `${path.basename(repo)}.out`);
+    t.after(() => fs.rmSync(output, { force: true }));
+    execFileSync('bash', ['-c', detectScript()], { cwd: repo, env: { PATH: process.env.PATH, EVENT: event, GITHUB_OUTPUT: output }, stdio: 'pipe' });
+    return fs.readFileSync(output, 'utf8').trim();
+}
+
+test('the runner-lock check is needed for a change to a lock, the installer, the downloader or the registry code, and for nothing else', {
+    skip: !repositoryRoot && 'the repository root is not mounted, so its .github directory is not here',
+}, (t) => {
+    for (const file of [
+        'local-llm/catalog/runners.lock.linux-arm64.json', 'local-llm/catalog/runners.lock.linux-amd64.json',
+        'local-llm/src/controller/runnerInstaller.mjs', 'local-llm/src/controller/runnerLock.mjs',
+        'local-llm/src/controller/downloader.mjs', 'local-llm/src/controller/ollamaStore.mjs',
+        'local-llm/tools/runner_install_check.mjs', '.github/workflows/runner-lock-check.yml',
+    ]) {
+        assert.equal(needed(t, { event: 'pull_request', changed: [file] }), 'needed=true', file);
+    }
+    // A change beside them, or only next to their names, reports success without the heavy jobs.
+    for (const changed of [
+        ['README.md'], ['local-llm/src/controller/deployments.mjs'], ['local-llm/src/controller/weightStores.mjs'], ['local-llm/docs/specs/DS004-on-demand-runners.md'],
+        ['local-llm/catalog/models.json'], ['local-llm/catalog/runners.lock.linux-arm64.json.bak'], ['x/local-llm/src/controller/downloader.mjs'],
+        ['local-llm/src/controller/downloader.mjs.orig'], ['.github/workflows/other.yml'],
+    ]) {
+        assert.equal(needed(t, { event: 'pull_request', changed }), 'needed=false', changed.join());
+    }
+    // One relevant file among others is enough; on demand it always runs; a diff that cannot be read runs it too.
+    assert.equal(needed(t, { event: 'pull_request', changed: ['README.md', 'local-llm/src/controller/downloader.mjs'] }), 'needed=true');
+    assert.equal(needed(t, { event: 'workflow_dispatch', changed: ['README.md'] }), 'needed=true');
+    assert.equal(needed(t, { event: 'pull_request', changed: [], commits: 1 }), 'needed=true');
 });
 
 // ---------------------------------------------------------------- the two locks

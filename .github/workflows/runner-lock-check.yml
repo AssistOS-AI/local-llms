@@ -4,31 +4,68 @@
 # run, not with an image that was proven and promoted. This workflow is what
 # stands in for that promotion: it installs every entry of the platform's lock
 # inside the published image, on that architecture's own runner, exactly as the
-# agent does (download, verify, unpack, then the library-link checks), and a
-# change that adds or edits an entry must pass it on both architectures.
+# agent does (download, verify, unpack, then the checks of the binary and of the
+# library links), and a change that adds or edits an entry must pass it on both
+# architectures.
 #
-# It runs for a pull request that touches the locks or the installer code, and
-# on demand. It never runs on a push, so pushing a branch starts nothing; the
-# proof for a revision is the run on its pull request or a dispatch.
+# It runs for every pull request and on demand, and never on a push, so pushing
+# a branch starts nothing. It has no workflow-level path filter, so it can be a
+# required status check without blocking pull requests that touch none of this:
+# the first job looks at what the pull request changes and, when it is none of
+# the lock, the installer code, the downloader or the registry code, the
+# per-architecture jobs are skipped and the `runner-lock-check` job at the end
+# still reports success. THE GATE HOLDS ONLY ONCE `runner-lock-check` IS A
+# REQUIRED STATUS CHECK ON `main` (a repository setting, not something this file
+# can turn on); until then an entry is held back by review alone.
 
 name: runner-lock-check
 
 on:
   pull_request:
-    paths:
-      - 'local-llm/catalog/runners.lock.linux-*.json'
-      - 'local-llm/src/controller/runnerInstaller.mjs'
-      - 'local-llm/src/controller/runnerLock.mjs'
-      - 'local-llm/tools/runner_install_check.mjs'
-      - '.github/workflows/runner-lock-check.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Does this change touch the runner locks or their installer?
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      needed: ${{ steps.detect.outputs.needed }}
+    env:
+      EVENT: ${{ github.event_name }}
+    steps:
+      - name: Checkout this revision
+        # Two commits deep: for a pull request this is GitHub's merge commit, whose first parent is the base.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Detect
+        id: detect
+        # On demand, the check always runs. For a pull request it runs when the diff against the base touches the
+        # locks, the installer, the lock reader, the downloader (every file is fetched through it), the Ollama
+        # registry code or the install check itself, or this workflow. If the diff cannot be read, it runs.
+        run: |
+          set -euo pipefail
+          needed=true
+          if [ "$EVENT" = pull_request ]; then
+            if changed="$(git diff --name-only HEAD^1 HEAD)"; then
+              needed=false
+              if printf '%s\n' "$changed" | grep -Eq '^(local-llm/catalog/runners\.lock\.linux-[a-z0-9]+\.json|local-llm/src/controller/(runnerInstaller|runnerLock|downloader|ollamaStore)\.mjs|local-llm/tools/runner_install_check\.mjs|\.github/workflows/runner-lock-check\.yml)$'; then
+                needed=true
+              fi
+            fi
+          fi
+          echo "needed=$needed" | tee -a "$GITHUB_OUTPUT"
+
   install-check:
     name: Install every agent-lock entry on ${{ matrix.arch }}
+    needs: changes
+    if: ${{ needs.changes.outputs.needed == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -65,10 +102,14 @@ jobs:
       - name: Install each lock entry, one at a time
         # Each runner is installed in its own container, removed afterwards,
         # with the repository's local-llm directory mounted read-only as /code:
-        # the same installer code, lock and tool the agent runs. A proprietary
-        # entry is never downloaded here (installing it would accept its terms
-        # on behalf of whoever runs CI); it is validated from the lock with no
-        # network. A lock with no entries has nothing to check.
+        # the same installer code, lock and tool the agent runs. The check
+        # requires every archive entry to name the file its adapter launches
+        # (check.executable), and proves it: the file is there and executable,
+        # ldd finds its libraries, and --version runs under the CPU environment
+        # and names the pinned version. A proprietary entry is never downloaded
+        # here (installing it would accept its terms on behalf of whoever runs
+        # CI); it is validated from the lock with no network. A lock with no
+        # entries has nothing to check.
         run: |
           set -euo pipefail
           lock="local-llm/catalog/runners.lock.linux-${ARCH}.json"
@@ -83,7 +124,7 @@ jobs:
             fi
             if docker run --rm "${net[@]}" --cap-drop=ALL --security-opt=no-new-privileges \
                 -v "$PWD/local-llm:/code:ro" "$IMAGE" \
-                node /code/tools/runner_install_check.mjs "$runner" "${mode[@]}" \
+                node /code/tools/runner_install_check.mjs "$runner" "${mode[@]}" --require-executable \
                 --lock "/code/catalog/runners.lock.linux-${ARCH}.json" > "$evidence/$runner.json" \
                 && { [ "${#mode[@]}" -eq 0 ] || grep -q '"downloaded": false' "$evidence/$runner.json"; }; then
               echo "$runner: passed${mode[*]:+ (validated, not downloaded)}"
@@ -104,3 +145,27 @@ jobs:
           path: ${{ runner.temp }}/runner-lock-check
           if-no-files-found: ignore
           retention-days: 30
+
+  runner-lock-check:
+    # The one job to require: a skipped matrix job would leave its per-architecture name pending forever, so this one
+    # always runs and is red only when the change needed the install check and it did not pass on every architecture.
+    name: runner-lock-check
+    needs: [changes, install-check]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      DETECTED: ${{ needs.changes.result }}
+      NEEDED: ${{ needs.changes.outputs.needed }}
+      INSTALLED: ${{ needs.install-check.result }}
+    steps:
+      - name: Report
+        run: |
+          set -euo pipefail
+          echo "detect: $DETECTED; install check needed: ${NEEDED:-unknown}; install check: $INSTALLED"
+          [ "$DETECTED" = success ] || { echo "the change could not be classified"; exit 1; }
+          if [ "$NEEDED" = true ]; then
+            [ "$INSTALLED" = success ] || { echo "the install check did not pass on every architecture"; exit 1; }
+          else
+            echo "this change touches no runner lock, installer, downloader or registry file: nothing to install"
+          fi
