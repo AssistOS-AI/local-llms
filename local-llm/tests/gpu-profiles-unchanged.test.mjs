@@ -1,7 +1,9 @@
 // The dedicated and unified profiles stay what they were (Phase 3): the runners and models their overview
 // shows are exactly those of a84617d, the head before llama.cpp's CPU build and the agent's runner lock,
-// even with the agent's real locks loaded. Phase 3 lists no change for either profile, so nothing is allowed
-// to differ. The golden file was made from that commit (see overview-scenarios.mjs).
+// even with the agent's real locks loaded; and on a dedicated host, adding an Ollama tag and running it (or
+// being refused) are what they were before tags were pinned, with no registry read. Phase 3 lists no change
+// for either profile, so nothing is allowed to differ. The golden file was made from that commit (see
+// overview-scenarios.mjs).
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -12,7 +14,7 @@ import { createController } from '../src/controller/deployments.mjs';
 import { createRunnerInstaller } from '../src/controller/runnerInstaller.mjs';
 import { agentRunnerLockFile, loadRunnerLocks } from '../src/controller/runnerLock.mjs';
 import { createStateStore } from '../src/controller/stateStore.mjs';
-import { SCENARIOS, collectOverviews } from './overview-scenarios.mjs';
+import { OLLAMA_RUN_SCENARIOS, SCENARIOS, collectOllamaRuns, collectOverviews } from './overview-scenarios.mjs';
 
 const golden = JSON.parse(fs.readFileSync(new URL('./overview-golden-a84617d.json', import.meta.url), 'utf8'));
 
@@ -31,6 +33,10 @@ function firstDifference(actual, expected, where = '') {
     }
     return null;
 }
+
+const agentLocks = (arch) => ({ imageLockFile, dataDir }) => createRunnerInstaller({
+    lock: loadRunnerLocks({ image: imageLockFile, agent: agentRunnerLockFile(arch) }), cacheRoot: path.join(dataDir, 'runners'), runRoot: path.join(dataDir, 'opt'),
+});
 
 for (const arch of ['arm64', 'x64']) {
     test(`the dedicated and unified overviews are what they were at a84617d, with the ${arch} agent lock loaded`, async () => {
@@ -58,5 +64,29 @@ for (const arch of ['arm64', 'x64']) {
                 for (const weights of Object.values(model.weights)) assert.equal(weights.runners.includes('llama.cpp-cpu'), false, `${name} ${model.id}`);
             }
         }
+    });
+}
+
+for (const arch of ['arm64', 'x64']) {
+    test(`on a dedicated host, adding and running an Ollama tag is what it was at a84617d, with no registry read, with the ${arch} agent lock loaded`, async () => {
+        const asked = [];
+        const actual = await collectOllamaRuns({
+            createController, createStateStore, validateModel, makeInstaller: agentLocks(arch),
+            resolveOllama: async (tag) => { asked.push(tag); throw new Error('a dedicated host must not read the Ollama registry'); },
+        });
+        assert.deepEqual(asked, [], 'the registry was never asked');
+        assert.deepEqual(Object.keys(actual), Object.keys(OLLAMA_RUN_SCENARIOS));
+        for (const name of Object.keys(golden.ollamaRuns)) {
+            assert.equal(firstDifference(actual[name], golden.ollamaRuns[name], name), null, name);
+        }
+        // In words: the tag is stored as typed, with no digest and no size; Run launches the image's Ollama with the driver path
+        // and asks for no GPU option; the image that lacks Ollama refuses it as it did.
+        const inImage = actual['dedicated, amd64 image with Ollama in it'];
+        assert.deepEqual(inImage.added.ollama, { type: 'ollama', tag: 'gpt-oss:20b' });
+        assert.deepEqual([inImage.phase, inImage.profile, inImage.process.command], ['ready', 'dedicated', '/opt/ollama/bin/ollama']);
+        assert.equal(inImage.process.env.LD_LIBRARY_PATH, '/usr/local/nvidia/lib64');
+        assert.equal(Object.hasOwn(inImage.process.env, 'CUDA_VISIBLE_DEVICES'), false);
+        assert.deepEqual(inImage.calls.find(([url]) => url.endsWith('/api/generate'))[2].options, { num_ctx: 4096 });
+        assert.equal(actual['dedicated, arm64 image without Ollama'].refused.code, 'runner_unavailable');
     });
 }

@@ -59,8 +59,11 @@ test('a redirect is followed only within the registry\'s own origin, and never f
     assert.equal((await fetchFrom(reg.base)('near:1')).size, 510);
     await assert.rejects(() => fetchFrom(reg.base)('away:1'), refused('pin_failed', /redirected the manifest request of away:1 away from .*which is not followed/));
     assert.deepEqual(elsewhere.requests, [], 'the other origin was never contacted');
-    await assert.rejects(() => fetchFrom(reg.base)('loop:1'), refused('pin_failed', /redirected/));
-    await assert.rejects(() => fetchFrom(reg.base)('nolocation:1'), refused('pin_failed', /redirected/));
+    // A same-origin loop is not "away from" anywhere, and a redirect that says nowhere is named as that.
+    await assert.rejects(() => fetchFrom(reg.base)('loop:1'), (error) => error.code === 'pin_failed'
+        && /^The registry redirected the manifest request of loop:1 more than 3 times, which is not followed\.$/.test(error.message));
+    await assert.rejects(() => fetchFrom(reg.base)('nolocation:1'), (error) => error.code === 'pin_failed'
+        && /^The registry redirected the manifest request of nolocation:1 without saying where, which is not followed\.$/.test(error.message));
 });
 
 test('a manifest that is too large, not JSON, or not a usable version 2 manifest is not pinned', async (t) => {
@@ -90,7 +93,11 @@ test('a manifest that is too large, not JSON, or not a usable version 2 manifest
     }
 });
 
-function controllerOf(t, { resolveOllama, registryEntries = [] } = {}) {
+const ABSENT = { available: false, state: 'absent', reason: 'none' };
+const DEDICATED = { available: true, name: 'RTX', memoryModel: 'dedicated', totalBytes: 6144 * 1024 * 1024, usedBytes: 0, freeBytes: 6144 * 1024 * 1024, processes: [] };
+const UNIFIED = { available: true, name: 'NVIDIA GB10', memoryModel: 'unified', processes: [], device: { computeCapability: '12.1', addressingMode: 'ATS' } };
+
+function controllerOf(t, { resolveOllama, registryEntries = [], gpu = ABSENT } = {}) {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-ollama-pin-'));
     if (registryEntries.length) {
         fs.mkdirSync(path.join(dataDir, 'state'), { recursive: true });
@@ -99,7 +106,7 @@ function controllerOf(t, { resolveOllama, registryEntries = [] } = {}) {
     }
     const controller = createController({
         dataDir, env: { PATH: '/usr/bin' }, seedCatalog: [], stateStore: createStateStore({ dataDir }), resolveOllama,
-        snapshot: async () => ({ gpu: { available: false, state: 'absent', reason: 'none' }, memory: {}, disk: {}, cpus: 1, cores: 1 }),
+        snapshot: async () => ({ gpu, memory: {}, disk: {}, cpus: 1, cores: 1 }),
         detectRunner: () => ({ installed: false, version: null, reason: null }),
     });
     // The drain saves state and writes the log, so the directory goes only after it.
@@ -113,14 +120,15 @@ function controllerOf(t, { resolveOllama, registryEntries = [] } = {}) {
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 const entry = (source, id = 'user-olla') => ({ id, sources: { ollama: { type: 'ollama', tag: 'qwen2.5:0.5b', ...source } } });
 
-test('Add keeps a pin that is whole, completes one that is not, refuses one the registry contradicts, and fails closed', async (t) => {
+test('on cpu, Add completes a pin the registry agrees with, refuses one it contradicts, and fails closed', async (t) => {
     const asked = [];
     const resolveOllama = async (tag) => { asked.push(tag); return { manifestDigest: DIGEST, size: 3500 }; };
     const controller = controllerOf(t, { resolveOllama });
-    // A whole pin is kept as given, and the registry is not asked.
-    const whole = await controller.addModel(entry({ manifestDigest: `sha256:${'d'.repeat(64)}`, size: 42 }, 'whole'));
-    assert.deepEqual(whole.model.sources.ollama.size, 42);
-    assert.deepEqual(asked, []);
+    assert.equal((await controller.overview()).profile, 'cpu');
+    // A whole pin that is right is kept; the registry is asked, since what is typed is checked, not trusted.
+    const whole = await controller.addModel(entry({ manifestDigest: DIGEST, size: 3500 }, 'whole'));
+    assert.deepEqual(whole.model.sources.ollama, { type: 'ollama', tag: 'qwen2.5:0.5b', manifestDigest: DIGEST, size: 3500 });
+    assert.deepEqual(asked, ['qwen2.5:0.5b']);
     // A digest alone gets its size, and only if the registry agrees with it.
     assert.deepEqual((await controller.addModel(entry({ manifestDigest: DIGEST }, 'digest-only'))).model.sources.ollama,
         { type: 'ollama', tag: 'qwen2.5:0.5b', manifestDigest: DIGEST, size: 3500 });
@@ -129,23 +137,74 @@ test('Add keeps a pin that is whole, completes one that is not, refuses one the 
     // A tag that moved since it was pinned is never re-pinned silently.
     await assert.rejects(() => controller.addModel(entry({ manifestDigest: `sha256:${'e'.repeat(64)}` }, 'moved')),
         refused('identity_changed', /now resolves to sha256:a+, not the pinned sha256:e+; update the model entry without its manifestDigest and size to accept it/));
+    // A size typed wrong beside a digest that is right would make the CPU admission trust a figure nothing checked: refused at Add, before any download.
+    await assert.rejects(() => controller.addModel(entry({ manifestDigest: DIGEST, size: 1 }, 'typed-small')), refused('identity_changed', /is now 3500 bytes, not the pinned 1/));
     await assert.rejects(() => controller.addModel(entry({ size: 99 }, 'resized')), refused('identity_changed', /is now 3500 bytes, not the pinned 99/));
     assert.deepEqual(controller.state.registry.map((model) => model.id), ['whole', 'digest-only', 'size-only']);
     // Registry down: the Add fails, and nothing is stored.
     const down = controllerOf(t, { resolveOllama: async () => { throw Object.assign(new Error('registry.ollama.ai is down'), { code: 'pin_failed' }); } });
+    await down.overview();
     await assert.rejects(() => down.addModel(entry({}, 'unreachable')), { code: 'pin_failed' });
     assert.deepEqual(down.state.registry, []);
 });
 
-test('an Update that names a bare tag pins it afresh, which is how a legacy entry or a moved tag is accepted', async (t) => {
+test('on the dedicated and unified profiles, and while the profile is undecided, Add reads no registry and stores the tag as typed', async (t) => {
+    const asked = [];
+    const resolveOllama = async (tag) => { asked.push(tag); throw new Error('no network on a GPU host'); };
+    const typed = { manifestDigest: DIGEST, size: 42 };
+    for (const [label, gpu, decide] of [
+        ['dedicated', DEDICATED, true], ['unified', UNIFIED, true],
+        ['undecided', { available: false, state: 'unreadable', reason: 'nvidia-smi failed: timed out' }, true],
+        ['cpu before any snapshot', ABSENT, false],
+    ]) {
+        const controller = controllerOf(t, { resolveOllama, gpu });
+        const profile = decide ? (await controller.overview()).profile : null;
+        assert.equal(profile, { dedicated: 'dedicated', unified: 'unified', undecided: null }[label] ?? null, label);
+        // A bare tag is kept as it is: no digest, no size, so nothing is checked at Run either, as before Phase 3.
+        assert.deepEqual((await controller.addModel(entry({}, 'bare'))).model.sources.ollama, { type: 'ollama', tag: 'qwen2.5:0.5b' }, label);
+        // Typed values are kept as typed and not compared with anything.
+        assert.deepEqual((await controller.addModel(entry(typed, 'typed'))).model.sources.ollama, { type: 'ollama', tag: 'qwen2.5:0.5b', ...typed }, label);
+        assert.deepEqual(controller.state.registry.map((model) => model.id), ['bare', 'typed'], label);
+    }
+    assert.deepEqual(asked, [], 'the registry was never asked');
+    // Once the cpu profile is committed the same controller pins.
+    const late = controllerOf(t, { resolveOllama: async () => ({ manifestDigest: DIGEST, size: 3500 }) });
+    assert.deepEqual((await late.addModel(entry({}, 'before'))).model.sources.ollama, { type: 'ollama', tag: 'qwen2.5:0.5b' });
+    await late.overview();
+    assert.equal((await late.addModel(entry({}, 'after'))).model.sources.ollama.size, 3500);
+});
+
+test('a pin in flight ends when the agent drains, and its Add is refused as shutting down', { timeout: 10_000 }, async (t) => {
+    let seen = null;
+    const resolveOllama = (tag, { signal }) => new Promise((resolve, reject) => {
+        seen = signal;
+        signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    });
+    const controller = controllerOf(t, { resolveOllama });
+    await controller.overview();
+    const adding = controller.addModel(entry({}, 'slow'));
+    const settled = assert.rejects(() => adding, refused('shutting_down', /The agent is restarting; add the model again once it is back/));
+    while (seen === null) await new Promise((resolve) => setTimeout(resolve, 1));
+    assert.equal(seen.aborted, false);
+    await controller.drain();
+    await settled;
+    assert.equal(seen.aborted, true);
+    assert.deepEqual(controller.state.registry, []);
+    // A pin that starts after the drain began is refused before it asks anything.
+    await assert.rejects(() => controller.addModel(entry({}, 'late')), refused('shutting_down'));
+});
+
+test('an Update that names a bare tag pins it afresh on cpu, which is how a legacy entry or a moved tag is accepted', async (t) => {
     const legacy = entry({}, 'legacy');
     const controller = controllerOf(t, { registryEntries: [legacy], resolveOllama: async () => ({ manifestDigest: DIGEST, size: 3500 }) });
+    await controller.overview();
     const updated = await controller.updateModel(entry({}, 'legacy'));
     assert.deepEqual(updated.model.sources.ollama, { type: 'ollama', tag: 'qwen2.5:0.5b', manifestDigest: DIGEST, size: 3500 });
     assert.deepEqual(controller.state.registry[0].sources.ollama, updated.model.sources.ollama);
     // A model with no Ollama source never asks the registry.
     const asked = [];
     const hf = controllerOf(t, { resolveOllama: async (tag) => { asked.push(tag); return { manifestDigest: DIGEST, size: 1 }; } });
+    await hf.overview();
     await hf.addModel({ id: 'hf-only', sources: { gguf: { type: 'huggingface', repo: 'acme/models', file: 'm.gguf', revision: 'main', commit: 'a'.repeat(40), size: 10, sha256: 'b'.repeat(64) } } });
     assert.deepEqual(asked, []);
 });

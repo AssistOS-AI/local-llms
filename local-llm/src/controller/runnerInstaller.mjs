@@ -17,12 +17,13 @@ import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import zlib from 'node:zlib';
 
 import { LocalLlmError } from '../errors.mjs';
 import { DownloadError, downloadFile, inspectFile } from './downloader.mjs';
-import { archiveCompression } from './runnerLock.mjs';
+import { archiveCompressionFor } from './runnerLock.mjs';
 
 export const DEFAULT_CACHE_ROOT = '/data/runners';
 export const DEFAULT_RUN_ROOT = '/opt/runners';
@@ -30,6 +31,10 @@ export const DEFAULT_UV = '/usr/local/bin/uv';
 export const DEFAULT_PYTHON = '/usr/bin/python3';
 const SPACE_MARGIN = 1.05;
 const TOOL_OUTPUT_KEPT = 64 * 1024;
+// A .tar.zst may unpack to this many times its own size, and to at least the floor: a pinned file is trusted
+// bytes, so the cap only keeps a bad one from filling the container's disk (Ollama's is about 2.7 times).
+const ZSTD_MAX_RATIO = 32;
+const ZSTD_MIN_LIMIT = 1024 * 1024;
 
 const WHEEL_RE = /^([A-Za-z0-9](?:[A-Za-z0-9._]*[A-Za-z0-9])?)-([A-Za-z0-9.!+_]+)(?:-\d[^-]*)?-[^-]+-[^-]+-[^-]+\.whl$/;
 
@@ -60,17 +65,56 @@ async function copyHashed(source, destination, signal) {
 /**
  * Decompress a pinned .tar.zst into a plain .tar beside it. The image has no
  * zstd tool and runTool gives a process no stdin, so Node's zlib does it and
- * tar then reads the .tar. A stream that is not zstd, or is cut short, is an
- * `install_failed` with the partial .tar removed; a stop ends it as ABORTED.
+ * tar then reads the .tar. A stream that is not zstd, or that unpacks to more
+ * than ZSTD_MAX_RATIO times its size, is an `install_failed` with the partial
+ * .tar removed; a stop ends it as ABORTED. A stream that is cut short is NOT
+ * reported: Node's zstd decoder ends quietly with whatever it decoded (observed
+ * on Node 25.8, down to an empty .tar). Tar may notice, and the executable
+ * check after the unpack (assertLaunchExecutable) is what catches the rest.
  */
 async function decompressZstd(source, destination, { signal, label }) {
+    const limit = Math.max(ZSTD_MIN_LIMIT, ZSTD_MAX_RATIO * (await fs.promises.stat(source)).size);
+    let written = 0;
+    const bounded = new Transform({
+        transform(chunk, _encoding, done) {
+            written += chunk.length;
+            if (written > limit) done(Object.assign(new Error(`it unpacks to more than ${limit} bytes (${ZSTD_MAX_RATIO} times its size)`), { code: 'unpack_limit' }));
+            else done(null, chunk);
+        },
+    });
     try {
-        await pipeline(fs.createReadStream(source), zlib.createZstdDecompress(), fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 }), { signal });
+        await pipeline(fs.createReadStream(source), zlib.createZstdDecompress(), bounded, fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 }), { signal });
     } catch (error) {
         await fs.promises.rm(destination, { force: true });
         if (signal?.aborted) throw new DownloadError('ABORTED', `Stopped while decompressing ${label}`, { retryable: true });
-        throw new LocalLlmError('install_failed', `decompressing ${label} failed: ${error?.code || error?.message || error}`);
+        throw new LocalLlmError('install_failed', `decompressing ${label} failed: ${error?.code === 'unpack_limit' ? error.message : (error?.code || error?.message || error)}`);
     }
+}
+
+/**
+ * After an entry is unpacked: the file its adapter launches (`check.executable`, a path inside the
+ * runnable copy) must be there, a regular file that is executable, and must not lead outside the copy
+ * through a link. A wrong `strip` or a truncated archive gives a copy without it, and nothing else in
+ * the unpack says so. An entry without the field (the image's lock may omit it) is not checked.
+ * Resolves with the file's path, or null when nothing is declared.
+ */
+export async function assertLaunchExecutable(entry, runDir) {
+    const relative = entry.check?.executable;
+    if (!relative) return null;
+    const file = path.join(runDir, relative);
+    const fail = (why) => new LocalLlmError('install_failed', `The unpacked ${entry.id} ${entry.version} has no executable ${relative}: ${why}.`);
+    let real;
+    try {
+        real = await fs.promises.realpath(file);
+    } catch {
+        throw fail('it is not in the runnable copy (a wrong strip, or an archive that was cut short)');
+    }
+    const root = await fs.promises.realpath(runDir);
+    if (real !== root && !real.startsWith(`${root}${path.sep}`)) throw fail('it leads outside the runnable copy');
+    const stats = await fs.promises.stat(real);
+    if (!stats.isFile()) throw fail('it is not a regular file');
+    if ((stats.mode & 0o111) === 0) throw fail('it is not executable');
+    return file;
 }
 
 async function readJson(file) {
@@ -311,11 +355,11 @@ export function createRunnerInstaller({
         }
         // File times are not restored (--touch): on the container's
         // fuse-overlayfs, setting a directory's time fails with EPERM.
-        for (const file of entry.files.filter((candidate) => archiveCompression(candidate.name))) {
+        for (const file of entry.files.filter((candidate) => archiveCompressionFor(entry.kind, candidate.name))) {
             const into = path.join(paths.runDir, file.extract || '.');
             await fs.promises.mkdir(into, { recursive: true });
             const flags = ['-C', into, `--strip-components=${file.strip ?? 1}`, '--no-same-owner', '--touch'];
-            if (archiveCompression(file.name) === 'zst') {
+            if (archiveCompressionFor(entry.kind, file.name) === 'zst') {
                 // <stage>/<name>.tar; the staged .zst and then the .tar go as soon as they are read, since the
                 // container's own filesystem holds the compressed file, the .tar and the unpacked files at once.
                 const staged = path.join(sourceDir, file.name);
@@ -351,6 +395,13 @@ export function createRunnerInstaller({
             const sourceDir = await stageVerified(entry, paths, { signal });
             await fs.promises.rm(paths.runDir, { recursive: true, force: true });
             await build(entry, paths, { signal, sourceDir });
+            // The marker says the copy can run: prove the binary is in it first, and leave no copy behind if it is not.
+            try {
+                await assertLaunchExecutable(entry, paths.runDir);
+            } catch (error) {
+                await fs.promises.rm(paths.runDir, { recursive: true, force: true });
+                throw error;
+            }
         } finally {
             await fs.promises.rm(paths.stageDir, { recursive: true, force: true });
         }

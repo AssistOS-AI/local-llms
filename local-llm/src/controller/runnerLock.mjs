@@ -13,7 +13,8 @@
 //       "licence": { "name", "url", "source"?, "notice"?, "requiresAcceptance", "proprietary"? },
 //       "files": [{ "name", "url", "size", "sha256", "extract"?, "into"?, "strip"? }],
 //       "check": { "distributions": { "<dist>": "<version>" }, "imports": [], "gpuImports": [],
-//                  "optionalLibraries": { "<soname glob>": "<why this runner does not need it>" } }
+//                  "optionalLibraries": { "<soname glob>": "<why this runner does not need it>" },
+//                  "executable": "<path inside the runnable copy of the file the adapter launches>" }
 //     }
 //   }
 // }
@@ -61,6 +62,8 @@ const ID_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 const VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
 const FILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$/;
 const EXTRACT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+// A path inside the runnable copy: plain segments, no '.', '..' or empty one.
+const EXECUTABLE_RE = /^(?!\.{1,2}(?:\/|$))[A-Za-z0-9._+-]{1,80}(?:\/(?!\.{1,2}(?:\/|$))[A-Za-z0-9._+-]{1,80}){0,7}$/;
 const DIST_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const MODULE_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
@@ -98,6 +101,16 @@ function text(value, field, { required = false, max = TEXT_MAX } = {}) {
 export function archiveCompression(name) {
     if (/\.(tar\.gz|tgz)$/.test(name)) return 'gz';
     return /\.tar\.zst$/.test(name) ? 'zst' : null;
+}
+
+/**
+ * The compression of an archive a runner of this kind unpacks, or null. A python runner's source
+ * archives are .tar.gz; .tar.zst is for archive runners. The validator and the installer both ask
+ * this, so a file one accepts as an archive is one the other unpacks.
+ */
+export function archiveCompressionFor(kind, name) {
+    const compression = archiveCompression(name);
+    return compression === 'zst' && kind !== 'archive' ? null : compression;
 }
 
 export function validateLockUrl(value, field) {
@@ -146,9 +159,11 @@ function validateFile(value, field, kind) {
     if (into !== null && (typeof into !== 'string' || !EXTRACT_RE.test(into))) {
         throw invalid(`${field}.into must be a directory name`);
     }
-    const compression = archiveCompression(value.name);
-    // A python runner's source archives stay .tar.gz; .tar.zst is for archive runners.
-    const archive = compression === 'gz' || (compression === 'zst' && kind === 'archive');
+    const archive = archiveCompressionFor(kind, value.name) !== null;
+    // Not an archive for this kind, yet named like one the installer would unpack: refused here, so no data file is ever taken for one.
+    if (!archive && archiveCompression(value.name) !== null) {
+        throw invalid(`${field} is a .tar.zst archive, which only an archive runner may list`);
+    }
     const wheel = value.name.endsWith('.whl');
     if (value.strip !== undefined) {
         if (value.strip !== 0 && value.strip !== 1) throw invalid(`${field}.strip must be 0 or 1`);
@@ -172,12 +187,27 @@ function validateFile(value, field, kind) {
     });
 }
 
-function validateCheck(value, field) {
+function validateCheck(value, field, { kind, requireExecutable = false } = {}) {
+    const needsExecutable = requireExecutable && kind === 'archive';
     if (value === undefined) {
+        if (needsExecutable) throw invalid(`${field}.executable is required: the install must prove the file the adapter launches`);
         return Object.freeze({ distributions: Object.freeze({}), imports: Object.freeze([]), gpuImports: Object.freeze([]), optionalLibraries: Object.freeze({}) });
     }
     if (!plainObject(value)) throw invalid(`${field} must be an object`);
-    onlyKeys(value, ['distributions', 'imports', 'gpuImports', 'optionalLibraries'], field);
+    onlyKeys(value, ['distributions', 'imports', 'gpuImports', 'optionalLibraries', 'executable'], field);
+    // The file the adapter launches, inside the runnable copy. After the unpack it must be there, a regular
+    // executable file: a wrong strip or a truncated archive unpacks to a copy without it, and the decompressor
+    // and tar may not say so.
+    let executable = null;
+    if (value.executable !== undefined) {
+        if (typeof value.executable !== 'string' || !EXECUTABLE_RE.test(value.executable)) {
+            throw invalid(`${field}.executable must be a relative path inside the runnable copy`);
+        }
+        executable = value.executable;
+    }
+    if (needsExecutable && executable === null) {
+        throw invalid(`${field}.executable is required: the install must prove the file the adapter launches`);
+    }
     // Libraries the CI check may find missing because this runner never uses
     // the feature that loads them; each needs its reason.
     const optionalLibraries = {};
@@ -213,10 +243,11 @@ function validateCheck(value, field) {
         imports: modules(value.imports, 'imports'),
         gpuImports: modules(value.gpuImports, 'gpuImports'),
         optionalLibraries: Object.freeze(optionalLibraries),
+        ...(executable ? { executable } : {}),
     });
 }
 
-function validateRunner(id, value) {
+function validateRunner(id, value, options) {
     const field = `runners.${id}`;
     if (!ID_RE.test(id)) throw invalid(`${field}: runner ids are 1-32 lowercase letters, digits, dot, dash or underscore`);
     if (!plainObject(value)) throw invalid(`${field} must be an object`);
@@ -252,7 +283,7 @@ function validateRunner(id, value) {
         kind: value.kind,
         licence,
         files: Object.freeze(files),
-        check: validateCheck(value.check, `${field}.check`),
+        check: validateCheck(value.check, `${field}.check`, { kind: value.kind, ...options }),
     };
     entry.totalBytes = files.reduce((sum, file) => sum + file.size, 0);
     // Names this exact entry: a changed lock entry needs a fresh runnable copy.
@@ -262,18 +293,22 @@ function validateRunner(id, value) {
     return Object.freeze(entry);
 }
 
-export function validateRunnerLock(document) {
+/**
+ * `requireExecutable` makes `check.executable` mandatory for archive runners: the agent's own lock needs it,
+ * since nothing else proves the unpacked copy holds the binary the adapter launches. The image's lock does not.
+ */
+export function validateRunnerLock(document, { requireExecutable = false } = {}) {
     if (!plainObject(document)) throw invalid('The runner lock must be an object');
     onlyKeys(document, ['schema', 'runners'], 'lock');
     if (document.schema !== RUNNER_LOCK_SCHEMA) throw invalid(`Unsupported runner lock schema ${String(document.schema)}`);
     if (!plainObject(document.runners)) throw invalid('runners must be an object');
     const runners = {};
-    for (const [id, value] of Object.entries(document.runners)) runners[id] = validateRunner(id, value);
+    for (const [id, value] of Object.entries(document.runners)) runners[id] = validateRunner(id, value, { requireExecutable });
     return Object.freeze({ schema: RUNNER_LOCK_SCHEMA, runners: Object.freeze(runners) });
 }
 
 /** The image's lock, or an empty lock when the image has none (an older image). */
-export function loadRunnerLock(file = DEFAULT_RUNNER_LOCK, { fsApi = fs } = {}) {
+export function loadRunnerLock(file = DEFAULT_RUNNER_LOCK, { fsApi = fs, requireExecutable = false } = {}) {
     let text;
     try {
         text = fsApi.readFileSync(file, 'utf8');
@@ -281,7 +316,7 @@ export function loadRunnerLock(file = DEFAULT_RUNNER_LOCK, { fsApi = fs } = {}) 
         if (error?.code === 'ENOENT') return Object.freeze({ schema: RUNNER_LOCK_SCHEMA, runners: Object.freeze({}) });
         throw error;
     }
-    return validateRunnerLock(JSON.parse(text));
+    return validateRunnerLock(JSON.parse(text), { requireExecutable });
 }
 
 /** The agent's lock file for a CPU architecture (Node's `process.arch`), or null for an architecture that has none. */
@@ -305,7 +340,7 @@ export function loadRunnerLocks({ image = DEFAULT_RUNNER_LOCK, agent = agentRunn
     const ignored = [];
     if (agent) {
         try {
-            fromAgent = loadRunnerLock(agent, { fsApi });
+            fromAgent = loadRunnerLock(agent, { fsApi, requireExecutable: true });
         } catch (error) {
             ignored.push({ file: agent, reason: error?.message || String(error) });
         }

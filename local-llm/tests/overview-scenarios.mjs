@@ -1,11 +1,14 @@
-// The dedicated and unified overviews the GPU-profile regression test compares (Phase 3, DS004).
-// Not a test file itself (the gate runs tests/*.test.mjs only). It depends on nothing Phase 3 added, so the
-// same scenarios ran against the tree at a84617d to produce overview-golden-a84617d.json, which holds what
-// the dedicated and unified profiles showed before llama.cpp's CPU build and the agent's lock existed.
+// What the GPU-profile regression test compares (Phase 3, DS004): the dedicated and unified overviews, and
+// adding and running an Ollama tag on dedicated hosts. Not a test file itself (the gate runs tests/*.test.mjs
+// only). It depends on nothing Phase 3 added, so the same scenarios ran against the tree at a84617d to produce
+// overview-golden-a84617d.json, which holds what those profiles did before llama.cpp's CPU build, the agent's
+// lock and the Ollama pin existed.
 //
 // To regenerate: extract that commit (`git archive a84617d local-llm | tar -x -C <dir>`), then in <dir>/local-llm
-// call collectOverviews with that tree's createController, createStateStore and validateModel and a makeInstaller
-// that builds its installer from the image lock alone (loadRunnerLock), and write the result.
+// call collectOverviews and collectOllamaRuns with that tree's createController, createStateStore and
+// validateModel and a makeInstaller that builds its installer from the image lock alone (loadRunnerLock), and
+// write { scenarios, ollamaRuns } beside a _meta note.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -104,4 +107,126 @@ export async function collectOverviews({ createController, createStateStore, val
         }
     }
     return overviews;
+}
+
+// The runner's manifest as a finished pull leaves it, and where Ollama's store keeps it.
+const FAKE_MANIFEST = JSON.stringify({
+    schemaVersion: 2, layers: [{ digest: `sha256:${'b'.repeat(64)}`, size: 16, mediaType: 'application/vnd.ollama.image.model' }],
+});
+
+function writeOllamaStore(dataDir, tag) {
+    const modelsDir = path.join(dataDir, 'models', 'ollama');
+    fs.mkdirSync(path.join(modelsDir, 'blobs'), { recursive: true });
+    fs.writeFileSync(path.join(modelsDir, 'blobs', `sha256-${'b'.repeat(64)}`), Buffer.alloc(16));
+    const [name, version = 'latest'] = tag.split(':');
+    const target = path.join(modelsDir, 'manifests', 'registry.ollama.ai', 'library', name, version);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, FAKE_MANIFEST);
+}
+
+export const OLLAMA_RUN_SCENARIOS = Object.freeze({
+    'dedicated, amd64 image with Ollama in it': {
+        imageContract: { architecture: 'amd64', llama_cpp: 'b11159', ik_llama_cpp: '20f7a72' },
+        present: ['/opt/llama.cpp/llama-server', '/opt/ik_llama.cpp/llama-server', '/opt/ollama/bin/ollama'],
+    },
+    'dedicated, no image contract': { imageContract: null, present: null },
+    'dedicated, arm64 image without Ollama': {
+        imageContract: { architecture: 'arm64', llama_cpp: 'b11159', gpu_compute_capabilities: '8.6' }, present: ['/opt/llama.cpp/llama-server'],
+    },
+});
+
+/**
+ * On a dedicated host: add an Ollama library tag (what the dashboard's form stores), run it, and record what came
+ * of each step as plain JSON: the stored entry, the process the controller launched, every request it made to
+ * Ollama, the chat target, and the deployment's facts; or the code and message of a refusal. `resolveOllama` is
+ * handed to the controller as it is, for a caller that wants to know whether the registry was asked. Paths under
+ * the data directory are written as <data>.
+ */
+export async function collectOllamaRuns({ createController, createStateStore, validateModel, makeInstaller, resolveOllama = undefined }) {
+    const runs = {};
+    for (const [name, scenario] of Object.entries(OLLAMA_RUN_SCENARIOS)) {
+        const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-ollama-run-'));
+        let controller = null;
+        try {
+            const imageLockFile = path.join(dataDir, 'image.lock.json');
+            fs.writeFileSync(imageLockFile, JSON.stringify(IMAGE_LOCK));
+            const started = [];
+            const calls = [];
+            controller = createController({
+                dataDir,
+                env: { PATH: '/usr/bin' },
+                seedCatalog: [validateModel(MODELS[0], { seed: true })],
+                stateStore: createStateStore({ dataDir }),
+                snapshot: async () => ({ gpu: structuredClone(x86), memory: { totalBytes: 31 * GIB, availableBytes: 24 * GIB }, disk: { freeBytes: 300 * GIB, totalBytes: 500 * GIB }, cpus: 20 }),
+                installer: makeInstaller({ imageLockFile, dataDir }),
+                imageContract: scenario.imageContract,
+                fileExists: scenario.present ? (file) => scenario.present.includes(file) : () => true,
+                hostArch: 'x64',
+                sharedModelsRoot: null,
+                download: async () => ({ status: 'complete', path: '/data/models/gguf/x.gguf', bytesTransferred: 0 }),
+                inspect: async () => ({ state: 'absent', bytes: 0 }),
+                remove: async () => 0,
+                startRunner({ command, args, env }) {
+                    let running = true;
+                    let resolveExit;
+                    const handle = {
+                        pid: 5000 + started.length, command, args, env,
+                        exited: new Promise((resolve) => { resolveExit = resolve; }),
+                        get running() { return running; },
+                        async stop() { running = false; resolveExit({ code: 0, signal: 'SIGTERM', error: null }); return handle.exited; },
+                    };
+                    started.push(handle);
+                    return handle;
+                },
+                fetchImpl: async (url, options = {}) => {
+                    const pathname = new URL(String(url)).pathname;
+                    calls.push([String(url), options.method || 'GET', options.body ? JSON.parse(options.body) : null]);
+                    if (pathname === '/api/pull') {
+                        writeOllamaStore(dataDir, 'gpt-oss:20b');
+                        return { ok: true, status: 200, body: [new TextEncoder().encode(`${JSON.stringify({ status: 'success' })}\n`)] };
+                    }
+                    if (pathname === '/api/ps') {
+                        return { ok: true, status: 200, json: async () => ({ models: [{ name: 'gpt-oss:20b', size: 16, size_vram: 8, context_length: 4096 }] }) };
+                    }
+                    return { ok: true, status: 200, json: async () => ({}) };
+                },
+                apiKeyFactory: () => 'k'.repeat(43),
+                detectRunner: (runner) => ({ installed: runner.supported, version: runner.pinnedVersion, reason: null }),
+                pollMs: 2,
+                stopGraceMs: 50,
+                readMemory: () => ({ totalBytes: 31 * GIB, availableBytes: 24 * GIB }),
+                readPressure: () => 0,
+                ...(resolveOllama ? { resolveOllama } : {}),
+            });
+            await controller.overview();
+            const added = await controller.addModel({ id: 'olla-user', sources: { ollama: { type: 'ollama', tag: 'gpt-oss:20b' } } });
+            const record = { added: added.model.sources, stored: structuredClone(controller.state.registry.map((entry) => entry.sources)) };
+            try {
+                const accepted = await controller.run({ modelId: 'olla-user', runnerId: 'ollama', requestId: 'request-0001' });
+                record.accepted = accepted.accepted;
+                const deadline = Date.now() + 3000;
+                while (!['ready', 'error'].includes(controller.state.deployment?.phase) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+                const deployment = controller.state.deployment;
+                record.phase = deployment.phase;
+                record.error = deployment.error;
+                record.profile = deployment.profile;
+                record.params = deployment.params;
+                record.admission = { status: deployment.admission.status, reason: deployment.admission.reason };
+                record.artifact = deployment.artifact;
+                record.resolved = deployment.resolved ?? null;
+                record.runner = deployment.runner ? { ollama: deployment.runner.ollama, port: deployment.runner.port } : null;
+                record.process = started[0] ? { command: started[0].command, args: started[0].args, env: started[0].env } : null;
+                record.calls = calls;
+                record.chatTarget = deployment.phase === 'ready' ? controller.chatTarget() : null;
+                await controller.stop();
+            } catch (error) {
+                record.refused = { code: error.code, message: error.message };
+            }
+            runs[name] = JSON.parse(JSON.stringify(record).split(dataDir).join('<data>'));
+        } finally {
+            await controller?.drain();
+            fs.rmSync(dataDir, { recursive: true, force: true });
+        }
+    }
+    return runs;
 }

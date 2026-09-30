@@ -1616,12 +1616,26 @@ export function createController({
         });
     }
 
+    // A pin in flight ends when the agent drains, like a lookup. The pins that read a registry (an Ollama
+    // tag, on the committed cpu profile alone) take the signal; the others read Hugging Face as they always did.
+    const pinning = new Set();
+
     async function pinSources(entry) {
-        const sources = { ...entry.sources };
-        for (const [format, source] of Object.entries(sources)) {
-            sources[format] = await storeFor(source).pin(source);
+        if (draining) throw new LocalLlmError('shutting_down', 'The agent is restarting; add the model again once it is back.');
+        const stop = new AbortController();
+        pinning.add(stop);
+        try {
+            const sources = { ...entry.sources };
+            for (const [format, source] of Object.entries(sources)) {
+                sources[format] = await storeFor(source).pin(source, { profile, signal: stop.signal });
+            }
+            return { ...entry, sources };
+        } catch (error) {
+            if (stop.signal.aborted) throw new LocalLlmError('shutting_down', 'The agent is restarting; add the model again once it is back.');
+            throw error;
+        } finally {
+            pinning.delete(stop);
         }
-        return { ...entry, sources };
     }
 
     // Against every seed and every stored entry, whatever the profile or schema:
@@ -1883,6 +1897,7 @@ export function createController({
         draining = true;
         planning?.abort();
         for (const stop of lookups) stop.abort();
+        for (const stop of pinning) stop.abort();
         // The active job, then every hardware query (the job's, a command's or
         // the overview's), stop at once: a snapshot's nvidia-smi queries can
         // take 10 s each. A killed query is waited for during the command wait

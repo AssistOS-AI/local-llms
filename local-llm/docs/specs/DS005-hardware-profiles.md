@@ -148,7 +148,7 @@ Ollama's CPU parameters (`paramSchemaFor('cpu')`; the dedicated schema is unchan
 | `numThread` | an integer from 1 to 256, or empty for Ollama's default |
 | `keepAlive` | as in the dedicated schema |
 
-`numGpu` is fixed at 0, flash attention is Ollama's default, and the KV cache type is fixed at f16 (`OLLAMA_KV_CACHE_TYPE`). The CPU launch has no `LD_LIBRARY_PATH` and an empty `CUDA_VISIBLE_DEVICES`, and every load and chat request carries `num_gpu: 0` (`requestOptions` with the profile; `chatTarget` passes it). The adapter starts `<runnable copy>/bin/ollama` when the agent's lock installed it (the arm64 image has no Ollama; the archive unpacks with `strip: 0`) and the image's `/opt/ollama/bin/ollama` otherwise, and detection asks the image's binary first and the installer second.
+`numGpu` is fixed at 0, flash attention is Ollama's default, and the KV cache type is fixed at f16 (`OLLAMA_KV_CACHE_TYPE`). The CPU launch has no `LD_LIBRARY_PATH` and an empty `CUDA_VISIBLE_DEVICES`, and the load request carries `num_gpu: 0` (`requestOptions` with the profile). The chat target carries the same options, but the chat responder does not forward them, because Ollama's OpenAI-compatible endpoint takes no `options`: what keeps a chat request off a GPU is the hidden device, not a request option. The adapter starts `<runnable copy>/bin/ollama` when the agent's lock installed it (the arm64 image has no Ollama; the archive unpacks with `strip: 0`) and the image's `/opt/ollama/bin/ollama` otherwise, and detection asks the image's binary first and the installer second.
 
 `admitCpuOllama` sizes a run from the tag's pinned size, never from a measurement. The need is the sum of:
 
@@ -157,7 +157,7 @@ Ollama's CPU parameters (`paramSchemaFor('cpu')`; the dedicated schema is unchan
 - compute buffers at llama.cpp's flash-attention formula and Ollama's default batch of 512 (216.92 MiB);
 - 768 MiB for the Ollama server and its runner process (provisional).
 
-It is checked against the same pool, reserve and floor as llama.cpp, and the memory guard stops the runner below that floor. A tag whose size is not pinned, such as an entry stored before tags were pinned, is `incompatible` with "The tag's size is not pinned; update the model entry so it is pinned." An Update that names the bare tag pins it (DS002). The size is also what the pull's disk check counts.
+It is checked against the same pool, reserve and floor as llama.cpp, and the memory guard stops the runner below that floor. A tag whose size is not pinned, such as an entry stored before tags were pinned or added on another profile, is `incompatible` with "The tag's size is not pinned; update the model entry so it is pinned." An Update that names the bare tag pins it (DS002). The size is also what the pull's disk check counts.
 
 That `num_gpu: 0` and the hidden device keep `size_vram` at 0 in Ollama 0.34.4 is an assumption until a live run shows `sizeVramBytes: 0` in the state file.
 

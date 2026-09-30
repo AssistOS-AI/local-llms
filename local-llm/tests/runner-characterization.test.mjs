@@ -5,10 +5,8 @@
 // Hardware profiles (DS005) changed three things on purpose: every runner's
 // environment names CUDA_CACHE_PATH in the container's own filesystem, the
 // llama-server parameters have loadMode instead of mlock and noMmap, and the
-// overview carries the profile. Adding an Ollama tag reads its identity from the
-// registry since Phase 3 (DS002), so the Ollama test names the identity of its fake store.
+// overview carries the profile.
 import assert from 'node:assert/strict';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -35,7 +33,7 @@ const SNAPSHOT = Object.freeze({
     cpus: 20,
 });
 
-function harness(t, { fetchImpl, download, resolveOllama } = {}) {
+function harness(t, { fetchImpl, download } = {}) {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-characterize-'));
     t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
     const started = [];
@@ -61,7 +59,6 @@ function harness(t, { fetchImpl, download, resolveOllama } = {}) {
             return handle;
         },
         fetchImpl,
-        ...(resolveOllama ? { resolveOllama } : {}),
         apiKeyFactory: () => KEY,
         detectRunner: (runner) => ({ installed: runner.supported, version: runner.pinnedVersion, reason: null }),
         pollMs: 2,
@@ -79,12 +76,6 @@ async function until(predicate, timeoutMs = 2000) {
     assert.fail('condition not reached');
 }
 
-const FAKE_MANIFEST = JSON.stringify({
-    schemaVersion: 2, layers: [{ digest: `sha256:${'b'.repeat(64)}`, size: 16, mediaType: 'application/vnd.ollama.image.model' }],
-});
-// What the registry would say about the manifest the fake store writes.
-const FAKE_STORE_IDENTITY = Object.freeze({ manifestDigest: `sha256:${crypto.createHash('sha256').update(FAKE_MANIFEST).digest('hex')}`, size: 16 });
-
 function writeOllamaModel(dataDir, tag) {
     const modelsDir = path.join(dataDir, 'models', 'ollama');
     const hex = 'b'.repeat(64);
@@ -92,7 +83,9 @@ function writeOllamaModel(dataDir, tag) {
     fs.writeFileSync(path.join(modelsDir, 'blobs', `sha256-${hex}`), Buffer.alloc(16));
     const target = manifestPath(modelsDir, tag);
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, FAKE_MANIFEST);
+    fs.writeFileSync(target, JSON.stringify({
+        schemaVersion: 2, layers: [{ digest: `sha256:${hex}`, size: 16, mediaType: 'application/vnd.ollama.image.model' }],
+    }));
 }
 
 test('llama.cpp: the exact launch, probes and chat target', async (t) => {
@@ -138,7 +131,6 @@ test('Ollama: the exact launch, pull, load, probes and chat target', async (t) =
     const encoder = new TextEncoder();
     let h;
     h = harness(t, {
-        resolveOllama: async () => FAKE_STORE_IDENTITY,
         fetchImpl: async (url, options = {}) => {
             const pathname = new URL(String(url)).pathname;
             calls.push([String(url), options.method || 'GET', options.body ? JSON.parse(options.body) : null]);
@@ -153,7 +145,7 @@ test('Ollama: the exact launch, pull, load, probes and chat target', async (t) =
         },
     });
     // The seed pins a manifest digest this fake store does not produce, so
-    // characterize with a user entry for the same tag, pinned to what this fake store holds.
+    // characterize with an unpinned user entry for the same tag.
     await h.controller.addModel({ id: 'olla-user', sources: { ollama: { type: 'ollama', tag: 'gpt-oss:20b' } } });
     const accepted = await h.controller.run({ modelId: 'olla-user', runnerId: 'ollama', requestId: 'request-0001' });
     assert.equal(accepted.deployment.phase, 'starting');

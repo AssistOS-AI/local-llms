@@ -17,7 +17,10 @@
           "size": 17531126,
           "sha256": "cd54d7dcf8818acc69c54dfc559b36da5f693d30b223e8dde87b4da4570664ed"
         }
-      ]
+      ],
+      "check": {
+        "executable": "llama-server"
+      }
     }
   }
 }

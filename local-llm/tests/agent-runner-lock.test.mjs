@@ -101,7 +101,9 @@ test('the agent lock for this platform is merged with the image lock; an id in b
         return file;
     };
     const imageFile = write('image.json', { both: lockRunner('both-image.tar.gz', { version: '1.0.0' }), imageonly: lockRunner('imageonly.tar.gz') });
-    const agentFile = write('agent.json', { both: lockRunner('both-agent.tar.zst', { version: '9.9.9' }), agentonly: lockRunner('agentonly.tar.zst') });
+    // The agent's lock must say which file each archive runner launches (check.executable); the image's need not.
+    const launches = { check: { executable: 'bin/launch' } };
+    const agentFile = write('agent.json', { both: lockRunner('both-agent.tar.zst', { version: '9.9.9', ...launches }), agentonly: lockRunner('agentonly.tar.zst', launches) });
     const merged = loadRunnerLocks({ image: imageFile, agent: agentFile });
     assert.deepEqual(Object.keys(merged.runners).sort(), ['agentonly', 'both', 'imageonly']);
     // The image's entry wins, whole: its version, its files and its digest.
@@ -194,8 +196,9 @@ test('a .tar.zst archive is accepted with strip 0 and validated like a .tar.gz',
     assert.throws(one(lockFile('a.zip')), /\.tar\.gz archive or a \.tar\.zst archive/);
     assert.equal(one(lockFile('a.tar.gz', { strip: 0 }))().runners.r.files[0].strip, 0);
     // A python runner's source archives stay .tar.gz: .tar.zst is for archive runners.
-    assert.throws(one(lockFile('a.tar.zst', { extract: 'src' }), 'python'), /wheel, a \.tar\.gz archive with extract, or a data file with into/);
-    assert.throws(one(lockFile('a.tar.zst', { strip: 0 }), 'python'), /strip is only for archives/);
+    for (const extra of [{ extract: 'src' }, { strip: 0 }, { into: 'data' }]) {
+        assert.throws(one(lockFile('a.tar.zst', extra), 'python'), /is a \.tar\.zst archive, which only an archive runner may list/, JSON.stringify(extra));
+    }
 });
 
 // A tar of a small runner: bin/runner and VERSION, entries at its root (strip 0).
@@ -473,7 +476,8 @@ function ollamaInstaller(t, { image = {} } = {}) {
     fs.writeFileSync(agent, JSON.stringify(lockDocument({
         ollama: { version: '0.34.4', kind: 'archive', licence: { name: 'MIT', url: 'https://github.com/ollama/ollama/blob/v0.34.4/LICENSE' },
             files: [{ name: 'ollama-linux-arm64.tar.zst', url: 'https://github.com/ollama/ollama/releases/download/v0.34.4/ollama-linux-arm64.tar.zst',
-                size: archive.length, sha256: SHA(archive), strip: 0 }] },
+                size: archive.length, sha256: SHA(archive), strip: 0 }],
+            check: { executable: 'bin/ollama' } },
     })));
     const imageFile = path.join(root, 'image.json');
     fs.writeFileSync(imageFile, JSON.stringify(lockDocument(image)));
@@ -543,7 +547,8 @@ test('Ollama installed on demand runs from its runnable copy, with GPUs hidden a
     assert.equal(process.env.OLLAMA_KV_CACHE_TYPE, 'f16');
     assert.equal(process.env.OLLAMA_CONTEXT_LENGTH, '4096');
     assert.equal(Object.hasOwn(process.env, 'OLLAMA_FLASH_ATTENTION'), false);
-    // The model is loaded with no layer on a GPU, and every chat request says the same.
+    // The model is loaded with no layer on a GPU. The chat target carries the same options, but the chat responder does not
+    // forward them (Ollama's /v1 endpoint takes no `options`): what keeps a chat request off the GPU is the hidden device.
     const load = calls.find(([pathname]) => pathname === '/api/generate');
     assert.deepEqual(load[2].options, { num_ctx: 4096, num_gpu: 0 });
     assert.deepEqual(controller.state.deployment.params, { numCtx: 4096, numThread: null, keepAlive: '30m' });
@@ -613,7 +618,9 @@ test('an Ollama pull whose stored manifest differs from the pinned digest fails 
 test('an Ollama tag is pinned at add with the manifest digest and the size of its layers', async (t) => {
     const manifest = manifestBytes({ config: 500, layers: [1000, 2000], spacing: 2 });
     const reg = await registry(t, { '/v2/library/qwen2.5/manifests/0.5b': { body: manifest } });
-    const { controller, dataDir } = controllerOn(t, { seed: [], resolveOllama: (tag) => fetchOllamaRegistryManifest(tag, { baseUrl: reg.base }) });
+    const { controller, dataDir } = controllerOn(t, { seed: [], resolveOllama: (tag, options) => fetchOllamaRegistryManifest(tag, { baseUrl: reg.base, ...options }) });
+    // The pin belongs to the cpu profile, which the dashboard's first overview commits.
+    assert.equal((await controller.overview()).profile, 'cpu');
     const added = await controller.addModel({ id: 'user-olla', sources: { ollama: { type: 'ollama', tag: TAG } } });
     // The digest of the exact bytes the registry sent, and config plus layers.
     const pin = { type: 'ollama', tag: TAG, manifestDigest: `sha256:${sha256(manifest)}`, size: 3500 };
@@ -657,7 +664,8 @@ function cpuBuildInstaller(t) {
     fs.writeFileSync(agent, JSON.stringify(lockDocument({
         'llama.cpp-cpu': { version: 'b11295', kind: 'archive', licence: { name: 'MIT', url: 'https://github.com/ggml-org/llama.cpp/blob/b11295/LICENSE' },
             files: [{ name: 'llama-b11295-bin-ubuntu-arm64.tar.gz', url: 'https://github.com/ggml-org/llama.cpp/releases/download/b11295/llama-b11295-bin-ubuntu-arm64.tar.gz',
-                size: archive.length, sha256: SHA(archive) }] },
+                size: archive.length, sha256: SHA(archive) }],
+            check: { executable: 'llama-server' } },
     })));
     const imageFile = path.join(root, 'image.json');
     fs.writeFileSync(imageFile, JSON.stringify(lockDocument({})));
@@ -754,19 +762,19 @@ const CATALOG = new URL('../catalog/', import.meta.url);
 const PINS = Object.freeze({
     arm64: {
         ollama: {
-            version: '0.34.4', licence: 'https://github.com/ollama/ollama/blob/v0.34.4/LICENSE',
+            version: '0.34.4', licence: 'https://github.com/ollama/ollama/blob/v0.34.4/LICENSE', executable: 'bin/ollama',
             file: { name: 'ollama-linux-arm64.tar.zst', url: 'https://github.com/ollama/ollama/releases/download/v0.34.4/ollama-linux-arm64.tar.zst',
                 size: 1549684612, sha256: '96f50a1192133028cf4e010d8c333f8af14b1505db6be7b2034c11487e7fd7e6', strip: 0 },
         },
         'llama.cpp-cpu': {
-            version: 'b11295', licence: 'https://github.com/ggml-org/llama.cpp/blob/b11295/LICENSE',
+            version: 'b11295', licence: 'https://github.com/ggml-org/llama.cpp/blob/b11295/LICENSE', executable: 'llama-server',
             file: { name: 'llama-b11295-bin-ubuntu-arm64.tar.gz', url: 'https://github.com/ggml-org/llama.cpp/releases/download/b11295/llama-b11295-bin-ubuntu-arm64.tar.gz',
                 size: 13577862, sha256: '439dff1fdb5d223f1d1e1adacd6845abff12aa518b746e2a2f4f01d55d57aae9' },
         },
     },
     amd64: {
         'llama.cpp-cpu': {
-            version: 'b11295', licence: 'https://github.com/ggml-org/llama.cpp/blob/b11295/LICENSE',
+            version: 'b11295', licence: 'https://github.com/ggml-org/llama.cpp/blob/b11295/LICENSE', executable: 'llama-server',
             file: { name: 'llama-b11295-bin-ubuntu-x64.tar.gz', url: 'https://github.com/ggml-org/llama.cpp/releases/download/b11295/llama-b11295-bin-ubuntu-x64.tar.gz',
                 size: 17531126, sha256: 'cd54d7dcf8818acc69c54dfc559b36da5f693d30b223e8dde87b4da4570664ed' },
         },
@@ -779,7 +787,7 @@ test('the shipped agent locks pin exactly what the release metadata gave: Ollama
         const text = fs.readFileSync(file, 'utf8');
         // JSON in two-space indentation (DS006), and a lock the loader accepts as it is.
         assert.equal(text, `${JSON.stringify(JSON.parse(text), null, 2)}\n`, arch);
-        const lock = loadRunnerLock(file.pathname);
+        const lock = loadRunnerLock(file.pathname, { requireExecutable: true });
         assert.deepEqual(Object.keys(lock.runners).sort(), Object.keys(expected).sort(), arch);
         for (const [id, pin] of Object.entries(expected)) {
             const entry = lock.runners[id];
@@ -788,6 +796,8 @@ test('the shipped agent locks pin exactly what the release metadata gave: Ollama
             assert.equal(entry.files.length, 1);
             assert.deepEqual({ ...entry.files[0] }, pin.file, `${arch} ${id}`);
             assert.equal(entry.totalBytes, pin.file.size);
+            // The file the install proves, and the adapters launch: the agent's lock names it.
+            assert.equal(entry.check.executable, pin.executable, `${arch} ${id}`);
             // Every file is on an allowed host, is the asset of the tag it names, and the runner has an adapter that pins the same version.
             assert.equal(new URL(entry.files[0].url).hostname, 'github.com');
             assert.ok(entry.files[0].url.includes(`/download/${entry.version === '0.34.4' ? 'v0.34.4' : entry.version}/`), `${arch} ${id}`);

@@ -18,7 +18,10 @@
           "sha256": "96f50a1192133028cf4e010d8c333f8af14b1505db6be7b2034c11487e7fd7e6",
           "strip": 0
         }
-      ]
+      ],
+      "check": {
+        "executable": "bin/ollama"
+      }
     },
     "llama.cpp-cpu": {
       "version": "b11295",
@@ -36,7 +39,10 @@
           "size": 13577862,
           "sha256": "439dff1fdb5d223f1d1e1adacd6845abff12aa518b746e2a2f4f01d55d57aae9"
         }
-      ]
+      ],
+      "check": {
+        "executable": "llama-server"
+      }
     }
   }
 }

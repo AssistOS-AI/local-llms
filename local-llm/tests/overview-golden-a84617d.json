@@ -1,7 +1,7 @@
 {
   "_meta": {
-    "generatedFrom": "a84617d (Phase 2 fix round head, before llama.cpp-cpu and the agent lock)",
-    "how": "git archive a84617d local-llm; collectOverviews from tests/overview-scenarios.mjs with that tree's modules and an installer over the image lock alone"
+    "generatedFrom": "a84617d (Phase 2 fix round head, before llama.cpp-cpu, the agent lock and the Ollama pin)",
+    "how": "git archive a84617d local-llm; collectOverviews and collectOllamaRuns from tests/overview-scenarios.mjs with that tree's modules and an installer over the image lock alone"
   },
   "scenarios": {
     "dedicated, amd64 image": {
@@ -3933,6 +3933,262 @@
       ],
       "deployment": null,
       "gatewayModel": "soul_gateway/local-llms/local-llm/default"
+    }
+  },
+  "ollamaRuns": {
+    "dedicated, amd64 image with Ollama in it": {
+      "added": {
+        "ollama": {
+          "type": "ollama",
+          "tag": "gpt-oss:20b"
+        }
+      },
+      "stored": [
+        {
+          "ollama": {
+            "type": "ollama",
+            "tag": "gpt-oss:20b"
+          }
+        }
+      ],
+      "accepted": true,
+      "phase": "ready",
+      "error": null,
+      "profile": "dedicated",
+      "params": {
+        "numCtx": 4096,
+        "numGpu": null,
+        "numThread": null,
+        "flashAttention": null,
+        "kvCacheType": "f16",
+        "keepAlive": "30m"
+      },
+      "admission": {
+        "status": "ok",
+        "reason": null
+      },
+      "artifact": {
+        "type": "ollama",
+        "tag": "gpt-oss:20b"
+      },
+      "resolved": {
+        "manifestDigest": "sha256:056d21726a745c4473c6f19027776ec800316970cbacb82373d0f5a3d6b9b6a0",
+        "blobs": [
+          "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ]
+      },
+      "runner": {
+        "ollama": {
+          "sizeBytes": 16,
+          "sizeVramBytes": 8,
+          "contextLength": 4096
+        },
+        "port": 18434
+      },
+      "process": {
+        "command": "/opt/ollama/bin/ollama",
+        "args": [
+          "serve"
+        ],
+        "env": {
+          "PATH": "/usr/bin",
+          "HOME": "<data>/home",
+          "LANG": "C.UTF-8",
+          "CUDA_CACHE_PATH": "/opt/runners/.cuda-cache",
+          "OLLAMA_MODELS": "<data>/models/ollama",
+          "OLLAMA_HOST": "127.0.0.1:18434",
+          "OLLAMA_NUM_PARALLEL": "1",
+          "OLLAMA_MAX_LOADED_MODELS": "1",
+          "OLLAMA_KV_CACHE_TYPE": "f16",
+          "OLLAMA_CONTEXT_LENGTH": "4096",
+          "OLLAMA_KEEP_ALIVE": "30m",
+          "OLLAMA_NO_CLOUD": "1",
+          "LD_LIBRARY_PATH": "/usr/local/nvidia/lib64"
+        }
+      },
+      "calls": [
+        [
+          "http://127.0.0.1:18434/api/version",
+          "GET",
+          null
+        ],
+        [
+          "http://127.0.0.1:18434/api/pull",
+          "POST",
+          {
+            "model": "gpt-oss:20b",
+            "stream": true
+          }
+        ],
+        [
+          "http://127.0.0.1:18434/api/generate",
+          "POST",
+          {
+            "model": "gpt-oss:20b",
+            "prompt": "",
+            "stream": false,
+            "options": {
+              "num_ctx": 4096
+            },
+            "keep_alive": "30m"
+          }
+        ],
+        [
+          "http://127.0.0.1:18434/api/ps",
+          "GET",
+          null
+        ]
+      ],
+      "chatTarget": {
+        "runnerId": "ollama",
+        "modelId": "olla-user",
+        "baseUrl": "http://127.0.0.1:18434",
+        "apiKey": null,
+        "model": "gpt-oss:20b",
+        "requestOptions": {
+          "options": {
+            "num_ctx": 4096
+          },
+          "keep_alive": "30m"
+        }
+      }
+    },
+    "dedicated, no image contract": {
+      "added": {
+        "ollama": {
+          "type": "ollama",
+          "tag": "gpt-oss:20b"
+        }
+      },
+      "stored": [
+        {
+          "ollama": {
+            "type": "ollama",
+            "tag": "gpt-oss:20b"
+          }
+        }
+      ],
+      "accepted": true,
+      "phase": "ready",
+      "error": null,
+      "profile": "dedicated",
+      "params": {
+        "numCtx": 4096,
+        "numGpu": null,
+        "numThread": null,
+        "flashAttention": null,
+        "kvCacheType": "f16",
+        "keepAlive": "30m"
+      },
+      "admission": {
+        "status": "ok",
+        "reason": null
+      },
+      "artifact": {
+        "type": "ollama",
+        "tag": "gpt-oss:20b"
+      },
+      "resolved": {
+        "manifestDigest": "sha256:056d21726a745c4473c6f19027776ec800316970cbacb82373d0f5a3d6b9b6a0",
+        "blobs": [
+          "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ]
+      },
+      "runner": {
+        "ollama": {
+          "sizeBytes": 16,
+          "sizeVramBytes": 8,
+          "contextLength": 4096
+        },
+        "port": 18434
+      },
+      "process": {
+        "command": "/opt/ollama/bin/ollama",
+        "args": [
+          "serve"
+        ],
+        "env": {
+          "PATH": "/usr/bin",
+          "HOME": "<data>/home",
+          "LANG": "C.UTF-8",
+          "CUDA_CACHE_PATH": "/opt/runners/.cuda-cache",
+          "OLLAMA_MODELS": "<data>/models/ollama",
+          "OLLAMA_HOST": "127.0.0.1:18434",
+          "OLLAMA_NUM_PARALLEL": "1",
+          "OLLAMA_MAX_LOADED_MODELS": "1",
+          "OLLAMA_KV_CACHE_TYPE": "f16",
+          "OLLAMA_CONTEXT_LENGTH": "4096",
+          "OLLAMA_KEEP_ALIVE": "30m",
+          "OLLAMA_NO_CLOUD": "1",
+          "LD_LIBRARY_PATH": "/usr/local/nvidia/lib64"
+        }
+      },
+      "calls": [
+        [
+          "http://127.0.0.1:18434/api/version",
+          "GET",
+          null
+        ],
+        [
+          "http://127.0.0.1:18434/api/pull",
+          "POST",
+          {
+            "model": "gpt-oss:20b",
+            "stream": true
+          }
+        ],
+        [
+          "http://127.0.0.1:18434/api/generate",
+          "POST",
+          {
+            "model": "gpt-oss:20b",
+            "prompt": "",
+            "stream": false,
+            "options": {
+              "num_ctx": 4096
+            },
+            "keep_alive": "30m"
+          }
+        ],
+        [
+          "http://127.0.0.1:18434/api/ps",
+          "GET",
+          null
+        ]
+      ],
+      "chatTarget": {
+        "runnerId": "ollama",
+        "modelId": "olla-user",
+        "baseUrl": "http://127.0.0.1:18434",
+        "apiKey": null,
+        "model": "gpt-oss:20b",
+        "requestOptions": {
+          "options": {
+            "num_ctx": 4096
+          },
+          "keep_alive": "30m"
+        }
+      }
+    },
+    "dedicated, arm64 image without Ollama": {
+      "added": {
+        "ollama": {
+          "type": "ollama",
+          "tag": "gpt-oss:20b"
+        }
+      },
+      "stored": [
+        {
+          "ollama": {
+            "type": "ollama",
+            "tag": "gpt-oss:20b"
+          }
+        }
+      ],
+      "refused": {
+        "code": "runner_unavailable",
+        "message": "Ollama is not available on this platform: this image does not include it."
+      }
     }
   }
 }
