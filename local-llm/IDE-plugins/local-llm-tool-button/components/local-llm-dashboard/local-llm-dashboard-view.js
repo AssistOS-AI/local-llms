@@ -290,6 +290,22 @@ function installProgress(state) {
 }
 
 /**
+ * The Runners tab's intro, from the overview: the runners the image itself
+ * contains, and whether any other runner can be installed here. Plain text.
+ */
+export function runnersIntroText(runners = []) {
+    const list = (Array.isArray(runners) ? runners : []).filter(Boolean);
+    if (!list.length) return '';
+    const inImage = list.filter((runner) => runner.supported !== false && !runner.install)
+        .map((runner) => runner.displayName || runner.id);
+    const first = inImage.length ? `In this image: ${inImage.join(', ')}.` : 'No runner is part of this image.';
+    const second = list.some((runner) => runner.install)
+        ? 'Other runners are installed here, only when you press Install: their pinned files are downloaded, checked and set up on this workspace\'s disk.'
+        : 'No other runner can be installed on this image.';
+    return `${first} ${second}`;
+}
+
+/**
  * The Runners tab: every runner with its state. Runners in the image have no
  * actions; on-demand runners show their size, licence and install progress,
  * with Install or Uninstall (never a second Install while one runs).
@@ -299,11 +315,14 @@ export function runnersPanelHtml(runners = []) {
     const cards = runners.map((runner) => {
         const install = runner.install;
         const off = runner.enabled === false;
-        const status = off
+        // A runner the image lacks says so in the platform's words, never through
+        // the version probe's "Executable not found" (that is `reason`).
+        const lacking = runner.supported === false ? runner.unsupportedReason : '';
+        const status = lacking || (off
             ? `${runner.installed ? 'installed · ' : ''}not enabled on this deployment`
             : runner.installed
                 ? `${runner.version || install?.version || ''} · installed`
-                : (install ? 'not installed' : (runner.reason || 'not available'));
+                : (install ? 'not installed' : (runner.reason || 'not available')));
         let body = '';
         let actions = '';
         if (install) {

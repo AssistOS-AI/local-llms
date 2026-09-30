@@ -250,6 +250,10 @@ test('a runner the image lacks is not available on this platform, and Run refuse
     for (const id of ['ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi', 'lmstudio']) {
         assert.equal(byId[id].supported, false, id);
         assert.match(byId[id].unsupportedReason, /not available on this platform: this image does not include it/, id);
+        // The Runners tab reads `reason`: it names the platform, never the version probe's ENOENT text.
+        assert.match(byId[id].reason, /not available on this platform: this image does not include it/, id);
+        assert.doesNotMatch(byId[id].reason, /Executable not found/, id);
+        assert.equal(byId[id].installed, false, id);
     }
     await assert.rejects(() => h.controller.run({ modelId: 'gpt-oss-20b', runnerId: 'ik_llama.cpp', requestId: 'request-0001' }),
         (error) => error.code === 'runner_unavailable');

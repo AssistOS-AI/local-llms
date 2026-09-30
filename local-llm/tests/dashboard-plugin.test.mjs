@@ -9,6 +9,7 @@ import {
     hardwareCardsHtml,
     installMessage,
     modelsTableHtml,
+    runnersIntroText,
     runnersPanelHtml,
     splitRunFields,
     statusCardHtml,
@@ -178,6 +179,61 @@ test('the Runners tab offers Install and Uninstall only for on-demand runners, w
     assert.match(html, /AGPL-3\.0[\s\S]*accepted by admin@example\.com/);
     assert.match(html, /href="https:\/\/github\.com\/example\/tabby"/);
     assert.match(html, /<progress[^>]*value="25"/);
+});
+
+test('the Runners tab shows the platform reason for a runner this image lacks, never the version probe', async () => {
+    const platform = 'ik_llama.cpp is not available on this platform: this image does not include it.';
+    const probe = 'Executable not found at /opt/ik_llama.cpp/llama-server';
+    const lacking = { id: 'ik_llama.cpp', displayName: 'ik_llama.cpp', supported: false, installed: false, unsupportedReason: platform, reason: platform };
+    // The card reads `unsupportedReason` first, even when `reason` still carries the probe text.
+    const html = runnersPanelHtml([{ ...lacking, reason: probe }]);
+    assert.match(html, /not available on this platform: this image does not include it/);
+    assert.doesNotMatch(html, /Executable not found/);
+    // A runner that is supported but not installed keeps the probe's reason.
+    assert.match(runnersPanelHtml([{ id: 'ollama', displayName: 'Ollama', supported: true, installed: false, reason: 'Executable not found at /opt/ollama/bin/ollama' }]),
+        /Executable not found at \/opt\/ollama\/bin\/ollama/);
+    // Run refuses with the same words.
+    const statuses = [];
+    const presenter = new dashboardModule.LocalLlmDashboard({ isConnected: true, querySelector: () => null, querySelectorAll: () => [] }, () => {});
+    presenter.overview = { runners: [{ ...lacking, reason: probe }], models: [{ id: 'm', runners: {} }] };
+    presenter.runModelId = 'm';
+    presenter.runnerSelect = { value: 'ik_llama.cpp' };
+    presenter.runForm = { reportValidity: () => true };
+    presenter.statusLine = { textContent: '', classList: { toggle(state, on) { if (on) statuses.push(state); } } };
+    await presenter.submitRun({ preventDefault() {} });
+    assert.equal(presenter.statusLine.textContent, platform);
+    assert.deepEqual(statuses, ['error']);
+});
+
+test('the Runners intro lists the runners this image contains', () => {
+    const amd64 = [
+        { id: 'llama.cpp', displayName: 'llama.cpp', supported: true, installed: true },
+        { id: 'ik_llama.cpp', displayName: 'ik_llama.cpp', supported: true, installed: true },
+        { id: 'ollama', displayName: 'Ollama', supported: true, installed: true },
+        { id: 'vllm', displayName: 'vLLM', supported: true, installed: false, install: { version: '0.30.0', totalBytes: 4.2e9 } },
+    ];
+    const withInstall = runnersIntroText(amd64);
+    assert.match(withInstall, /^In this image: llama\.cpp, ik_llama\.cpp, Ollama\. Other runners are installed here, only when you press Install/);
+    assert.doesNotMatch(withInstall, /vLLM/);
+    // A runner the image lacks is not "in this image", and with nothing installable the second sentence says so.
+    const arm64 = [
+        { id: 'llama.cpp', displayName: 'llama.cpp', supported: true, installed: true },
+        { id: 'ik_llama.cpp', displayName: 'ik_llama.cpp', supported: false, installed: false, unsupportedReason: 'not available on this platform' },
+    ];
+    assert.equal(runnersIntroText(arm64), 'In this image: llama.cpp. No other runner can be installed on this image.');
+    assert.equal(runnersIntroText([]), '');
+    assert.equal(runnersIntroText(undefined), '');
+    // The static paragraph is gone; the presenter fills the placeholder from the overview.
+    const html = readText(new URL('local-llm-dashboard.html', DASHBOARD));
+    assert.match(html, /<p class="settings-section-description" data-llm-runners-intro><\/p>/);
+    assert.doesNotMatch(html, /part of the agent/);
+    const presenter = new dashboardModule.LocalLlmDashboard({ isConnected: true, querySelector: () => null, querySelectorAll: () => [] }, () => {});
+    presenter.runnersIntro = { textContent: '' };
+    presenter.runnersRegion = { innerHTML: '' };
+    presenter.overview = { runners: arm64 };
+    presenter.renderRunners();
+    assert.equal(presenter.runnersIntro.textContent, 'In this image: llama.cpp. No other runner can be installed on this image.');
+    assert.match(presenter.runnersRegion.innerHTML, /not available on this platform/);
 });
 
 test('basic run settings are the ones that decide the fit; everything else is under a closed Advanced', () => {

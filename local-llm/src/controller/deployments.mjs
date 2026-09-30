@@ -554,10 +554,15 @@ export function createController({
         for (const definition of Object.values(runners)) {
             const gate = gateOf(definition);
             const availability = availabilityOf(definition);
+            // A runner the image lacks is not probed: the probe would only say
+            // "Executable not found at …", and the platform reason is the cause.
+            const info = availability.available
+                ? await runnerInfo(definition.id)
+                : { installed: false, version: null, reason: availability.reason };
             runnerList.push({
                 ...runnerSummary(definition, profile),
                 ...(availability.available ? {} : { supported: false, unsupportedReason: availability.reason }),
-                ...(await runnerInfo(definition.id)),
+                ...info,
                 enabled: gate.enabled,
                 ...(gate.enabled ? {} : { disabledReason: gate.reason }),
                 ...(installable(definition.id) ? { install: await installInfo(definition.id) } : {}),

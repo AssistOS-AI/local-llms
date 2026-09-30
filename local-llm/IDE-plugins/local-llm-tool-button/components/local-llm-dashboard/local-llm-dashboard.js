@@ -24,6 +24,7 @@ import {
     hardwareCardsHtml,
     installMessage,
     modelsTableHtml,
+    runnersIntroText,
     runnersPanelHtml,
     splitRunFields,
     statusCardHtml,
@@ -96,6 +97,7 @@ export class LocalLlmDashboard {
         this.promptNote = find('[data-llm-prompt-note]');
         this.logView = find('[data-llm-log]');
         this.runnersRegion = find('[data-llm-runners]');
+        this.runnersIntro = find('[data-llm-runners-intro]');
         this.follow = find('[data-llm-follow]');
         this.gatewayNote = find('[data-llm-gateway]');
 
@@ -244,7 +246,13 @@ export class LocalLlmDashboard {
     }
 
     renderRunners() {
-        this.setHtml('runners', this.runnersRegion, runnersPanelHtml(this.overview?.runners || []));
+        const runners = this.overview?.runners || [];
+        const intro = runnersIntroText(runners);
+        if (this.runnersIntro && this.rendered.runnersIntro !== intro) {
+            this.rendered.runnersIntro = intro;
+            this.runnersIntro.textContent = intro;
+        }
+        this.setHtml('runners', this.runnersRegion, runnersPanelHtml(runners));
     }
 
     async installRunner(_target, runnerId) {
@@ -621,7 +629,7 @@ export class LocalLlmDashboard {
         if (!model || !runnerId || this.busy || !this.runForm?.reportValidity()) return;
         const runner = (this.overview?.runners || []).find((entry) => entry.id === runnerId);
         if (!runner?.supported || !runner.installed) {
-            this.setStatus(runner?.reason || `${runnerLabel(runnerId)} cannot run models in this release.`, 'error');
+            this.setStatus(runner?.unsupportedReason || runner?.reason || `${runnerLabel(runnerId)} cannot run models in this release.`, 'error');
             return;
         }
         const { params, errors } = this.readRunForm();
