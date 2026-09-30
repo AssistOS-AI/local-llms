@@ -109,6 +109,30 @@ test('a numeric array is kept up to 4,096 entries and read past beyond that, so 
     assert.equal(kv['a.last'], 9, 'the pair after a skipped array is read from the right place');
 });
 
+test('a header cannot keep more than 65,536 numbers in all, however many arrays it has', () => {
+    const items = (count) => Array.from({ length: count }, (_, index) => index % 200);
+    const lists = (count, size) => Array.from({ length: count }, (_, index) => [`a.list${index}`, T.array, { type: T.u8, items: items(size) }]);
+    const read = (pairs, options) => {
+        const reader = createGgufHeaderReader(options);
+        assert.equal(reader.push(ggufBytes({ kv: [...pairs, ['a.last', T.u32, 9]] }).bytes), 'done');
+        return reader.end().kv;
+    };
+    // Twenty arrays of 4,096 entries (each within the per-array cap): the first sixteen fill the budget exactly, the rest are read past.
+    const kv = read(lists(20, 4096));
+    for (let index = 0; index < 16; index += 1) assert.equal(kv[`a.list${index}`].length, 4096, `list ${index} is kept`);
+    for (let index = 16; index < 20; index += 1) assert.deepEqual(kv[`a.list${index}`], { skipped: true, length: 4096 }, `list ${index} is read past`);
+    assert.equal(kv['a.last'], 9, 'the pair after the skipped arrays is read from the right place');
+    // The budget is an option, and it counts entries, not arrays: two of 60 fit in 120, not in 100.
+    const small = read(lists(2, 60), { maxKeptNumbers: 100 });
+    assert.deepEqual([small['a.list0'].length, small['a.list1']], [60, { skipped: true, length: 60 }]);
+    assert.equal(read(lists(2, 60), { maxKeptNumbers: 120 })['a.list1'].length, 60);
+    // Many small arrays count the same: 2,000 lists of 40 is 80,000 numbers, so the last ones are skipped.
+    const many = read(lists(2000, 40));
+    const keptLists = Object.keys(many).filter((name) => Array.isArray(many[name])).length;
+    assert.equal(keptLists, Math.floor(65_536 / 40));
+    assert.deepEqual(many['a.list1999'], { skipped: true, length: 40 });
+});
+
 test('the header reader refuses counts, lengths and nesting beyond its bounds without allocating for them', () => {
     const MIB = 1024 * 1024;
     // Each claim is beyond exactly one bound: the smaller ones lie under the 32 MiB total, so only their own bound refuses them.
@@ -222,6 +246,50 @@ test('readGgufHeaderFile reads a header from a file in chunks, stops before the 
     await assert.rejects(() => readGgufHeaderFile(path.join(dir, 'empty.gguf')), isInvalidGguf);
 });
 
+test('readGgufHeaderFile continues from the bytes a read returned, so short reads lose nothing', async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-gguf-short-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const file = path.join(dir, 'model.gguf');
+    const { bytes, headerLength } = ggufBytes({ kv: PAIRS, tail: Buffer.alloc(100_000, 0xee) });
+    fs.writeFileSync(file, bytes);
+    const whole = await readGgufHeaderFile(file);
+    // A file handle that returns at most `limit(n)` bytes of each read, however many were asked for, and records where each read began.
+    const shortReads = (limit) => {
+        const reads = [];
+        let call = 0;
+        const fsApi = { promises: { async open(target, mode) {
+            const handle = await fs.promises.open(target, mode);
+            return {
+                async read(buffer, offset, length, position) {
+                    const asked = Math.min(length, limit(call));
+                    call += 1;
+                    const out = await handle.read(buffer, offset, asked, position);
+                    reads.push({ position, bytesRead: out.bytesRead });
+                    return out;
+                },
+                close: () => handle.close(),
+            };
+        } } };
+        return { fsApi, reads };
+    };
+    for (const [name, limit] of [['one byte at a time', () => 1], ['seven bytes', () => 7], ['a mix', (call) => [1, 13, 3, 4096, 2][call % 5]]]) {
+        const { fsApi, reads } = shortReads(limit);
+        const { kv, tensorCount, version } = await readGgufHeaderFile(file, { fsApi, chunkBytes: 4096 });
+        assert.deepEqual({ ...kv }, { ...whole.kv }, name);
+        assert.deepEqual([version, tensorCount], [whole.version, whole.tensorCount], name);
+        // Each read begins where the last one ended: no byte is read twice and none is skipped.
+        let expected = 0;
+        for (const read of reads) {
+            assert.equal(read.position, expected, `${name}: a read began at ${read.position}, not ${expected}`);
+            expected += read.bytesRead;
+        }
+        assert.ok(expected >= headerLength && expected < headerLength + 4096, `${name}: read ${expected} bytes for a ${headerLength}-byte header`);
+    }
+    // A file that ends inside its header after short reads is still invalid_gguf.
+    fs.writeFileSync(path.join(dir, 'cut.gguf'), bytes.subarray(0, headerLength - 5));
+    await assert.rejects(() => readGgufHeaderFile(path.join(dir, 'cut.gguf'), { fsApi: shortReads(() => 3).fsApi }), isInvalidGguf);
+});
+
 test('ggufSizing: layers, training context, f16 KV bytes per token and experts; head_count_kv defaults to head_count', () => {
     const read = (options) => {
         const { bytes } = ggufBytes({ kv: modelPairs(options) });
@@ -236,13 +304,27 @@ test('ggufSizing: layers, training context, f16 KV bytes per token and experts; 
     // Experts make it a mixture of experts; zero experts do not.
     assert.equal(read({ experts: 32 }).architecture, 'moe');
     assert.equal(read({ experts: 0 }).architecture, 'dense');
-    // The key and value sizes, when the header states them, replace the embedding over the head count.
+    // The key and value sizes, when the header states them, replace the embedding over the head count. This is gpt-oss-20b as llama.cpp
+    // writes it: the architecture is "gpt-oss", with a hyphen, and every key is prefixed by it. It goes through the reader and back.
+    const gptOss = read({
+        arch: 'gpt-oss', layers: 24, heads: 64, kvHeads: 8, embedding: 2880, context: 131072, experts: 32,
+        extra: [['gpt-oss.attention.key_length', T.u32, 64], ['gpt-oss.attention.value_length', T.u32, 64], ['gpt-oss.attention.sliding_window', T.u32, 128]],
+    });
+    assert.deepEqual(gptOss, { arch: 'gpt-oss', layers: 24, contextLength: 131072, kvBytesPerToken: 24 * 8 * 128 * 2, architecture: 'moe', notes: [] });
+    // The same as plain keys, and other real names with a hyphen (command-r: 40 layers, 64 KV heads of 128, 131072 context).
     const explicit = ggufSizing({
-        'general.architecture': 'gptoss', 'gptoss.block_count': 24, 'gptoss.context_length': 131072, 'gptoss.embedding_length': 2880,
-        'gptoss.attention.head_count': 64, 'gptoss.attention.head_count_kv': 8, 'gptoss.attention.key_length': 64, 'gptoss.attention.value_length': 64,
+        'general.architecture': 'gpt-oss', 'gpt-oss.block_count': 24, 'gpt-oss.context_length': 131072, 'gpt-oss.embedding_length': 2880,
+        'gpt-oss.attention.head_count': 64, 'gpt-oss.attention.head_count_kv': 8, 'gpt-oss.attention.key_length': 64, 'gpt-oss.attention.value_length': 64,
     });
     assert.equal(explicit.kvBytesPerToken, 24 * 8 * 128 * 2);
     assert.equal(explicit.contextLength, 131072);
+    const commandR = read({ arch: 'command-r', layers: 40, heads: 64, kvHeads: 64, embedding: 8192, context: 131072 });
+    assert.deepEqual([commandR.arch, commandR.layers, commandR.contextLength, commandR.kvBytesPerToken], ['command-r', 40, 131072, 40 * 64 * 256 * 2]);
+    for (const arch of ['falcon-h1', 'minimax-m2', 'a-b-c', 'x'.repeat(40), '0_1-2']) {
+        assert.equal(read({ arch }).arch, arch, arch);
+    }
+    // A hyphenated architecture does not take another architecture's keys: only its own prefix counts.
+    assert.equal(ggufSizing({ 'general.architecture': 'gpt-oss', 'gpt-oss.block_count': 4, 'gptoss.block_count': 9 }).layers, 4);
     // Each defaults separately: only the key size is stated, so the value size is the embedding over the head count.
     const onlyKey = ggufSizing({
         'general.architecture': 'x', 'x.block_count': 2, 'x.embedding_length': 512, 'x.attention.head_count': 8, 'x.attention.key_length': 32,
@@ -254,11 +336,18 @@ test('ggufSizing: layers, training context, f16 KV bytes per token and experts; 
         'x.attention.head_count_kv': [2, 0, 4, 0],
     });
     assert.equal(listed.kvBytesPerToken, (2 + 4) * (64 + 64) * 2);
-    // The architecture name is the key prefix, and only a plain name is accepted.
-    for (const arch of [undefined, '', 'Has Space', 'UPPER', 'a'.repeat(41), 'dot.ted', 7]) {
-        assert.throws(() => ggufSizing({ 'general.architecture': arch }), isInvalidGguf, String(arch));
+    // The architecture name is the key prefix: letters, digits, underscore and hyphen, never a dot. A header with any other name, or none,
+    // is well-formed GGUF this reader cannot size: null sizing and a note, never an error (an error would fail a pick or a Run).
+    for (const arch of [undefined, '', 'Has Space', 'UPPER', 'a'.repeat(41), 'dot.ted', 7, null, 'new\nline', 'ünï']) {
+        const sizing = ggufSizing({ 'general.architecture': arch, 'x.block_count': 4, 'dot.ted.block_count': 4 });
+        assert.deepEqual([sizing.arch, sizing.layers, sizing.contextLength, sizing.kvBytesPerToken, sizing.architecture], [null, null, null, null, 'dense'], String(arch));
+        assert.equal(sizing.notes.length, 1, String(arch));
+        assert.match(sizing.notes[0], /^general\.architecture is (?:missing|not a name this agent can read)/, String(arch));
+        assert.doesNotMatch(sizing.notes[0], /Has Space|dot\.ted|new\nline/, 'the note does not repeat the name');
     }
-    assert.throws(() => ggufSizing(null), isInvalidGguf);
+    assert.deepEqual(ggufSizing(null).notes, ['general.architecture is missing']);
+    assert.equal(ggufSizing(undefined).arch, null);
+    assert.equal(ggufSizing({}).arch, null);
     // Values outside their ranges are left out, each with a note.
     const outside = ggufSizing({
         'general.architecture': 'x', 'x.block_count': 1025, 'x.context_length': 511, 'x.embedding_length': 512, 'x.attention.head_count': 8,

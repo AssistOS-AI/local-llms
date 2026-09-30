@@ -428,7 +428,7 @@
     {
       "name": "local_llm_model_lookup",
       "title": "Look up a model",
-      "description": "Look a model up on Hugging Face before adding it: the commit the revision resolves to, whether the repository is gated, its licence, and the files of the format with their sizes and sha256 (GGUF files with their quantization, a split GGUF grouped under its first shard). For one GGUF file it also reads the start of that file (at most 32 MiB) for its layer count, training context and KV cache size; for a safetensors or EXL3 snapshot the sizing comes from its pinned config.json. Downloads no weights and writes nothing; add the model with local_llm_model_add, then Run it.",
+      "description": "Look a model up on Hugging Face before adding it: the commit the revision resolves to, whether the repository is gated, its licence, and the files of the format with their sizes and sha256 (GGUF files with their quantization, a split GGUF grouped under its first shard). For one GGUF file it also reads the start of that file (at most 32 MiB) for its layer count, training context and KV cache size; for a safetensors or EXL3 snapshot the sizing comes from its config.json, checked against the digest in the repository listing. Downloads no weights and writes nothing; add the model with local_llm_model_add, then Run it.",
       "command": "node",
       "args": [
         "/code/tools/local_llm_tool.mjs"

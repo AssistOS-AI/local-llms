@@ -40,6 +40,8 @@ const MAX_ENTRIES = 5000;
 const MAX_REDIRECTS = 5;
 // The tool's own timeout is 60 s; the lookup ends before it.
 export const LOOKUP_TIMEOUT_MS = 55_000;
+// The most the lookup reads of one metadata response (model info, revision, a tree page); a larger one is lookup_failed.
+export const LOOKUP_METADATA_MAX_BYTES = 8 * 1024 * 1024;
 // A config.json is a few kilobytes; one beyond this is not read.
 const CONFIG_MAX_BYTES = 1024 * 1024;
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
@@ -50,23 +52,27 @@ function failure(code, message, details = undefined) {
     return new LocalLlmError(code, message, details);
 }
 
-function statusError(status, what) {
+// Hugging Face answers 401 for a repository that does not exist when no token is sent, so without a token a refusal
+// says that the repository may be missing, not only that access was refused.
+function statusError(status, what, token = '') {
     if (status === 401 || status === 403) {
-        return failure('access_denied', `Hugging Face refused access to ${what} (HTTP ${status}). For a gated or private repository, ${TOKEN_HINT}.`);
+        return failure('access_denied', token
+            ? `Hugging Face refused access to ${what} (HTTP ${status}). For a gated or private repository, ${TOKEN_HINT}.`
+            : `Hugging Face did not find ${what}, or it needs access (HTTP ${status}). For a gated or private repository, ${TOKEN_HINT}.`);
     }
     if (status === 404) return failure('not_found', `Hugging Face has no ${what}.`);
     return failure('lookup_failed', `Hugging Face answered HTTP ${status} for ${what}.`, { status });
 }
 
 // Every failure of a lookup is one of the documented codes; a stop of the agent is `shutting_down`.
-function lookupError(error, signal) {
+function lookupError(error, signal, token = '') {
     if (error instanceof LocalLlmError) return error;
     if (signal?.aborted) return failure('shutting_down', 'The agent is restarting; look the model up again once it is back.');
     if (error instanceof DownloadError) {
         if (error.code === 'INVALID_SOURCE') return failure('invalid_request', error.message);
         if (error.code === 'NOT_FOUND') return failure('not_found', error.message);
         const status = error.details?.status;
-        if (Number.isInteger(status)) return statusError(status, 'this repository, revision or file');
+        if (Number.isInteger(status)) return statusError(status, 'this repository, revision or file', token);
         return failure('lookup_failed', error.message, error.details?.reason ? { reason: error.details.reason } : undefined);
     }
     if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
@@ -104,6 +110,9 @@ export function normalizeLookupInput(args) {
     return { repo: args.repo, revision, format, ...(file === undefined ? {} : { file }) };
 }
 
+// A DownloadError, not a LocalLlmError: `fetchJson` keeps one that its fetch throws, where it would flatten any other error.
+const refused = (message) => new DownloadError('RESOLVE_FAILED', message, { details: { reason: 'redirect' } });
+
 const encodePath = (value) => value.split('/').map(encodeURIComponent).join('/');
 
 async function discard(response) {
@@ -117,9 +126,11 @@ async function discard(response) {
 /**
  * A fetch that follows redirects itself, up to five, and drops `Authorization`
  * from every request whose origin is not the Hugging Face one. Each request
- * also ends at `deadline`.
+ * also ends at `deadline`. With `sameOriginOnly` (the metadata calls, whose
+ * answers are taken as Hugging Face's own) a redirect to another origin is
+ * refused instead of followed; file reads may be sent to the file host's CDN.
  */
-export function originGuardedFetch({ fetchImpl, baseUrl, deadline }) {
+export function originGuardedFetch({ fetchImpl, baseUrl, deadline, sameOriginOnly = false }) {
     const home = new URL(baseUrl);
     return async function guarded(url, init = {}) {
         let current = new URL(url);
@@ -135,10 +146,13 @@ export function originGuardedFetch({ fetchImpl, baseUrl, deadline }) {
             if (!REDIRECTS.has(response.status)) return response;
             const location = response.headers?.get?.('location');
             await discard(response);
-            if (!location || hops >= MAX_REDIRECTS) throw failure('lookup_failed', 'Hugging Face redirected the request too often, or without saying where.');
+            if (!location || hops >= MAX_REDIRECTS) throw refused('Hugging Face redirected the request too often, or without saying where.');
             const next = new URL(location, current);
             if (!['http:', 'https:'].includes(next.protocol) || (current.protocol === 'https:' && next.protocol !== 'https:')) {
-                throw failure('lookup_failed', 'Hugging Face redirected the request to an address that is not https.');
+                throw refused('Hugging Face redirected the request to an address that is not https.');
+            }
+            if (sameOriginOnly && next.origin !== home.origin) {
+                throw refused('Hugging Face redirected a metadata request to another origin, which is not followed.');
             }
             current = next;
         }
@@ -157,7 +171,8 @@ function licenseOf(info) {
         : [];
     for (const candidate of [...(Array.isArray(card) ? card : [card]), ...fromTags]) {
         if (typeof candidate !== 'string') continue;
-        const text = candidate.trim();
+        // Bidirectional controls can reorder the text around them when it is shown; they are dropped.
+        const text = candidate.replace(/[\u202A-\u202E\u2066-\u2069]/g, '').trim();
         if (text && text.length <= 80 && !/[\u0000-\u001f\u007f]/.test(text)) return text;
     }
     return null;
@@ -165,7 +180,7 @@ function licenseOf(info) {
 
 // One directory's entries, page by page: at most 50 pages for the whole lookup, same-origin next links only.
 async function listTree(context, dir = '') {
-    const { get, baseUrl, repo, commit, token, timeoutMs, budget } = context;
+    const { getMetadata, baseUrl, repo, commit, token, timeoutMs, metadataMaxBytes, budget } = context;
     const entries = [];
     let url = `${baseUrl}/api/models/${encodePath(repo)}/tree/${commit}${dir ? `/${encodePath(dir)}` : ''}`;
     while (url) {
@@ -174,7 +189,7 @@ async function listTree(context, dir = '') {
             break;
         }
         budget.pages += 1;
-        const { json, link } = await fetchJson(url, { token, fetchImpl: get, timeoutMs });
+        const { json, link } = await fetchJson(url, { token, fetchImpl: getMetadata, timeoutMs, maxBytes: metadataMaxBytes });
         if (!Array.isArray(json)) throw failure('lookup_failed', 'The Hugging Face tree response is not a list.');
         for (const entry of json) {
             if (entries.length >= MAX_ENTRIES) {
@@ -301,7 +316,7 @@ async function readGgufKeyValues(context, file) {
             signal: stop.signal,
         });
         if (response.status === 416) throw failure('invalid_gguf', 'The file is empty.');
-        if (response.status !== 200 && response.status !== 206) throw statusError(response.status, `the file ${file}`);
+        if (response.status !== 200 && response.status !== 206) throw statusError(response.status, `the file ${file}`, token);
         if (!response.body) throw failure('lookup_failed', 'Hugging Face sent no content for the file.');
         const reader = createGgufHeaderReader();
         let readBytes = 0;
@@ -333,7 +348,7 @@ async function ggufSizingOf(context, file) {
 async function readConfig(context, row) {
     const { get, token } = context;
     const response = await get(resolveUrl(context, row.file), { headers: { 'Accept-Encoding': 'identity', ...authHeaders(token) } });
-    if (response.status !== 200) throw statusError(response.status, `the file ${row.file}`);
+    if (response.status !== 200) throw statusError(response.status, `the file ${row.file}`, token);
     if (!response.body) throw failure('lookup_failed', 'Hugging Face sent no content for config.json.');
     const parts = [];
     let total = 0;
@@ -413,17 +428,20 @@ export async function lookupHuggingFaceModel(args, {
     baseUrl = 'https://huggingface.co',
     timeoutMs = METADATA_TIMEOUT_MS,
     totalMs = LOOKUP_TIMEOUT_MS,
+    metadataMaxBytes = LOOKUP_METADATA_MAX_BYTES,
     signal = undefined,
 } = {}) {
     const input = normalizeLookupInput(args);
     const deadline = AbortSignal.any([AbortSignal.timeout(totalMs), ...(signal ? [signal] : [])]);
     try {
         const get = originGuardedFetch({ fetchImpl, baseUrl, deadline });
+        const getMetadata = originGuardedFetch({ fetchImpl, baseUrl, deadline, sameOriginOnly: true });
         const { repo, revision, format } = input;
-        const { json: info } = await fetchJson(`${baseUrl}/api/models/${encodePath(repo)}`, { token, fetchImpl: get, timeoutMs });
+        const { json: info } = await fetchJson(`${baseUrl}/api/models/${encodePath(repo)}`,
+            { token, fetchImpl: getMetadata, timeoutMs, maxBytes: metadataMaxBytes });
         if (info === null || typeof info !== 'object' || Array.isArray(info)) throw failure('lookup_failed', 'The Hugging Face model response is not an object.');
-        const commit = await resolveCommit({ repo, revision, token, fetchImpl: get, baseUrl, timeoutMs });
-        const context = { get, baseUrl, repo, commit, token, timeoutMs, budget: { pages: 0, truncated: false } };
+        const commit = await resolveCommit({ repo, revision, token, fetchImpl: getMetadata, baseUrl, timeoutMs, maxBytes: metadataMaxBytes });
+        const context = { get, getMetadata, baseUrl, repo, commit, token, timeoutMs, metadataMaxBytes, budget: { pages: 0, truncated: false } };
         const files = format === 'gguf' ? await listGguf(context) : await listSnapshot(context);
         let sizing = null;
         if (format === 'gguf' && input.file !== undefined) {
@@ -451,6 +469,6 @@ export async function lookupHuggingFaceModel(args, {
             sizing,
         };
     } catch (error) {
-        throw lookupError(error, signal);
+        throw lookupError(error, signal, token);
     }
 }

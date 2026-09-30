@@ -15,11 +15,12 @@ import { controllerHandlers } from '../src/controlHandlers.mjs';
 import { admissionResult } from '../src/controller/admission.mjs';
 import { HF_FILE_SEGMENT_RE, HF_REPO_RE, HF_REVISION_RE, validateModel } from '../src/controller/catalog.mjs';
 import { createController } from '../src/controller/deployments.mjs';
-import { DownloadError } from '../src/controller/downloader.mjs';
-import { lookupHuggingFaceModel, normalizeLookupInput, quantizationOf, sizingFromConfig } from '../src/controller/modelLookup.mjs';
+import { DownloadError, fetchJson } from '../src/controller/downloader.mjs';
+import { LOOKUP_METADATA_MAX_BYTES, lookupHuggingFaceModel, normalizeLookupInput, quantizationOf, sizingFromConfig } from '../src/controller/modelLookup.mjs';
 import { admitCpuLlamaServer, admitUnifiedLlamaServer, admitUnifiedVllm } from '../src/controller/profiles.mjs';
 import { createStateStore } from '../src/controller/stateStore.mjs';
 import { DRAIN_QUEUE_WAIT_MS } from '../src/drainBudget.mjs';
+import { modelEntryFromForm } from '../IDE-plugins/local-llm-settings/local-llm-settings-model.js';
 import { TOOL_OPERATIONS, handleTool } from '../tools/local_llm_tool.mjs';
 import { GGUF_TYPE as T, ggufBytes, modelPairs } from './gguf-fixture.mjs';
 
@@ -76,6 +77,26 @@ function sendFile(req, res, body) {
     res.end(body.subarray(start, end + 1));
 }
 
+// A body sent as it is, either whole with a Content-Length or in pieces with none; `state.sent` counts what left before the client went away.
+function sendRaw(res, body, { chunked = false, state = {} } = {}) {
+    const bytes = Buffer.from(body);
+    res.writeHead(200, { 'Content-Type': 'application/json', ...(chunked ? {} : { 'Content-Length': bytes.length }) });
+    state.sent = 0;
+    res.on('close', () => { state.closed = true; });
+    let offset = 0;
+    const pump = () => {
+        while (offset < bytes.length && !res.destroyed) {
+            const piece = bytes.subarray(offset, offset + 64 * 1024);
+            const more = res.write(piece);
+            offset += piece.length;
+            state.sent = offset;
+            if (!more) { res.once('drain', pump); return; }
+        }
+        if (!res.destroyed) res.end();
+    };
+    pump();
+}
+
 // A very large file that is never held in memory: the first bytes are real, the rest zeros, written with backpressure.
 // `state` records how much was sent and whether the client went away first.
 function streamVirtual(req, res, { size, head }, state) {
@@ -115,32 +136,43 @@ function hfHandler(repo, origin) {
         if (pathname === `/api/models/${id}`) {
             if (repo.infoRedirect) { res.writeHead(302, { Location: repo.infoRedirect(origin) }); res.end(); return; }
             if (repo.infoStatus) { res.writeHead(repo.infoStatus); res.end(); return; }
+            if (repo.infoRaw) { sendRaw(res, repo.infoRaw, repo.raw); return; }
             sendJson(res, 200, repo.info ?? { id, gated: false, cardData: { license: 'apache-2.0' } });
             return;
         }
         const revision = /^\/api\/models\/[^/]+\/[^/]+\/revision\/(.+)$/.exec(pathname);
         if (revision) {
+            if (repo.revisionRedirect) { res.writeHead(302, { Location: repo.revisionRedirect(origin) }); res.end(); return; }
             if (repo.revisionStatus) { res.writeHead(repo.revisionStatus); res.end(); return; }
-            sendJson(res, 200, { sha: COMMIT });
+            if (repo.revisionRaw) { sendRaw(res, repo.revisionRaw, repo.raw); return; }
+            // A branch that has moved on since a lookup answers with its newest commit; a commit answers as itself.
+            sendJson(res, 200, { sha: revision[1] === 'main' && repo.mainCommit ? repo.mainCommit : COMMIT });
             return;
         }
-        const tree = new RegExp(`^/api/models/${id}/tree/${COMMIT}(?:/(.+))?$`).exec(pathname);
+        // A repository has one listing per commit: `commits` names them, and without it there is the one at COMMIT.
+        const tree = new RegExp(`^/api/models/${id}/tree/([0-9a-f]{40})(?:/(.+))?$`).exec(pathname);
         if (tree) {
-            const dir = tree[1] ?? '';
+            const at = repo.commits?.[tree[1]] ?? (tree[1] === COMMIT ? repo : null);
+            const dir = tree[2] ?? '';
+            if (!at) { res.writeHead(404); res.end(); return; }
+            const moved = repo.treeRedirect?.(origin, dir);
+            if (moved) { res.writeHead(302, { Location: moved }); res.end(); return; }
             if (repo.treeStatus) { res.writeHead(repo.treeStatus); res.end(); return; }
-            if (repo.treeBody !== undefined) { sendJson(res, 200, repo.treeBody); return; }
-            const pages = repo.tree?.[dir];
+            if (repo.treeRaw) { sendRaw(res, repo.treeRaw, repo.raw); return; }
+            if (at.treeBody !== undefined) { sendJson(res, 200, at.treeBody); return; }
+            const pages = at.tree?.[dir];
             if (!pages) { res.writeHead(404); res.end(); return; }
             const index = Number(url.searchParams.get('cursor') ?? 0);
             const next = index + 1 < pages.length || repo.endlessPages === true
-                ? (repo.link ? repo.link(dir, index, origin) : `${origin}/api/models/${id}/tree/${COMMIT}${dir ? `/${dir}` : ''}?cursor=${index + 1}`)
+                ? (repo.link ? repo.link(dir, index, origin) : `${origin}/api/models/${id}/tree/${tree[1]}${dir ? `/${dir}` : ''}?cursor=${index + 1}`)
                 : null;
             sendJson(res, 200, pages[Math.min(index, pages.length - 1)], next ? { Link: `<${next}>; rel="next"` } : {});
             return;
         }
-        const resolve = new RegExp(`^/${id}/resolve/${COMMIT}/(.+)$`).exec(pathname);
+        const resolve = new RegExp(`^/${id}/resolve/([0-9a-f]{40})/(.+)$`).exec(pathname);
         if (resolve) {
-            const spec = repo.files?.[resolve[1]];
+            const at = repo.commits?.[resolve[1]] ?? (resolve[1] === COMMIT ? repo : null);
+            const spec = at?.files?.[resolve[2]];
             if (!spec) { res.writeHead(404); res.end(); return; }
             if (spec.redirect) { res.writeHead(302, { Location: spec.redirect(origin) }); res.end(); return; }
             if (spec.status) { res.writeHead(spec.status); res.end(); return; }
@@ -166,6 +198,14 @@ const queries = (hf) => hf.requests.map((request) => request.url.replace(/\?.*$/
 
 // The header of a Qwen2.5-0.5B-like model: 24 layers, 14 heads, 2 KV heads, 896 wide, 32768 context.
 const QWEN_HEADER = ggufBytes({ kv: modelPairs({ layers: 24, heads: 14, kvHeads: 2, embedding: 896, context: 32768 }) }).bytes;
+// gpt-oss-20b as llama.cpp writes it: the architecture is "gpt-oss", with a hyphen, and every key carries that prefix.
+const GPT_OSS_HEADER = ggufBytes({
+    kv: modelPairs({
+        arch: 'gpt-oss', layers: 24, heads: 64, kvHeads: 8, embedding: 2880, context: 131072, experts: 32, name: 'gpt-oss-20b',
+        extra: [['gpt-oss.attention.key_length', T.u32, 64], ['gpt-oss.attention.value_length', T.u32, 64], ['gpt-oss.attention.sliding_window', T.u32, 128]],
+    }),
+}).bytes;
+const headerOf = (options = {}) => pad(ggufBytes({ kv: modelPairs({ layers: 24, heads: 14, kvHeads: 2, embedding: 896, ...options }) }).bytes, 65536);
 const QWEN_SIZING = { contextLength: 32768, architecture: 'dense', memory: { layers: 24, kvBytesPerToken: 12288 }, source: 'gguf-header' };
 const pad = (header, size = 4096) => Buffer.concat([header, Buffer.alloc(Math.max(0, size - header.length), 0xee)]);
 
@@ -369,14 +409,11 @@ test('lookup follows only same-origin tree pages and never sends the token to an
     assert.equal((await ask(home, { repo: REPO, file: 'm-Q4_K_M.gguf' }, { token: TOKEN })).sizing.memory.kvBytesPerToken, 12288);
     const second = home.requests.filter((request) => request.url.startsWith('/cache/'));
     assert.deepEqual(second.map((request) => request.authorization), [`Bearer ${TOKEN}`], 'the second hop is the same origin, so it carries the token');
-    // The metadata calls are guarded too: the model's info redirected to another origin arrives there without the token.
+    // The metadata calls are guarded too: the model's info redirected to another origin is not followed at all (see the next test).
     const infoHost = await listen(t, (req, res) => sendJson(res, 200, { gated: 'auto', cardData: { license: 'mit' } }));
     const moved = await fakeHf(t, { tree: { '': tree }, infoRedirect: () => `${infoHost.origin}/info` });
-    const info = await ask(moved, { repo: REPO }, { token: TOKEN });
-    assert.deepEqual([info.gated, info.license], ['auto', 'mit'], 'the redirected answer was used');
-    assert.equal(infoHost.requests.length, 1);
-    assert.equal(infoHost.requests[0].authorization, undefined, 'the metadata host behind a redirect never receives Authorization');
-    assert.ok(moved.requests.every((request) => request.authorization === `Bearer ${TOKEN}`));
+    await assert.rejects(() => ask(moved, { repo: REPO }, { token: TOKEN }), codeOf('lookup_failed'));
+    assert.deepEqual(infoHost.requests, [], 'the metadata host behind a redirect is never contacted');
     // Redirect loops, a redirect with no place to go, and a redirect away from http(s) end the lookup.
     const loop = await fakeHf(t, { tree: { '': [[lfs('m-Q4_K_M.gguf', 4096, sha('a'))]] }, files: { 'm-Q4_K_M.gguf': { redirect: (origin) => `${origin}/${REPO}/resolve/${COMMIT}/m-Q4_K_M.gguf` } } });
     await assert.rejects(() => ask(loop, { repo: REPO, file: 'm-Q4_K_M.gguf' }), codeOf('lookup_failed'));
@@ -430,15 +467,14 @@ test('lookup reads one file\'s header with a bounded range request and aborts on
     assert.equal((await ask(ignoring, { repo: REPO, file: 'm-Q4_K_M.gguf' })).sizing.memory.kvBytesPerToken, 12288);
     // Bytes that are not a GGUF header, or end inside it, are invalid_gguf, never another error.
     const bad = await fakeHf(t, {
-        tree: { '': [[lfs('text-Q4_K_M.gguf', 4096, sha('a')), lfs('cut-Q4_K_M.gguf', 4096, sha('b')), lfs('noarch-Q4_K_M.gguf', 4096, sha('c')), lfs('empty-Q4_K_M.gguf', 4096, sha('d'))]] },
+        tree: { '': [[lfs('text-Q4_K_M.gguf', 4096, sha('a')), lfs('cut-Q4_K_M.gguf', 4096, sha('b')), lfs('empty-Q4_K_M.gguf', 4096, sha('d'))]] },
         files: {
             'text-Q4_K_M.gguf': { body: Buffer.from('<html>not a model</html>'.repeat(100)) },
             'cut-Q4_K_M.gguf': { body: QWEN_HEADER.subarray(0, QWEN_HEADER.length - 5) },
-            'noarch-Q4_K_M.gguf': { body: ggufBytes({ kv: [['general.name', T.string, 'x']] }).bytes },
             'empty-Q4_K_M.gguf': { status: 416 },
         },
     });
-    for (const file of ['text-Q4_K_M.gguf', 'cut-Q4_K_M.gguf', 'noarch-Q4_K_M.gguf', 'empty-Q4_K_M.gguf']) {
+    for (const file of ['text-Q4_K_M.gguf', 'cut-Q4_K_M.gguf', 'empty-Q4_K_M.gguf']) {
         await assert.rejects(() => ask(bad, { repo: REPO, file }), codeOf('invalid_gguf'), file);
     }
     // A file that is not among the listed ones, or names a later shard, is refused.
@@ -613,6 +649,161 @@ test('the user-sizing warning names where the values came from, and keeps its te
     }
 });
 
+test('a hyphenated architecture is sized, and a header whose architecture cannot be used gives no sizing instead of an error', async (t) => {
+    const named = (arch, extra = []) => ggufBytes({ kv: [['general.architecture', T.string, arch], [`${arch}.block_count`, T.u32, 24], ...extra] }).bytes;
+    const hf = await fakeHf(t, {
+        tree: { '': [[
+            lfs('gpt-oss-20b-Q4_K_M.gguf', 4096, sha('a')), lfs('command-r-Q4_K_M.gguf', 4096, sha('b')), lfs('noarch-Q4_K_M.gguf', 4096, sha('c')),
+            lfs('badname-Q4_K_M.gguf', 4096, sha('d')), lfs('dotted-Q4_K_M.gguf', 4096, sha('e')), lfs('text-Q4_K_M.gguf', 4096, sha('f')),
+        ]] },
+        files: {
+            'gpt-oss-20b-Q4_K_M.gguf': { body: pad(GPT_OSS_HEADER) },
+            'command-r-Q4_K_M.gguf': { body: pad(ggufBytes({ kv: modelPairs({ arch: 'command-r', layers: 40, heads: 64, kvHeads: 64, embedding: 8192, context: 131072 }) }).bytes) },
+            'noarch-Q4_K_M.gguf': { body: ggufBytes({ kv: [['general.name', T.string, 'x']] }).bytes },
+            'badname-Q4_K_M.gguf': { body: named('Bad Arch!') },
+            'dotted-Q4_K_M.gguf': { body: named('a.b') },
+            'text-Q4_K_M.gguf': { body: Buffer.from('<html>not a model</html>'.repeat(100)) },
+        },
+    });
+    const sizingOf = async (file) => (await ask(hf, { repo: REPO, file })).sizing;
+    const oss = await sizingOf('gpt-oss-20b-Q4_K_M.gguf');
+    assert.deepEqual({ ...oss, readBytes: undefined }, {
+        contextLength: 131072, architecture: 'moe', memory: { layers: 24, kvBytesPerToken: 24 * 8 * 128 * 2 }, source: 'gguf-header', readBytes: undefined, notes: [],
+    });
+    const commandR = await sizingOf('command-r-Q4_K_M.gguf');
+    assert.deepEqual([commandR.contextLength, commandR.memory], [131072, { layers: 40, kvBytesPerToken: 40 * 64 * 256 * 2 }]);
+    // Well-formed headers the reader cannot size: every value null, dense, one note; the pick goes on.
+    for (const [file, note] of [
+        ['noarch-Q4_K_M.gguf', /^general\.architecture is missing$/],
+        ['badname-Q4_K_M.gguf', /^general\.architecture is not a name this agent can read/],
+        ['dotted-Q4_K_M.gguf', /^general\.architecture is not a name this agent can read/],
+    ]) {
+        const sizing = await sizingOf(file);
+        assert.deepEqual([sizing.contextLength, sizing.architecture, sizing.memory, sizing.source], [null, 'dense', { layers: null, kvBytesPerToken: null }, 'gguf-header'], file);
+        assert.equal(sizing.notes.length, 1, file);
+        assert.match(sizing.notes[0], note, file);
+        assert.ok(sizing.readBytes > 0, file);
+    }
+    // A header that is malformed as GGUF is still invalid_gguf.
+    await assert.rejects(() => ask(hf, { repo: REPO, file: 'text-Q4_K_M.gguf' }), codeOf('invalid_gguf'));
+});
+
+test('a metadata answer is taken from the Hugging Face origin only: a redirect to another origin is refused, never listed', async (t) => {
+    // Another origin that would answer every metadata request with a plausible listing of its own.
+    const planted = await listen(t, (req, res, url) => sendJson(res, 200, /\/revision\//.test(url.pathname) ? { sha: COMMIT }
+        : url.pathname.includes('/tree/') ? [lfs('planted-Q4_K_M.gguf', MIB, sha('c'))] : { gated: false, cardData: { license: 'mit' } }));
+    const real = { '': [[lfs('real-Q4_K_M.gguf', MIB, sha('a')), directory('sub')]], sub: [[lfs('sub/deep-Q4_K_M.gguf', MIB, sha('b'))]] };
+    const cases = {
+        'the model info': { tree: real, infoRedirect: () => `${planted.origin}/info` },
+        'the revision': { tree: real, revisionRedirect: () => `${planted.origin}/revision` },
+        'the first tree page': { tree: real, treeRedirect: () => `${planted.origin}/api/models/${REPO}/tree/${COMMIT}` },
+        'a subdirectory page': { tree: real, treeRedirect: (origin, dir) => (dir === 'sub' ? `${planted.origin}/api/models/${REPO}/tree/${COMMIT}/sub` : null) },
+    };
+    for (const [what, repo] of Object.entries(cases)) {
+        const hf = await fakeHf(t, repo);
+        await assert.rejects(() => ask(hf, { repo: REPO }, { token: TOKEN }), (error) => {
+            assert.equal(error.code, 'lookup_failed', what);
+            assert.match(error.message, /redirected a metadata request to another origin/, what);
+            assert.doesNotMatch(error.message, /planted|127\.0\.0\.1/, 'the message does not name the other origin');
+            return true;
+        }, what);
+    }
+    assert.deepEqual(planted.requests, [], 'the other origin was never contacted, with or without the token');
+    // A redirect that stays on the origin is followed, and the token goes with it.
+    let redirected = false;
+    const same = await fakeHf(t, { tree: real, treeRedirect: (origin, dir) => {
+        if (dir !== '' || redirected) return null;
+        redirected = true;
+        return `${origin}/api/models/${REPO}/tree/${COMMIT}?cursor=0`;
+    } });
+    const result = await ask(same, { repo: REPO }, { token: TOKEN });
+    assert.deepEqual(result.files.map((row) => row.file), ['real-Q4_K_M.gguf', 'sub/deep-Q4_K_M.gguf']);
+    assert.ok(same.requests.every((request) => request.authorization === `Bearer ${TOKEN}`));
+    assert.equal(same.requests.filter((request) => request.url.includes('/tree/') && !request.url.includes('/sub')).length, 2, 'the original request and its redirect');
+});
+
+test('a metadata response larger than the cap is lookup_failed and read no further, while downloads keep reading whole bodies', async (t) => {
+    assert.equal(LOOKUP_METADATA_MAX_BYTES, 8 * MIB);
+    const tree = { '': [[lfs('a-Q4_K_M.gguf', MIB, sha('a'))]] };
+    const padded = (shape, bytes) => JSON.stringify(shape('x'.repeat(bytes)));
+    const at = (what, bytes) => ({
+        info: { tree, infoRaw: padded((pad) => ({ gated: false, pad }), bytes) },
+        revision: { tree, revisionRaw: padded((pad) => ({ sha: COMMIT, pad }), bytes) },
+        tree: { treeRaw: padded((pad) => [{ type: 'file', path: 'a-Q4_K_M.gguf', pad }], bytes) },
+    })[what];
+    // More than the default cap, sent with a Content-Length and in pieces without one.
+    for (const what of ['info', 'revision', 'tree']) {
+        for (const chunked of [false, true]) {
+            const state = {};
+            const hf = await fakeHf(t, { ...at(what, 2 * LOOKUP_METADATA_MAX_BYTES), raw: { chunked, state } });
+            await assert.rejects(() => ask(hf, { repo: REPO }), (error) => error.code === 'lookup_failed' && /larger than 8388608 bytes/.test(error.message), `${what} ${chunked ? 'chunked' : 'with a length'}`);
+            // Either way the client stops reading and closes the connection: the server is left with most of the body unsent.
+            const until = Date.now() + 3000;
+            while (state.closed !== true && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 10));
+            assert.equal(state.closed, true, `${what}: the connection was closed by the client`);
+            assert.ok(state.sent < 2 * LOOKUP_METADATA_MAX_BYTES, `${what}: the server sent ${state.sent} of ${2 * LOOKUP_METADATA_MAX_BYTES} bytes`);
+        }
+    }
+    // A declared length beyond the cap is refused on the headers alone: the body is never waited for (this server sends a few bytes and then stalls).
+    const stalling = await listen(t, (req, res) => { res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': 2 * LOOKUP_METADATA_MAX_BYTES }); res.write('{"pad":"'); });
+    const began = Date.now();
+    await assert.rejects(() => lookupHuggingFaceModel({ repo: REPO }, { baseUrl: stalling.origin, timeoutMs: 5000 }), (error) => error.code === 'lookup_failed' && /larger than 8388608 bytes/.test(error.message));
+    assert.ok(Date.now() - began < 2000, `refused after ${Date.now() - began} ms, not at the 5 s timeout`);
+    // The cap is an option; a body of exactly the cap is read, one byte more is not.
+    const exact = (what, cap) => at(what, cap - Buffer.byteLength(padded((pad) => (what === 'tree' ? [{ type: 'file', path: 'a-Q4_K_M.gguf', pad }] : what === 'info' ? { gated: false, pad } : { sha: COMMIT, pad }), 0)));
+    for (const what of ['info', 'revision', 'tree']) {
+        const ok = await fakeHf(t, exact(what, 4096));
+        const result = await ask(ok, { repo: REPO }, { metadataMaxBytes: 4096 });
+        assert.equal(result.commit, COMMIT, what);
+        const over = await fakeHf(t, at(what, 4096));
+        await assert.rejects(() => ask(over, { repo: REPO }, { metadataMaxBytes: 4096 }), codeOf('lookup_failed'), what);
+    }
+    // fetchJson without a cap is what downloads use and still reads any size; with one it refuses too.
+    const big = await listen(t, (req, res) => sendJson(res, 200, { pad: 'x'.repeat(9 * MIB) }));
+    assert.equal((await fetchJson(`${big.origin}/x`, { fetchImpl: fetch, timeoutMs: 20_000 })).json.pad.length, 9 * MIB);
+    await assert.rejects(() => fetchJson(`${big.origin}/x`, { fetchImpl: fetch, maxBytes: MIB }), (error) => error instanceof DownloadError && error.details.reason === 'too-large');
+    const chunkedBig = await listen(t, (req, res) => sendRaw(res, JSON.stringify({ pad: 'x'.repeat(9 * MIB) }), { chunked: true }));
+    await assert.rejects(() => fetchJson(`${chunkedBig.origin}/x`, { fetchImpl: fetch, maxBytes: MIB }), (error) => error.details?.reason === 'too-large');
+    assert.equal((await fetchJson(`${chunkedBig.origin}/x`, { fetchImpl: fetch, timeoutMs: 20_000 })).json.pad.length, 9 * MIB);
+});
+
+test('without a token a 401 or 403 says the repository may not exist or needs access; with one it says access was refused', async (t) => {
+    const tree = { '': [[lfs('a-Q4_K_M.gguf', MIB, sha('a'))]] };
+    const cases = [
+        ['the model', { infoStatus: 401 }, {}],
+        ['the revision', { revisionStatus: 403, tree }, {}],
+        ['the listing', { treeStatus: 401, tree }, {}],
+        ['the file', { tree, files: { 'a-Q4_K_M.gguf': { status: 401 } } }, { file: 'a-Q4_K_M.gguf' }],
+    ];
+    for (const [what, repo, extra] of cases) {
+        const hf = await fakeHf(t, repo);
+        await assert.rejects(() => ask(hf, { repo: REPO, ...extra }), (error) => {
+            assert.equal(error.code, 'access_denied', what);
+            assert.match(error.message, /^Hugging Face did not find .*, or it needs access \(HTTP 40[13]\)\. For a gated or private repository, set a token with `ploinky var HF_TOKEN <token>` and restart local-llm\.$/, what);
+            assert.doesNotMatch(error.message, /refused/, what);
+            return true;
+        });
+        await assert.rejects(() => ask(hf, { repo: REPO, ...extra }, { token: TOKEN }), (error) => {
+            assert.equal(error.code, 'access_denied', what);
+            assert.match(error.message, /^Hugging Face refused access to .* \(HTTP 40[13]\)\. For a gated or private repository, set a token with `ploinky var HF_TOKEN <token>`/, what);
+            assert.doesNotMatch(error.message, /did not find/, what);
+            assert.doesNotMatch(error.message, new RegExp(TOKEN));
+            return true;
+        });
+    }
+    // A 404 is still plainly not found, token or not.
+    const missing = await fakeHf(t, { infoStatus: 404 });
+    for (const token of ['', TOKEN]) await assert.rejects(() => ask(missing, { repo: REPO }, { token }), (error) => error.code === 'not_found' && !/access/.test(error.message));
+});
+
+test('bidirectional control characters are dropped from a licence before it is shown or stored', async (t) => {
+    const licenceOf = async (info) => (await ask(await fakeHf(t, { info, tree: { '': [[]] } }), { repo: REPO })).license;
+    assert.equal(await licenceOf({ cardData: { license: 'mit\u202Egpl\u202C' } }), 'mitgpl');
+    assert.equal(await licenceOf({ cardData: { license: '\u2066apache-2.0\u2069' } }), 'apache-2.0');
+    assert.equal(await licenceOf({ cardData: { license: '\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069' }, tags: ['license:mit'] }), 'mit', 'nothing is left of the first, so the tag is used');
+    assert.equal(await licenceOf({ cardData: { license: 'apache-2.0' } }), 'apache-2.0');
+});
+
 // ------------------------------------------------------------------ the controller
 
 const GIB = 1024 * MIB;
@@ -641,7 +832,12 @@ async function until(predicate, timeoutMs = 3000) {
 
 // A controller on the cpu profile, its hardware and runner injected, its Hugging Face a fake one. `weights` is what a
 // download leaves on disk for the pinned GGUF; `download` replaces the whole download.
-function harness(t, { hf, weights = null, download = null, registry = null, seed = [] } = {}) {
+const dedicatedSnapshot = () => ({
+    gpu: { available: true, name: 'NVIDIA GeForce RTX 3060', memoryModel: 'dedicated', totalBytes: 12 * 1024 * MIB, freeBytes: 12 * 1024 * MIB, usedBytes: 0, processes: [] },
+    memory: { totalBytes: 32 * 1024 * MIB, availableBytes: 28 * 1024 * MIB }, disk: { freeBytes: 400_000 * MIB, totalBytes: 800_000 * MIB },
+});
+
+function harness(t, { hf, weights = null, download = null, registry = null, seed = [], dedicated = false } = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-lookup-'));
     if (registry) {
         fs.mkdirSync(path.join(dir, 'state'), { recursive: true });
@@ -657,7 +853,7 @@ function harness(t, { hf, weights = null, download = null, registry = null, seed
         seedCatalog: seed,
         hfBaseUrl: hf?.origin ?? 'http://hf.invalid',
         stateStore: createStateStore({ dataDir: dir }),
-        snapshot: async () => cpuSnapshot(),
+        snapshot: async () => (dedicated ? dedicatedSnapshot() : cpuSnapshot()),
         download: download ?? (async ({ artifact }) => { downloads.push(artifact.file); return { status: 'complete', path: file, bytesTransferred: 0 }; }),
         inspect: async () => ({ state: 'absent', bytes: 0 }),
         remove: async () => 0,
@@ -677,8 +873,9 @@ function harness(t, { hf, weights = null, download = null, registry = null, seed
         detectRunner: (runner) => ({ installed: runner.supported, version: runner.pinnedVersion, reason: null }),
         pollMs: 2,
         stopGraceMs: 50,
-        imageContract: ARM64_CONTRACT,
-        fileExists: (candidate) => candidate === '/opt/llama.cpp/llama-server',
+        // A GPU host: no image contract (every runner is present) and a dedicated GPU, so the profile is `dedicated`.
+        imageContract: dedicated ? null : ARM64_CONTRACT,
+        fileExists: (candidate) => dedicated || candidate === '/opt/llama.cpp/llama-server',
         sharedModelsRoot: null,
         readMemory: () => ({ totalBytes: 6036128 * 1024, availableBytes: 3122576 * 1024 }),
         readPressure: () => 0,
@@ -865,6 +1062,197 @@ test('a lookup during a download does not hold up Stop or Run, and a drain ends 
     await drain;
     await assert.rejects(() => h.controller.lookupModel({ repo: REPO }), codeOf('shutting_down'));
     gate.resolve();
+});
+
+test('the verified re-read sizes a hyphenated architecture, and one it cannot use keeps the stored sizing with a warning instead of failing the Run', async (t) => {
+    const hf = await fakeHf(t, modelRepo());
+    // gpt-oss: the file says 49,152 KV bytes per token under an architecture named with a hyphen; the entry said 1,000.
+    const oss = harness(t, { hf, weights: pad(GPT_OSS_HEADER, 65536) });
+    await oss.controller.addModel(entryFor('oss-understated', { sizingSource: 'gguf-header', architecture: 'moe', contextLength: 131072, memory: { layers: 24, kvBytesPerToken: 1000 } }));
+    await runOn(oss, 'oss-understated', 'request-oss-0001');
+    await until(() => oss.controller.state.deployment?.phase === 'ready');
+    const { deployment } = oss.controller.state;
+    assert.equal(deployment.admission.estimate.kvBytes, 49152 * deployment.params.ctxSize, 'the hyphenated architecture was read and its KV size used');
+    assert.equal(oss.logLines('differs from the sizing stored').length, 1);
+    assert.match(oss.logLines('differs from the sizing stored')[0], /\(kvBytesPerToken 1000 -> 49152\)/);
+    assert.ok(deployment.admission.warnings.some((warning) => /GGUF header of the downloaded file, which was checked against its sha256/.test(warning)));
+    // An architecture this reader cannot use (none, a name with spaces, a dotted one): the Run goes on with what the entry says.
+    const unusable = {
+        'no architecture': ggufBytes({ kv: [['general.name', T.string, 'x'], ['qwen2.block_count', T.u32, 24]] }).bytes,
+        'a name with a space': ggufBytes({ kv: [['general.architecture', T.string, 'Bad Arch!'], ['Bad Arch!.block_count', T.u32, 24]] }).bytes,
+        'a dotted name': ggufBytes({ kv: [['general.architecture', T.string, 'a.b'], ['a.b.block_count', T.u32, 24]] }).bytes,
+    };
+    for (const [what, header] of Object.entries(unusable)) {
+        const h = harness(t, { hf, weights: pad(header, 65536) });
+        await h.controller.addModel(entryFor('keeps-stored', { sizingSource: 'gguf-header', contextLength: 32768, memory: { layers: 24, kvBytesPerToken: 1000 } }));
+        await runOn(h, 'keeps-stored', 'request-keep-0001');
+        await readyOrFailed(h);
+        const run = h.controller.state.deployment;
+        assert.equal(run.phase, 'ready', `${what}: the Run is not failed (${run.error})`);
+        assert.equal(h.started.length, 1, what);
+        assert.equal(run.admission.estimate.kvBytes, 1000 * run.params.ctxSize, `${what}: the stored KV size stands`);
+        assert.equal(h.logLines('differs from the sizing stored').length, 0, what);
+        const lines = h.logLines('cannot be used to check the sizing stored');
+        assert.equal(lines.length, 1, what);
+        assert.match(lines[0], /keeps-stored: the GGUF header of the verified file cannot be used to check the sizing stored when the model was added \(general\.architecture is (?:missing|not a name this agent can read.*)\); the stored values stand/, what);
+        assert.ok(run.admission.warnings.some((warning) => /^Sized with memory\.kvBytesPerToken from the GGUF header read when the model was added; the downloaded file's header could not be used to check them \(general\.architecture is .*\), so they stand unchecked: an understated value/.test(warning)),
+            `${what}: ${run.admission.warnings.join(' | ')}`);
+        assert.equal(h.stored().registry[0].memory.kvBytesPerToken, 1000);
+    }
+    // An entry with no stored sizing is left with the estimate's defaults, which it names, and runs.
+    const bare = harness(t, { hf, weights: pad(unusable['no architecture'], 65536) });
+    await bare.controller.addModel(entryFor('keeps-defaults', { sizingSource: 'gguf-header' }));
+    await runOn(bare, 'keeps-defaults', 'request-bare-0001');
+    await readyOrFailed(bare);
+    assert.equal(bare.controller.state.deployment.phase, 'ready');
+    assert.deepEqual(bare.controller.state.deployment.admission.estimate.defaulted, ['memory.kvBytesPerToken', 'contextLength']);
+    assert.equal(bare.logLines('cannot be used to check the sizing stored').length, 1);
+    // A header that is malformed as GGUF still fails the Run with invalid_gguf, as before.
+    const broken = harness(t, { hf, weights: Buffer.from('<html>not a GGUF file</html>') });
+    await broken.controller.addModel(entryFor('malformed', { sizingSource: 'gguf-header', contextLength: 32768, memory: { layers: 24, kvBytesPerToken: 1000 } }));
+    await runOn(broken, 'malformed', 'request-bad-0001');
+    await readyOrFailed(broken);
+    assert.equal(broken.controller.state.deployment.phase, 'error');
+    assert.match(broken.controller.state.deployment.error, /has no readable GGUF header/);
+});
+
+test('when the verified file changes the training context, the parameters are worked out again from what the Run asked for', async (t) => {
+    const hf = await fakeHf(t, modelRepo());
+    const longEntry = (id, extra = {}) => entryFor(id, { sizingSource: 'gguf-header', contextLength: 32768, memory: { layers: 24, kvBytesPerToken: 12288 }, ...extra });
+    const ctxArg = (process) => process.args[process.args.indexOf('--ctx-size') + 1];
+    for (const dedicated of [false, true]) {
+        const profile = dedicated ? 'dedicated' : 'cpu';
+        // A default context: admitted against the stored 32768, then lowered to the 2048 the file says. Nothing else about the Run changes.
+        const short = harness(t, { hf, weights: headerOf({ context: 2048 }), dedicated });
+        await short.controller.addModel(longEntry('trained-short'));
+        const accepted = await runOn(short, 'trained-short', `request-default-${profile}`);
+        assert.ok(accepted.deployment.params.ctxSize > 2048, `${profile}: admitted with ${accepted.deployment.params.ctxSize}`);
+        await until(() => short.controller.state.deployment?.phase === 'ready');
+        const { deployment } = short.controller.state;
+        assert.equal(deployment.profile, profile);
+        assert.equal(deployment.params.ctxSize, 2048, profile);
+        assert.deepEqual({ ...deployment.params, ctxSize: 0 }, { ...accepted.deployment.params, ctxSize: 0 }, `${profile}: only the context moved`);
+        // The estimate, the recorded parameters, the saved ones and the launch all carry the one value.
+        assert.equal(deployment.admission.estimate.kvBytes, 12288 * 2048, profile);
+        assert.equal(ctxArg(short.started[0]), '2048', profile);
+        assert.equal(short.stored().params['trained-short|llama.cpp'].ctxSize, 2048, profile);
+        assert.match(short.logLines('differs from the sizing stored')[0], /contextLength 32768 -> 2048/);
+        // An explicit context above what the file says is refused with the parameter error, after the download and before any runner starts.
+        const explicit = harness(t, { hf, weights: headerOf({ context: 2048 }), dedicated });
+        await explicit.controller.addModel(longEntry('trained-short'));
+        const asked = await explicit.controller.run({ modelId: 'trained-short', runnerId: 'llama.cpp', requestId: `request-explicit-${profile}`, params: { ctxSize: 4096 } });
+        assert.equal(asked.accepted, true, 'admitted against the stored training context');
+        await readyOrFailed(explicit);
+        const failed = explicit.controller.state.deployment;
+        assert.equal(failed.phase, 'error', profile);
+        assert.match(failed.error, /The downloaded file's header gives a training context of 2048 tokens\. Invalid parameter ctxSize: must be <= 2048/, profile);
+        assert.equal(explicit.started.length, 0, `${profile}: the runner never started`);
+    }
+    // The explicit value the request named, at the verified context, is fine; above it is refused. Both on cpu.
+    const explicitCtx = (ctxSize) => ({ modelId: 'trained-short', runnerId: 'llama.cpp', requestId: `request-ctx-${ctxSize}`, params: { ctxSize } });
+    const atBound = harness(t, { hf, weights: headerOf({ context: 2048 }) });
+    await atBound.controller.addModel(longEntry('trained-short'));
+    await atBound.controller.run(explicitCtx(2048));
+    await until(() => atBound.controller.state.deployment?.phase === 'ready');
+    assert.equal(ctxArg(atBound.started[0]), '2048');
+    const above = harness(t, { hf, weights: headerOf({ context: 2048 }) });
+    await above.controller.addModel(longEntry('trained-short'));
+    await above.controller.run(explicitCtx(2049));
+    await readyOrFailed(above);
+    assert.equal(above.controller.state.deployment.phase, 'error');
+    assert.equal(above.started.length, 0);
+    // A context the file raises: the default follows it up (the stored 2048 had capped it).
+    const raised = harness(t, { hf, weights: headerOf({ context: 32768 }) });
+    await raised.controller.addModel(longEntry('trained-short', { contextLength: 2048 }));
+    const first = await runOn(raised, 'trained-short', 'request-raised-0001');
+    assert.equal(first.deployment.params.ctxSize, 2048);
+    await until(() => raised.controller.state.deployment?.phase === 'ready');
+    assert.equal(raised.controller.state.deployment.params.ctxSize, 4096, 'the cpu default, no longer capped');
+    assert.equal(ctxArg(raised.started[0]), '4096');
+    // A context the file leaves as it is: the parameters are the ones admitted, untouched.
+    const same = harness(t, { hf, weights: headerOf({ context: 32768 }) });
+    await same.controller.addModel(longEntry('trained-short'));
+    const untouched = await runOn(same, 'trained-short', 'request-same-0001');
+    await until(() => same.controller.state.deployment?.phase === 'ready');
+    assert.deepEqual(same.controller.state.deployment.params, untouched.deployment.params);
+    // Parameters an earlier Run saved are not taken for this Run's own choice: a Run with no parameters that picks up a saved
+    // explicit 4096 is admitted with it, and then the file's 2048 replaces the saved value with the default, not an error.
+    const saved = harness(t, { hf, weights: headerOf({ context: 32768 }) });
+    await saved.controller.addModel(longEntry('trained-short'));
+    await saved.controller.run(explicitCtx(4096));
+    await until(() => saved.controller.state.deployment?.phase === 'ready');
+    await saved.controller.stop();
+    fs.writeFileSync(saved.file, headerOf({ context: 2048 }));
+    const later = await saved.controller.run({ modelId: 'trained-short', runnerId: 'llama.cpp', requestId: 'request-later-0001' });
+    assert.equal(later.deployment.params.ctxSize, 4096, 'the saved value, admitted');
+    await until(() => saved.controller.state.deployment?.requestId === 'request-later-0001' && ['ready', 'error'].includes(saved.controller.state.deployment.phase));
+    assert.equal(saved.controller.state.deployment.phase, 'ready');
+    assert.equal(saved.controller.state.deployment.params.ctxSize, 2048);
+    // Saved parameters that are still valid under the verified context carry over untouched: they are an earlier Run's choice, and
+    // working the parameters out again does not turn them back into defaults.
+    const kept = harness(t, { hf, weights: headerOf({ context: 32768 }) });
+    await kept.controller.addModel(longEntry('trained-short'));
+    await kept.controller.run({ modelId: 'trained-short', runnerId: 'llama.cpp', requestId: 'request-kept-0001', params: { ctxSize: 1024, threads: 2 } });
+    await until(() => kept.controller.state.deployment?.phase === 'ready');
+    await kept.controller.stop();
+    fs.writeFileSync(kept.file, headerOf({ context: 2048 }));
+    const again = await kept.controller.run({ modelId: 'trained-short', runnerId: 'llama.cpp', requestId: 'request-kept-0002' });
+    assert.deepEqual([again.deployment.params.ctxSize, again.deployment.params.threads], [1024, 2]);
+    await until(() => kept.controller.state.deployment?.requestId === 'request-kept-0002' && ['ready', 'error'].includes(kept.controller.state.deployment.phase));
+    assert.equal(kept.controller.state.deployment.phase, 'ready');
+    assert.deepEqual([kept.controller.state.deployment.params.ctxSize, kept.controller.state.deployment.params.threads], [1024, 2]);
+    assert.equal(ctxArg(kept.started.at(-1)), '1024');
+});
+
+test('Add pins the commit a lookup read, so a branch that moved in between does not change what was sized', async (t) => {
+    const older = { tree: { '': [[lfs('small-Q4_K_M.gguf', 400 * MIB, sha('a')), lfs('model.safetensors', 900 * MIB, sha('a'))]] }, files: { 'small-Q4_K_M.gguf': { body: pad(QWEN_HEADER) } } };
+    const newer = { tree: { '': [[lfs('small-Q4_K_M.gguf', 500 * MIB, sha('b')), lfs('model.safetensors', 1000 * MIB, sha('b'))]] }, files: { 'small-Q4_K_M.gguf': { body: pad(QWEN_HEADER) } } };
+    const hf = await fakeHf(t, { commits: { [COMMIT]: older, [OTHER_COMMIT]: newer }, mainCommit: COMMIT });
+    const h = harness(t, { hf });
+    const gguf = await h.controller.lookupModel({ repo: REPO, file: 'small-Q4_K_M.gguf' });
+    const snapshot = await h.controller.lookupModel({ repo: REPO, format: 'hf' });
+    assert.deepEqual([gguf.commit, snapshot.commit], [COMMIT, COMMIT]);
+    // The branch moves on before Add is pressed.
+    hf.repo.mainCommit = OTHER_COMMIT;
+    const form = (kind, extra = {}) => ({
+        id: `pinned-${kind}`, sourceKind: kind, repo: REPO, revision: '', file: 'small-Q4_K_M.gguf', contextLength: '32768', layers: '24', kvBytesPerToken: '12288', ...extra,
+    });
+    const pinned = await h.controller.addModel(modelEntryFromForm(form('huggingface', { sizingSource: 'gguf-header', commit: gguf.commit })));
+    assert.deepEqual([pinned.model.sources.gguf.commit, pinned.model.sources.gguf.size, pinned.model.sources.gguf.sha256], [COMMIT, 400 * MIB, sha('a')]);
+    const snap = await h.controller.addModel(modelEntryFromForm(form('hf', { sizingSource: 'config.json', commit: snapshot.commit })));
+    assert.deepEqual([snap.model.sources.hf.commit, snap.model.sources.hf.size], [COMMIT, 900 * MIB]);
+    assert.equal(h.stored().registry.find((entry) => entry.id === 'pinned-hf').sources.hf.revision, COMMIT);
+    // The same form without the commit is what it was: main, which is now somewhere else.
+    const drifted = await h.controller.addModel(modelEntryFromForm(form('huggingface', { id: 'drifted-gguf' })));
+    assert.deepEqual([drifted.model.sources.gguf.commit, drifted.model.sources.gguf.size, drifted.model.sources.gguf.sha256], [OTHER_COMMIT, 500 * MIB, sha('b')]);
+});
+
+test('at most two lookups run at once; the third is busy until one of them finishes', async (t) => {
+    const held = [];
+    const hung = await listen(t, (req, res) => { held.push(res); });
+    const h = harness(t, { hf: hung });
+    const finished = [];
+    const start = () => h.controller.lookupModel({ repo: REPO }).then((value) => finished.push(['ok', value]), (error) => finished.push([error.code]));
+    const first = start();
+    const second = start();
+    await until(() => held.length === 2);
+    // The third is refused at once, says why, and sends nothing.
+    await assert.rejects(() => h.controller.lookupModel({ repo: REPO }), (error) => error.code === 'busy' && /2 lookups are already running/.test(error.message));
+    assert.equal(held.length, 2, 'the refused lookup sent no request');
+    assert.deepEqual(finished, []);
+    // One ends (the repository is not there), and its place is free again.
+    held[0].writeHead(404);
+    held[0].end();
+    await until(() => finished.length === 1);
+    assert.deepEqual(finished, [['not_found']]);
+    const third = start();
+    await until(() => held.length === 3);
+    await assert.rejects(() => h.controller.lookupModel({ repo: REPO }), codeOf('busy'));
+    // The drain ends the two that are left.
+    const drain = h.controller.drain();
+    await Promise.all([first, second, third]);
+    await drain;
+    assert.deepEqual(finished.map(([code]) => code).sort(), ['not_found', 'shutting_down', 'shutting_down']);
 });
 
 test('the lookup tool reaches the controller operation, admin only, and the control socket serves it', async () => {

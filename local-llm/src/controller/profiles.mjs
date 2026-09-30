@@ -148,14 +148,19 @@ function userSizing(model, fields) {
 // (`sizingSource`, DS002): typed by hand (or `manual`) is the original text;
 // a GGUF header read when the model was added is read again from the verified
 // file after the download, and once it was (`sizingVerified`, set on the
-// copy the controller admits with) the values are the file's own; a
-// snapshot's config.json was checked against its digest at lookup.
+// copy the controller admits with) the values are the file's own, unless the
+// file's architecture could not be used (`sizingUnchecked`); a snapshot's
+// config.json was checked against its digest at lookup.
 function userSizingWarning(fields, runner = 'llama-server', model = {}) {
     const vllm = runner === 'vllm';
     const tail = vllm
         ? `an understated value only loosens the check that the weights and KV cache fit vLLM's share, so vLLM may fail `
             + 'to start; its memory need (the share plus its runner RAM) does not depend on it.'
         : 'an understated value makes the estimate too small, and then only the memory guard stands behind the run.';
+    if (model.sizingSource === 'gguf-header' && typeof model.sizingUnchecked === 'string' && !vllm) {
+        return `Sized with ${fields.join(', ')} from the GGUF header read when the model was added; the downloaded file's header could not `
+            + `be used to check them (${model.sizingUnchecked}), so they stand unchecked: ${tail}`;
+    }
     if (model.sizingSource === 'gguf-header' && model.sizingVerified === true && !vllm) {
         return `Sized with ${fields.join(', ')} from the GGUF header of the downloaded file, which was checked against its sha256; `
             + 'the header read when the model was added was read again from it.';

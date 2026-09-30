@@ -140,12 +140,40 @@ async function discardBody(response) {
 // its own deadline, which also covers reading the body.
 export const METADATA_TIMEOUT_MS = 15_000;
 
-export async function fetchJson(url, { token, fetchImpl, timeoutMs = METADATA_TIMEOUT_MS }) {
+// The body of a metadata response as text, never more than `maxBytes`: a larger Content-Length, or a body that
+// grows past it, ends the read and the connection.
+async function readCapped(response, maxBytes) {
+    const declared = Number(response.headers.get('content-length'));
+    const tooLarge = () => new DownloadError('RESOLVE_FAILED', `Hugging Face metadata response is larger than ${maxBytes} bytes`,
+        { details: { reason: 'too-large' } });
+    if (Number.isFinite(declared) && declared > maxBytes) {
+        await discardBody(response);
+        throw tooLarge();
+    }
+    const parts = [];
+    let total = 0;
+    for await (const chunk of response.body ?? []) {
+        total += chunk.length;
+        if (total > maxBytes) {
+            await discardBody(response);
+            throw tooLarge();
+        }
+        parts.push(chunk);
+    }
+    return Buffer.concat(parts, total).toString('utf8');
+}
+
+// `maxBytes`, when given, bounds the body (the lookup's metadata reads); without it the body is read whole, as downloads always did.
+export async function fetchJson(url, { token, fetchImpl, timeoutMs = METADATA_TIMEOUT_MS, maxBytes = undefined }) {
     const signal = AbortSignal.timeout(timeoutMs);
     let response;
     try {
         response = await fetchImpl(url, { headers: { Accept: 'application/json', ...authHeaders(token) }, signal });
     } catch (err) {
+        // A DownloadError thrown by the fetch (the lookup's guarded fetch refusing a redirect) says why; any other error is reduced to a code.
+        if (err instanceof DownloadError) {
+            throw err;
+        }
         // The fetch error is not attached as a cause: only a sanitized code.
         throw new DownloadError('RESOLVE_FAILED', 'Hugging Face metadata request failed', {
             retryable: true,
@@ -160,8 +188,12 @@ export async function fetchJson(url, { token, fetchImpl, timeoutMs = METADATA_TI
         });
     }
     try {
-        return { json: await response.json(), link: response.headers.get('link') };
+        const json = maxBytes === undefined ? await response.json() : JSON.parse(await readCapped(response, maxBytes));
+        return { json, link: response.headers.get('link') };
     } catch (err) {
+        if (err instanceof DownloadError) {
+            throw err;
+        }
         if (signal.aborted) {
             throw new DownloadError('RESOLVE_FAILED', 'Hugging Face metadata request timed out', {
                 retryable: true,
@@ -183,12 +215,12 @@ function networkReason(err) {
     return err?.name === 'TypeError' ? 'fetch-failed' : 'unknown';
 }
 
-export async function resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs }) {
+export async function resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs, maxBytes = undefined }) {
     if (COMMIT_RE.test(revision)) {
         return revision;
     }
     const url = `${baseUrl}/api/models/${encodeSegments(repo)}/revision/${encodeURIComponent(revision)}`;
-    const { json } = await fetchJson(url, { token, fetchImpl, timeoutMs });
+    const { json } = await fetchJson(url, { token, fetchImpl, timeoutMs, maxBytes });
     const sha = typeof json?.sha === 'string' ? json.sha.toLowerCase() : '';
     if (!COMMIT_RE.test(sha)) {
         throw new DownloadError('RESOLVE_FAILED', 'Hugging Face revision response has no commit sha');

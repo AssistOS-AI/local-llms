@@ -28,13 +28,18 @@ export const GGUF_LIMITS = Object.freeze({
     maxStringBytes: 4 * MIB,
     maxArrayCount: 4_000_000,
     maxDepth: 2,
+    // Numbers kept across every array of the header; arrays past it are read past and appear as skipped.
+    maxKeptNumbers: 65_536,
 });
 
 // A numeric array longer than this (a per-layer list never is: a model has at
-// most 1024 layers) is read past and not stored, so a 32 MiB header cannot
-// become tens of millions of retained numbers.
+// most 1024 layers) is read past and not stored, and so is any array that would
+// take the header past `maxKeptNumbers` kept numbers in all, so a 32 MiB
+// header cannot become tens of millions of retained numbers.
 const MAX_KEPT_ARRAY = 4096;
-const ARCH_RE = /^[a-z0-9_]{1,40}$/;
+// An architecture name is the prefix of its keys ("qwen2.block_count"), so it has no dot; llama.cpp's own
+// names use letters, digits, underscores and hyphens ("gpt-oss", "command-r", "falcon-h1").
+const ARCH_RE = /^[a-z0-9_-]{1,40}$/;
 
 const TYPE_ARRAY = 9;
 const TYPE_STRING = 8;
@@ -71,8 +76,9 @@ function invalid(message) {
  * `invalid_gguf` when the header is incomplete. `result()` returns the same
  * once parsing is done. `kv` has no prototype, so a key named `__proto__` is
  * just a key. Scalars and strings are kept; a numeric array of up to 4,096
- * entries is kept as an array; a longer numeric array, a string array and a
- * nested array are read past and appear as `{ skipped: true, length }`.
+ * entries is kept as an array (up to 65,536 numbers in all); a longer numeric
+ * array, one past that total, a string array and a nested array are read past
+ * and appear as `{ skipped: true, length }`.
  */
 export function createGgufHeaderReader(options = {}) {
     const limits = Object.freeze({ ...GGUF_LIMITS, ...options });
@@ -82,6 +88,7 @@ export function createGgufHeaderReader(options = {}) {
     let consumed = 0;
     let parsed = null;
     let failure = null;
+    let keptNumbers = 0;
 
     function pull(count) {
         const first = queue[0];
@@ -188,10 +195,11 @@ export function createGgufHeaderReader(options = {}) {
             return { skipped: true, length: count };
         }
         const { size, read } = SCALARS[type];
-        if (!keep || count > MAX_KEPT_ARRAY) {
+        if (!keep || count > MAX_KEPT_ARRAY || keptNumbers + count > limits.maxKeptNumbers) {
             yield* skip(size * count);
             return { skipped: true, length: count };
         }
+        keptNumbers += count;
         const bytes = yield* take(size * count);
         const items = new Array(count);
         for (let index = 0; index < count; index += 1) items[index] = read(bytes.subarray(index * size, (index + 1) * size));
@@ -276,9 +284,11 @@ export async function readGgufHeaderFile(file, { fsApi = fs, chunkBytes = 64 * 1
     const handle = await fsApi.promises.open(file, 'r');
     try {
         const buffer = Buffer.alloc(chunkBytes);
-        for (let position = 0; ; position += chunkBytes) {
+        // A read may return fewer bytes than asked for: the next one starts where this one ended.
+        for (let position = 0; ;) {
             const { bytesRead } = await handle.read(buffer, 0, chunkBytes, position);
             if (bytesRead === 0) return reader.end();
+            position += bytesRead;
             if (reader.push(Buffer.from(buffer.subarray(0, bytesRead))) === 'done') return reader.result();
         }
     } finally {
@@ -311,11 +321,22 @@ function perLayer(kv, key, layers, notes) {
  * when the arithmetic does not apply (a hybrid, recurrent or latent-attention
  * architecture), a per-layer list does not match the layer count, or the
  * result is outside 1 to 2^30: the estimate then uses its default and says so.
+ *
+ * A header whose architecture name cannot be used as a key prefix (missing, or
+ * anything but letters, digits, underscore and hyphen, up to 40 characters) is
+ * a well-formed header this reader cannot size: every value is null, `arch` is
+ * null and a note says why. That is never an error, so it cannot fail a pick or
+ * a Run; `invalid_gguf` is for headers that are malformed as GGUF.
  */
 export function ggufSizing(kv) {
     const read = kv && typeof kv === 'object' ? kv : {};
     const arch = Object.hasOwn(read, 'general.architecture') ? read['general.architecture'] : undefined;
-    if (typeof arch !== 'string' || !ARCH_RE.test(arch)) throw invalid('general.architecture is missing or is not a plain architecture name');
+    if (typeof arch !== 'string' || !ARCH_RE.test(arch)) {
+        const why = typeof arch === 'string'
+            ? 'general.architecture is not a name this agent can read: letters, digits, underscore and hyphen, at most 40 characters'
+            : 'general.architecture is missing';
+        return { arch: null, layers: null, contextLength: null, kvBytesPerToken: null, architecture: 'dense', notes: [why] };
+    }
     const key = (name) => `${arch}.${name}`;
     const notes = [];
     const layers = scalar(read, key('block_count'), 1, 1024);

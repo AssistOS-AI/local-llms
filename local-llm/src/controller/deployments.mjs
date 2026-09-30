@@ -67,6 +67,8 @@ const PROFILE_UNDECIDED = 'No usable GPU has been seen yet, so the hardware prof
     + 'If the GPU is still unreadable 60 s after the first failed read, the next Run uses the CPU.';
 // Recorded in the state file once the `cpu` profile has been added to stored two-profile user entries (DS002).
 const CPU_MIGRATION = '2026-09-30';
+// Hugging Face lookups in flight at once (each holds a request, and possibly a 32 MiB read of a model's start); one more is `busy`.
+const MAX_LOOKUPS = 2;
 
 /**
  * What the image says about itself (`/opt/local-llm/source.contract`, one
@@ -576,11 +578,12 @@ export function createController({
         return { bytesNeeded: disk?.total ? Math.max(0, disk.total - (disk.bytes || 0)) : 0, files: [] };
     }
 
-    function effectiveParams(model, runnerId, override) {
+    // `saved` is what an earlier Run left for this model and runner; a Run that normalizes again after it saved its own
+    // result passes what was saved before it, so its own result is not taken for an earlier Run's explicit choice.
+    function effectiveParams(model, runnerId, override, saved = state.params[paramsKey(model.id, runnerId)]) {
         const runnerDef = getRunner(runnerId);
         const options = { model, profile: profile || 'dedicated' };
         if (override) return runnerDef.normalizeParams(override, options);
-        const saved = state.params[paramsKey(model.id, runnerId)];
         if (saved) {
             // Saved values that no longer validate (another profile, an older
             // parameter set) give way to the defaults instead of blocking the model.
@@ -1114,7 +1117,9 @@ export function createController({
     // just verified, and the entry with what that header gives in place of the stored values, or the entry itself when
     // nothing differs. The stored values came from a file read before the entry was pinned; a repository that moved
     // between the lookup and Add, or a header that lied, shows here. A difference is logged. Typed values, seeds,
-    // snapshots and runner-fetched Ollama tags are not re-read. A file whose header cannot be read is not sized at all.
+    // snapshots and runner-fetched Ollama tags are not re-read. A file whose header is malformed, or cannot be read, is
+    // not sized at all. A well-formed header whose architecture this reader cannot use checks nothing: the stored (or
+    // defaulted) values stand, a warning says so, and the Run goes on.
     async function verifiedGgufSizing(model, source, file) {
         if (model.seed || model.sizingSource !== 'gguf-header' || source?.type !== 'huggingface') return model;
         let sizing;
@@ -1123,6 +1128,11 @@ export function createController({
         } catch (error) {
             throw new LocalLlmError(error?.code === 'invalid_gguf' ? 'invalid_gguf' : 'sizing_unreadable',
                 `The downloaded ${path.basename(file)} has no readable GGUF header (${error.message}), so the sizing stored for ${model.id} cannot be checked.`);
+        }
+        if (sizing.arch === null) {
+            log.append('controller', `${model.id}: the GGUF header of the verified file cannot be used to check the sizing stored when the model `
+                + `was added (${sizing.notes[0]}); the stored values stand`);
+            return Object.freeze({ ...model, sizingUnchecked: sizing.notes[0] });
         }
         const stored = {
             contextLength: model.contextLength ?? null,
@@ -1151,7 +1161,23 @@ export function createController({
         });
     }
 
-    async function runPipeline(deployment, model, signal) {
+    // The verified file changed the model's training context, which decides what a default context is and what an
+    // explicit one may be. The parameters are worked out again from what the Run asked for (and what was saved before
+    // it), not from the result already stored: a default context is then lowered to the verified one, and an explicit
+    // one above it is refused here, before the runner starts. The admissions and the launch read `deployment.params`.
+    function renormalizeParams(deployment, model, { requested, saved }) {
+        try {
+            deployment.params = effectiveParams(model, deployment.runnerId, requested, saved);
+        } catch (error) {
+            if (error?.code !== 'invalid_params') throw error;
+            throw new LocalLlmError('invalid_params', `The downloaded file's header gives a training context of ${model.contextLength ?? 'no'} tokens. ${error.message}`,
+                error.details);
+        }
+        state.params[paramsKey(model.id, deployment.runnerId)] = deployment.params;
+        save();
+    }
+
+    async function runPipeline(deployment, model, signal, requestedParams = {}) {
         const definition = getRunner(deployment.runnerId);
         const store = storeFor(deployment.artifact);
         let weights = null;
@@ -1180,7 +1206,9 @@ export function createController({
             }
             // The sizing read from the GGUF header at lookup is unverified until the download is: read it again from the
             // verified file, so this admission, the last one and the runner's start use what the file says (DS002).
-            model = await verifiedGgufSizing(model, deployment.artifact, fetched.path);
+            const verified = await verifiedGgufSizing(model, deployment.artifact, fetched.path);
+            if (verified.contextLength !== model.contextLength) renormalizeParams(deployment, verified, requestedParams);
+            model = verified;
             // An early refusal before the runner is prepared; the check that counts is the last one, below.
             await recheckAdmission(deployment, model, { signal });
             throwIfAborted(signal);
@@ -1258,7 +1286,7 @@ export function createController({
         };
     }
 
-    function startJob(deployment, model) {
+    function startJob(deployment, model, requestedParams) {
         const controller = new AbortController();
         const current = {
             deploymentId: deployment.id,
@@ -1266,7 +1294,7 @@ export function createController({
             cancelReason: null,
             promise: null,
         };
-        current.promise = runPipeline(deployment, model, controller.signal)
+        current.promise = runPipeline(deployment, model, controller.signal, requestedParams)
             .catch(async (error) => {
                 const live = state.deployment;
                 if (!live || live.id !== deployment.id) return;
@@ -1413,6 +1441,10 @@ export function createController({
         if (!store.isPinned(source)) {
             throw new LocalLlmError('unpinned', 'The model source is not pinned to a commit; update the model entry.');
         }
+        // What this Run asked for and what was saved before it: kept so the parameters can be worked out again if the verified
+        // file changes the model's training context.
+        // null (not undefined) says there was nothing saved, so the default of effectiveParams does not pick up this Run's own result.
+        const requestedParams = { requested: params, saved: state.params[paramsKey(model.id, runnerId)] ?? null };
         const normalized = effectiveParams(model, runnerId, params);
         const current = state.deployment;
         if (current && (ACTIVE_PHASES.has(current.phase) || job)) {
@@ -1465,7 +1497,7 @@ export function createController({
         };
         recordRequest(state.requests, requestId, { deploymentId: state.deployment.id, at });
         save();
-        startJob(state.deployment, model);
+        startJob(state.deployment, model, requestedParams);
         return { accepted: true, deployment: publicDeployment() };
     }
 
@@ -1585,6 +1617,7 @@ export function createController({
 
     async function lookupModel(args) {
         if (draining) throw new LocalLlmError('shutting_down', 'The agent is restarting; look the model up again once it is back.');
+        if (lookups.size >= MAX_LOOKUPS) throw new LocalLlmError('busy', `${MAX_LOOKUPS} lookups are already running; try again when one has finished.`);
         const stop = new AbortController();
         lookups.add(stop);
         try {
