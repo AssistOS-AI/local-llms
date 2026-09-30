@@ -45,6 +45,17 @@ export function defaultPorts(runners = RUNNERS) {
     return Object.freeze(ports);
 }
 
+/**
+ * The runner's parameter schema for a hardware profile, or null when it has
+ * no policy for it (DS005). An undecided profile (null) has no policy, so a
+ * runner offered only by the agent's lock (DS004) stays unavailable until the
+ * profile is known.
+ */
+export function schemaOf(runner, profile = 'dedicated') {
+    if (typeof runner.paramSchemaFor === 'function') return runner.paramSchemaFor(profile);
+    return profile === 'dedicated' ? runner.paramSchema : null;
+}
+
 /** Why a runner without parameters for the cpu profile cannot run there (DS005). */
 function cpuRefusal(displayName) {
     return `${displayName} needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.`;
@@ -61,9 +72,7 @@ function cpuRefusal(displayName) {
  */
 export function runnerSummary(runner, profile = 'dedicated') {
     const { id, displayName, weightFormat, pinnedVersion, supported } = runner;
-    const paramSchema = typeof runner.paramSchemaFor === 'function'
-        ? runner.paramSchemaFor(profile)
-        : (profile === 'dedicated' ? runner.paramSchema : null);
+    const paramSchema = schemaOf(runner, profile);
     return {
         id, displayName, weightFormat, pinnedVersion, supported, paramSchema,
         basicParams: runner.basicParams || [],

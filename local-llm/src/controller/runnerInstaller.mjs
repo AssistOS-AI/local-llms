@@ -18,9 +18,11 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
+import zlib from 'node:zlib';
 
 import { LocalLlmError } from '../errors.mjs';
 import { DownloadError, downloadFile, inspectFile } from './downloader.mjs';
+import { archiveCompression } from './runnerLock.mjs';
 
 export const DEFAULT_CACHE_ROOT = '/data/runners';
 export const DEFAULT_RUN_ROOT = '/opt/runners';
@@ -53,6 +55,22 @@ async function copyHashed(source, destination, signal) {
         fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 }),
     );
     return hash.digest('hex');
+}
+
+/**
+ * Decompress a pinned .tar.zst into a plain .tar beside it. The image has no
+ * zstd tool and runTool gives a process no stdin, so Node's zlib does it and
+ * tar then reads the .tar. A stream that is not zstd, or is cut short, is an
+ * `install_failed` with the partial .tar removed; a stop ends it as ABORTED.
+ */
+async function decompressZstd(source, destination, { signal, label }) {
+    try {
+        await pipeline(fs.createReadStream(source), zlib.createZstdDecompress(), fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 }), { signal });
+    } catch (error) {
+        await fs.promises.rm(destination, { force: true });
+        if (signal?.aborted) throw new DownloadError('ABORTED', `Stopped while decompressing ${label}`, { retryable: true });
+        throw new LocalLlmError('install_failed', `decompressing ${label} failed: ${error?.code || error?.message || error}`);
+    }
 }
 
 async function readJson(file) {
@@ -293,11 +311,22 @@ export function createRunnerInstaller({
         }
         // File times are not restored (--touch): on the container's
         // fuse-overlayfs, setting a directory's time fails with EPERM.
-        for (const file of entry.files.filter((candidate) => /\.(tar\.gz|tgz)$/.test(candidate.name))) {
+        for (const file of entry.files.filter((candidate) => archiveCompression(candidate.name))) {
             const into = path.join(paths.runDir, file.extract || '.');
             await fs.promises.mkdir(into, { recursive: true });
-            await step(`unpacking ${file.name}`, 'tar', ['-xzf', path.join(sourceDir, file.name), '-C', into,
-                `--strip-components=${file.strip ?? 1}`, '--no-same-owner', '--touch'], { signal, env });
+            const flags = ['-C', into, `--strip-components=${file.strip ?? 1}`, '--no-same-owner', '--touch'];
+            if (archiveCompression(file.name) === 'zst') {
+                // <stage>/<name>.tar; the staged .zst and then the .tar go as soon as they are read, since the
+                // container's own filesystem holds the compressed file, the .tar and the unpacked files at once.
+                const staged = path.join(sourceDir, file.name);
+                const tarFile = path.join(sourceDir, file.name.slice(0, -'.zst'.length));
+                await decompressZstd(staged, tarFile, { signal, label: file.name });
+                await fs.promises.rm(staged, { force: true });
+                await step(`unpacking ${file.name}`, 'tar', ['-xf', tarFile, ...flags], { signal, env });
+                await fs.promises.rm(tarFile, { force: true });
+            } else {
+                await step(`unpacking ${file.name}`, 'tar', ['-xzf', path.join(sourceDir, file.name), ...flags], { signal, env });
+            }
         }
         // Data files the runner reads at run time, copied as verified.
         for (const file of entry.files.filter((candidate) => candidate.into)) {

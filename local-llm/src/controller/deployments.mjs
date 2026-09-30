@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { LocalLlmError } from '../errors.mjs';
-import { RUNNERS, defaultPorts, runnerSummary } from '../runners/index.mjs';
+import { RUNNERS, defaultPorts, runnerSummary, schemaOf } from '../runners/index.mjs';
 import { admit } from './admission.mjs';
 import { WEIGHT_FORMATS, loadSeedCatalog, mergeCatalog, unsupportedRegistryEntries, validateModel } from './catalog.mjs';
 import { createCommandQueue } from './commandQueue.mjs';
@@ -51,7 +51,7 @@ import {
     decideProfile,
 } from './profiles.mjs';
 import { createRunnerInstaller, runTool } from './runnerInstaller.mjs';
-import { loadRunnerLock } from './runnerLock.mjs';
+import { loadRunnerLocks } from './runnerLock.mjs';
 import { createLogBuffer, parseRunnerReport, startRunnerProcess } from './runnerProcess.mjs';
 import { acceptedRequest, createStateStore, reconcileAfterRestart, recordRequest } from './stateStore.mjs';
 import { createWeightStores } from './weightStores.mjs';
@@ -160,10 +160,12 @@ export function createController({
     readyTimeoutMs = 20 * 60_000,
     stopGraceMs = 10_000,
     pollMs = 1000,
-    // On-demand runners (runners plan §5.2): the lock shipped in the image,
-    // a verified cache under /data/runners, runnable copies under /opt/runners.
+    // On-demand runners (runners plan §5.2): the lock shipped in the image and
+    // the agent's own lock of this platform (the image's entry wins on a clash;
+    // DS004), a verified cache under /data/runners, runnable copies under /opt/runners.
+    runnerLocks = loadRunnerLocks({ image: env.LOCAL_LLM_RUNNER_LOCK || undefined }),
     installer = createRunnerInstaller({
-        lock: loadRunnerLock(env.LOCAL_LLM_RUNNER_LOCK || undefined),
+        lock: runnerLocks,
         cacheRoot: path.join(dataDir, 'runners'),
         runRoot: env.LOCAL_LLM_RUN_ROOT || undefined,
     }),
@@ -205,6 +207,13 @@ export function createController({
     const log = createLogBuffer({ file: path.join(dataDir, 'logs', 'runner.log') });
     const queue = createCommandQueue();
     const state = reconcileAfterRestart(stateStore.load(), now().toISOString());
+    // Where the two runner locks met (DS004): an id in both keeps the image's entry; an agent lock that could not be read is left out.
+    for (const id of runnerLocks?.clashes ?? []) {
+        log.append('controller', `runner lock: ${id} is in the image's lock and in the agent's lock; the image's entry is used`);
+    }
+    for (const { file, reason } of runnerLocks?.ignored ?? []) {
+        log.append('controller', `runner lock: the agent's lock ${file} is ignored: ${String(reason).slice(0, 300)}`);
+    }
     let detected = {};
     let job = null;
     // The acquisition planning of the Run being admitted, which Stop, Cancel and drain can abort (F5).
@@ -219,10 +228,19 @@ export function createController({
     const hardwareStop = new AbortController();
     // One runner install at a time, beside the deployment job.
     let installJob = null;
-    // Installable through the controller: in the image's runner lock and with
-    // an adapter here. A lock entry for a runner this release cannot run is
-    // installed only by the CI install check.
-    const installable = (id) => typeof id === 'string' && Object.hasOwn(runners, id) && installer.installable(id);
+    // Installable through the controller: in a runner lock and with an adapter
+    // here. A lock entry for a runner this release cannot run is installed only
+    // by the CI install check. An entry of the image's lock is always offered.
+    // One that only the agent's lock has (DS004) is offered where it could run,
+    // that is under a profile the runner has a policy for, so a GPU profile sees
+    // no new runner; and not when the image already holds the runner's own
+    // executable (the image wins on a clash).
+    const fromAgentLock = (definition) => installer.lock?.origin?.[definition.id] === 'agent';
+    const offeredByLock = (definition) => installer.installable(definition.id)
+        && (!fromAgentLock(definition) || (schemaOf(definition, profile) !== null && !(definition.executable && fileExists(definition.executable))));
+    const installable = (id) => typeof id === 'string' && Object.hasOwn(runners, id) && offeredByLock(runners[id]);
+    // Listed by a lock at all, whatever the profile: Uninstall still works to free the disk.
+    const lockListed = (id) => typeof id === 'string' && Object.hasOwn(runners, id) && installer.installable(id);
     let runner = null;
     let draining = false;
     // Speed of the last completion served by the ready runner, as the chat
@@ -438,14 +456,24 @@ export function createController({
     const unifiedPossible = !amd64Only;
 
     // Whether this image can run a runner at all (DS005): its executable is in
-    // the image, or the image's runner lock lists it. Without a source.contract
+    // the image, or a runner lock lists it. Without a source.contract
     // (tests, development) every runner counts as available.
     function availabilityOf(definition) {
         if (!imageContract) return { available: true, reason: null };
-        const present = definition.executable ? fileExists(definition.executable) : installer.installable(definition.id);
+        // The runner's executable is in the image, or a lock offers it (for an agent-lock entry, where it has a policy).
+        const present = definition.executable
+            ? fileExists(definition.executable) || (fromAgentLock(definition) && offeredByLock(definition))
+            : offeredByLock(definition);
         return present
             ? { available: true, reason: null }
             : { available: false, reason: `${definition.displayName} is not available on this platform: this image does not include it.` };
+    }
+
+    // Why a runner a lock lists is not offered for install here (DS004).
+    function notInstallableReason(definition) {
+        return definition.executable && fileExists(definition.executable)
+            ? `${definition.displayName} is part of this image and needs no install.`
+            : `${definition.displayName} is not available on this platform: this image does not include it.`;
     }
 
     // The GPUs the image's CUDA runners were built for (arm64: 12.1). The amd64
@@ -828,7 +856,8 @@ export function createController({
             baseUrl: `http://127.0.0.1:${runner.port}`,
             apiKey: runner.apiKey || null,
             model: definition.chatModel(deployment),
-            requestOptions: definition.requestOptions?.(deployment.params) ?? null,
+            // The request options depend on the profile (Ollama on the cpu profile hides the GPU layers).
+            requestOptions: definition.requestOptions?.(deployment.params, { profile: deployment.profile ?? undefined }) ?? null,
             // The chat responder sizes its completion budget by it (DS001). Only the cpu profile
             // has a budget of its own, so the other profiles' chat target stays what it was.
             ...(deployment.profile === 'cpu' ? { profile: 'cpu' } : {}),
@@ -1754,7 +1783,7 @@ export function createController({
             if (Object.keys(rest).length) {
                 throw new LocalLlmError('invalid_request', `Unexpected install fields: ${Object.keys(rest).join(', ')}`);
             }
-            if (!installable(runnerId)) {
+            if (!lockListed(runnerId)) {
                 throw new LocalLlmError('not_installable', `No installable runner '${String(runnerId)}' in this image's runner lock.`);
             }
             // A switch may depend on the profile (vLLM on unified memory), and a runner with no
@@ -1762,6 +1791,10 @@ export function createController({
             await currentProfile();
             const refusal = profileRefusal(getRunner(runnerId));
             if (refusal) throw new LocalLlmError('runner_unavailable', refusal, { runner: runnerId });
+            // An entry only the agent's lock has is offered where the runner has a policy for the profile.
+            if (!installable(runnerId)) {
+                throw new LocalLlmError('runner_unavailable', notInstallableReason(getRunner(runnerId)), { runner: runnerId });
+            }
             assertEnabled(getRunner(runnerId));
             if (draining) throw new LocalLlmError('shutting_down', 'The agent is restarting; install again once it is back.');
             const entry = installer.entryFor(runnerId);
@@ -1795,7 +1828,7 @@ export function createController({
 
     function uninstallRunner({ runnerId } = {}) {
         return queue.run(async () => {
-            if (!installable(runnerId)) {
+            if (!lockListed(runnerId)) {
                 throw new LocalLlmError('not_installable', `No installable runner '${String(runnerId)}' in this image's runner lock.`);
             }
             const deployment = state.deployment;

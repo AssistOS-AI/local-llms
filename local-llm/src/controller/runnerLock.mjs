@@ -1,6 +1,8 @@
-// The runner lock shipped inside the image (/opt/local-llm/runners.lock.json):
-// the only runners that can be installed on demand, and the only files they
-// may download (runners plan §5.2). Admins choose a runner id, never a URL.
+// The runner locks: the one shipped inside the image (/opt/local-llm/runners.lock.json)
+// and the agent's own, one per platform (catalog/runners.lock.linux-<arch>.json,
+// DS004). Together they name the only runners that can be installed on demand,
+// and the only files they may download (runners plan §5.2). Admins choose a
+// runner id, never a URL. Both have the schema below.
 //
 // {
 //   "schema": "local-llm.runners-lock/v1",
@@ -18,9 +20,10 @@
 //
 // A python runner's files are wheels (plus optional source archives with
 // `extract`); `uv` installs exactly those wheels, offline, with their hashes.
-// An archive runner's files are archives extracted into its runnable copy,
-// dropping one leading directory unless the file says `strip: 0` (an archive
-// whose entries sit at its root, like LM Studio's llmster tarball).
+// An archive runner's files are .tar.gz or .tar.zst archives (Ollama's
+// releases) extracted into its runnable copy, dropping one leading directory
+// unless the file says `strip: 0` (an archive whose entries sit at its root,
+// like LM Studio's llmster tarball).
 // A python runner may also pin data files it would otherwise download at run
 // time (`into`: the directory of the runnable copy the file is copied to).
 //
@@ -31,6 +34,7 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import { LocalLlmError } from '../errors.mjs';
 
@@ -49,6 +53,9 @@ export const ALLOWED_HOSTS = Object.freeze([
     // LM Studio's headless daemon, llmster (proprietary).
     'llmster.lmstudio.ai',
 ]);
+
+// The agent's lock of each platform, by the CPU architecture Node reports.
+const AGENT_LOCK_PLATFORMS = Object.freeze({ arm64: 'arm64', x64: 'amd64' });
 
 const ID_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 const VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
@@ -87,6 +94,12 @@ function text(value, field, { required = false, max = TEXT_MAX } = {}) {
     return value;
 }
 
+/** How an archive's file name says it is compressed ('gz' or 'zst'), or null when it names no archive this lock unpacks. */
+export function archiveCompression(name) {
+    if (/\.(tar\.gz|tgz)$/.test(name)) return 'gz';
+    return /\.tar\.zst$/.test(name) ? 'zst' : null;
+}
+
 export function validateLockUrl(value, field) {
     let url;
     try {
@@ -119,7 +132,9 @@ function validateFile(value, field, kind) {
     if (into !== null && (typeof into !== 'string' || !EXTRACT_RE.test(into))) {
         throw invalid(`${field}.into must be a directory name`);
     }
-    const archive = /\.(tar\.gz|tgz)$/.test(value.name);
+    const compression = archiveCompression(value.name);
+    // A python runner's source archives stay .tar.gz; .tar.zst is for archive runners.
+    const archive = compression === 'gz' || (compression === 'zst' && kind === 'archive');
     const wheel = value.name.endsWith('.whl');
     if (value.strip !== undefined) {
         if (value.strip !== 0 && value.strip !== 1) throw invalid(`${field}.strip must be 0 or 1`);
@@ -128,7 +143,7 @@ function validateFile(value, field, kind) {
     if (into !== null && (wheel || archive || extract !== null)) {
         throw invalid(`${field}.into is only for data files, not wheels or archives`);
     }
-    if (kind === 'archive' && !archive) throw invalid(`${field} must be a .tar.gz archive`);
+    if (kind === 'archive' && !archive) throw invalid(`${field} must be a .tar.gz archive or a .tar.zst archive`);
     if (kind === 'python' && !wheel && !(archive && extract) && into === null) {
         throw invalid(`${field} must be a wheel, a .tar.gz archive with extract, or a data file with into`);
     }
@@ -253,4 +268,50 @@ export function loadRunnerLock(file = DEFAULT_RUNNER_LOCK, { fsApi = fs } = {}) 
         throw error;
     }
     return validateRunnerLock(JSON.parse(text));
+}
+
+/** The agent's lock file for a CPU architecture (Node's `process.arch`), or null for an architecture that has none. */
+export function agentRunnerLockFile(arch = process.arch) {
+    if (!Object.hasOwn(AGENT_LOCK_PLATFORMS, arch)) return null;
+    return fileURLToPath(new URL(`../../catalog/runners.lock.linux-${AGENT_LOCK_PLATFORMS[arch]}.json`, import.meta.url));
+}
+
+/**
+ * The image's lock and the agent's lock of this platform, as one lock. An id in
+ * both keeps the image's entry (the image was proven and promoted as a whole),
+ * and `clashes` lists such ids so the caller can log them. `origin` says where
+ * each entry came from ('image' or 'agent'): the controller offers an agent
+ * entry only under a profile the runner has a policy for. An agent lock that
+ * cannot be read or is not valid is left out, and `ignored` says why; an
+ * invalid image lock still throws, as it always did.
+ */
+export function loadRunnerLocks({ image = DEFAULT_RUNNER_LOCK, agent = agentRunnerLockFile(), fsApi = fs } = {}) {
+    const fromImage = loadRunnerLock(image, { fsApi });
+    let fromAgent = Object.freeze({ schema: RUNNER_LOCK_SCHEMA, runners: Object.freeze({}) });
+    const ignored = [];
+    if (agent) {
+        try {
+            fromAgent = loadRunnerLock(agent, { fsApi });
+        } catch (error) {
+            ignored.push({ file: agent, reason: error?.message || String(error) });
+        }
+    }
+    const runners = { ...fromImage.runners };
+    const origin = Object.fromEntries(Object.keys(fromImage.runners).map((id) => [id, 'image']));
+    const clashes = [];
+    for (const [id, entry] of Object.entries(fromAgent.runners)) {
+        if (Object.hasOwn(runners, id)) {
+            clashes.push(id);
+            continue;
+        }
+        runners[id] = entry;
+        origin[id] = 'agent';
+    }
+    return Object.freeze({
+        schema: RUNNER_LOCK_SCHEMA,
+        runners: Object.freeze(runners),
+        origin: Object.freeze(origin),
+        clashes: Object.freeze(clashes),
+        ignored: Object.freeze(ignored),
+    });
 }
