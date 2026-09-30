@@ -36,7 +36,6 @@ const TOOL_OUTPUT_KEPT = 64 * 1024;
 const ZSTD_MAX_RATIO = 32;
 const ZSTD_MIN_LIMIT = 1024 * 1024;
 const TAR_BLOCK = 512;
-const TAR_END_BYTES = 2 * TAR_BLOCK;
 
 const WHEEL_RE = /^([A-Za-z0-9](?:[A-Za-z0-9._]*[A-Za-z0-9])?)-([A-Za-z0-9.!+_]+)(?:-\d[^-]*)?-[^-]+-[^-]+-[^-]+\.whl$/;
 
@@ -64,19 +63,114 @@ async function copyHashed(source, destination, signal) {
     return hash.digest('hex');
 }
 
+// Limits on what a tar's headers may claim, since the .tar comes from a decoder and its content is not yet trusted.
+export const TAR_MAX_MEMBERS = 1_000_000;
+export const TAR_MAX_PAX_BYTES = 1024 * 1024;
+const PAX_TYPES = new Set(['x', 'g']);
+const GNU_LONG_NAME_TYPES = new Set(['L', 'K']);
+// Members that carry no data, whatever their size field says (GNU tar reads them so): links, devices, directories, fifos.
+const NO_DATA_TYPES = new Set(['1', '2', '3', '4', '5', '6']);
+
+const roundUp = (bytes) => Math.ceil(bytes / TAR_BLOCK) * TAR_BLOCK;
+
+// A tar header number: octal text (padded with NULs or spaces), or GNU's base 256 (high bit of the first byte set). null if it is neither.
+function tarNumber(field) {
+    if (field[0] & 0x80) {
+        if (field[0] & 0x40) return null;
+        let value = BigInt(field[0] & 0x3f);
+        for (let index = 1; index < field.length; index += 1) value = (value << 8n) | BigInt(field[index]);
+        return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null;
+    }
+    const text = field.toString('latin1').replace(/\0.*$/s, '').trim();
+    return /^[0-7]+$/.test(text) ? Number.parseInt(text, 8) : null;
+}
+
+// What is wrong with a header block, or null: the ustar magic (POSIX, GNU and pax all carry it) and the checksum (unsigned or signed sum).
+function headerFault(block) {
+    if (block.subarray(257, 262).toString('latin1') !== 'ustar') return 'the ustar magic is missing';
+    const stored = tarNumber(block.subarray(148, 156));
+    let unsigned = 0;
+    let signed = 0;
+    for (let index = 0; index < TAR_BLOCK; index += 1) {
+        const byte = index >= 148 && index < 156 ? 0x20 : block[index];
+        unsigned += byte;
+        signed += byte > 127 ? byte - 256 : byte;
+    }
+    return stored !== null && (stored === unsigned || stored === signed) ? null : 'its checksum is wrong';
+}
+
+// The `size` a pax extended header sets for the member that follows, if it sets one: { size } (null if none), or { fault }.
+function paxSize(data) {
+    let size = null;
+    for (let at = 0; at < data.length;) {
+        const space = data.indexOf(0x20, at);
+        const length = space < 0 ? NaN : Number.parseInt(data.subarray(at, space).toString('latin1'), 10);
+        if (!Number.isInteger(length) || length <= space - at + 1 || at + length > data.length || data[at + length - 1] !== 0x0a) return { fault: 'a pax header is malformed' };
+        const record = data.subarray(space + 1, at + length - 1).toString('utf8');
+        const equals = record.indexOf('=');
+        if (record.slice(0, equals) === 'size') {
+            if (!/^[0-9]{1,15}$/.test(record.slice(equals + 1))) return { fault: 'a pax size is not a number' };
+            size = Number(record.slice(equals + 1));
+        }
+        at += length;
+    }
+    return { size };
+}
+
 /**
- * Whether a file is a whole tar: a multiple of 512 bytes that ends with the end-of-archive marker, at least
- * two blocks of zeros (every writer pads to its record size with zeros; GNU tar and bsdtar to 10 KiB).
- * A stream cut inside a member is not a multiple of 512, and one cut on a member's end has no marker.
+ * Whether a file is a whole tar, by walking its headers from the start and never reading a member's data
+ * (it seeks past). Each header must be a ustar header (magic, checksum) and its member is skipped by its
+ * size: the size field (octal, or GNU base 256), or the `size=` record of a pax extended header (`x` for the
+ * next member, `g` from there on); a GNU long name or link header (`L`, `K`) is skipped by its size too.
+ * The tar is whole only when a block of zeros is found exactly where a header is due, followed by a second
+ * one. The end of the file where a header is due, a member that runs past the end, one block of zeros, a
+ * header that is not a header: each is `{ cut }` with what was found. More than `maxMembers` members or a
+ * pax header over `maxPax` bytes is `{ limit }`. A whole tar is null. The tail of a tar is no test: a member
+ * whose data ends in zeros, cut at its end, looks like the end of the archive.
  */
-async function endsLikeATar(file) {
+export async function tarProblem(file, { maxMembers = TAR_MAX_MEMBERS, maxPax = TAR_MAX_PAX_BYTES } = {}) {
     const { size } = await fs.promises.stat(file);
-    if (size < TAR_END_BYTES || size % TAR_BLOCK !== 0) return false;
     const handle = await fs.promises.open(file, 'r');
     try {
-        const end = Buffer.alloc(TAR_END_BYTES);
-        await handle.read(end, 0, TAR_END_BYTES, size - TAR_END_BYTES);
-        return end.every((byte) => byte === 0);
+        const block = Buffer.alloc(TAR_BLOCK);
+        const readAt = (at, into, length = into.length) => handle.read(into, 0, length, at);
+        let at = 0;
+        let members = 0;
+        let local = null;
+        let global = null;
+        for (;;) {
+            if (at + TAR_BLOCK > size) return { cut: 'no end-of-archive blocks' };
+            await readAt(at, block);
+            if (block.every((byte) => byte === 0)) {
+                if (at + 2 * TAR_BLOCK > size) return { cut: 'only one end-of-archive block' };
+                const second = Buffer.alloc(TAR_BLOCK);
+                await readAt(at + TAR_BLOCK, second);
+                return second.every((byte) => byte === 0) ? null : { cut: 'a block of zeros is not followed by a second one' };
+            }
+            const fault = headerFault(block);
+            if (fault) return { cut: `the header at byte ${at}: ${fault}` };
+            members += 1;
+            if (members > maxMembers) return { limit: `it lists more than ${maxMembers} members` };
+            const type = String.fromCharCode(block[156]);
+            const stated = tarNumber(block.subarray(124, 136));
+            if (stated === null) return { cut: `the header at byte ${at}: its size is not a number` };
+            if (PAX_TYPES.has(type)) {
+                if (stated > maxPax) return { limit: `a pax header is larger than ${maxPax} bytes` };
+                if (at + TAR_BLOCK + roundUp(stated) > size) return { cut: 'a pax header runs past the end of the file' };
+                const data = Buffer.alloc(stated);
+                await readAt(at + TAR_BLOCK, data);
+                const pax = paxSize(data);
+                if (pax.fault) return { cut: pax.fault };
+                if (pax.size !== null) { if (type === 'x') local = pax.size; else global = pax.size; }
+                at += TAR_BLOCK + roundUp(stated);
+                continue;
+            }
+            const dataSize = NO_DATA_TYPES.has(type) ? 0 : (GNU_LONG_NAME_TYPES.has(type) ? stated : (local ?? global ?? stated));
+            if (!GNU_LONG_NAME_TYPES.has(type)) local = null;
+            if (dataSize > size) return { cut: 'a member runs past the end of the file' };
+            at += TAR_BLOCK + roundUp(dataSize);
+            if (at > size) return { cut: 'a member runs past the end of the file' };
+        }
     } finally {
         await handle.close();
     }
@@ -91,11 +185,12 @@ async function endsLikeATar(file) {
  *
  * A stream that is cut short is handled two ways, by Node's version. Node 24 reports it as a zlib
  * error (`Z_BUF_ERROR`, "unexpected end of file"), which is an `install_failed` like the rest. Node
- * 25.8 does not: its decoder ends quietly with whatever it decoded, down to an empty .tar, and
- * nothing else in the unpack notices, since tar takes a .tar that ends on a member's end for a whole
- * one. So the decompressed .tar must itself be whole (endsLikeATar), on any Node; the sha256 pin
- * covers the bytes on disk, and the executable check after the unpack (assertLaunchExecutable)
- * covers a wrong strip.
+ * 25.8 does not: its decoder ends quietly with whatever it decoded, down to an empty .tar, and it
+ * decodes only the first frame of a stream of several. Tar takes a .tar that ends on a member's end for
+ * a whole one, and the tail of a tar is no test (a last member may end in zeros). So the decompressed
+ * .tar is walked header by header (tarProblem) and must end where a tar ends: two blocks of zeros where
+ * a header is due. The sha256 pin covers the bytes on disk, and the executable check after the unpack
+ * (assertLaunchExecutable) covers a wrong strip.
  */
 async function decompressZstd(source, destination, { signal, label, decoder }) {
     const limit = Math.max(ZSTD_MIN_LIMIT, ZSTD_MAX_RATIO * (await fs.promises.stat(source)).size);
@@ -116,10 +211,13 @@ async function decompressZstd(source, destination, { signal, label, decoder }) {
             : (error?.code && error?.message && error.code !== error.message ? `${error.code} (${error.message})` : (error?.code || error?.message || error));
         throw new LocalLlmError('install_failed', `decompressing ${label} failed: ${why}`);
     }
-    // Quietly truncated output (Node 25) is not an error to the decoder, so the .tar is checked for its end.
-    if (!(await endsLikeATar(destination))) {
+    // Quietly truncated output (Node 25) is not an error to the decoder, so the .tar is walked to its end.
+    const problem = await tarProblem(destination);
+    if (problem) {
         await fs.promises.rm(destination, { force: true });
-        throw new LocalLlmError('install_failed', `decompressing ${label} failed: it was cut short (no end-of-archive blocks)`);
+        // A stream of several zstd frames, which Node 25.8 decodes only the first of, looks like a cut one: the message says both.
+        throw new LocalLlmError('install_failed', `decompressing ${label} failed: ${problem.limit
+            ?? `it was cut short (${problem.cut}), or has more zstd frames than this Node decodes`}`);
     }
 }
 
@@ -230,6 +328,9 @@ export function createRunnerInstaller({
     inspect = inspectFile,
     statfs = (target) => fs.promises.statfs(target),
     run = runTool,
+    // Removes a path; tests make it fail. `onWarning` hears of a cleanup that could not be done.
+    remove = (target) => fs.promises.rm(target, { recursive: true, force: true }),
+    onWarning = () => {},
     // The zstd decoder; tests stand in for how a Node version ends a stream that was cut short.
     zstdDecoder = () => zlib.createZstdDecompress(),
     // Tests only: the lock allows https, a local test server speaks http.
@@ -438,9 +539,15 @@ export function createRunnerInstaller({
             // The marker says the copy can run: prove the binary is in it first.
             await assertLaunchExecutable(entry, paths.runDir);
         } catch (error) {
-            // A failed build (the unpack, the size cap, a stop, a missing binary) leaves no partial copy and no scratch directory.
-            await fs.promises.rm(paths.runDir, { recursive: true, force: true });
-            await fs.promises.rm(paths.tmpDir, { recursive: true, force: true });
+            // A failed build (the unpack, the size cap, a stop, a missing binary) leaves no partial copy and no scratch
+            // directory. Both removals are tried, and one that fails is reported, never thrown over the error that led here.
+            for (const leftover of [paths.runDir, paths.tmpDir]) {
+                try {
+                    await remove(leftover);
+                } catch (cleanup) {
+                    onWarning(`could not remove ${leftover} after the build of ${entry.id} ${entry.version} failed (${error?.code ?? 'error'}): ${cleanup?.code || cleanup?.message || cleanup}`);
+                }
+            }
             throw error;
         } finally {
             await fs.promises.rm(paths.stageDir, { recursive: true, force: true });

@@ -117,7 +117,7 @@ function tarOf(t, files, top = '.') {
 const NAME = 'runner-1.0.0.tar.zst';
 
 // An installer over a cache that already holds `bytes`, pinned as `pinned`; the entry declares `executable` and `strip`.
-function installerOver(t, bytes, { executable = 'llama-server', strip = 0, run = tarRun, pinned = bytes, zstdDecoder } = {}) {
+function installerOver(t, bytes, { executable = 'llama-server', strip = 0, run = tarRun, pinned = bytes, zstdDecoder, remove, onWarning } = {}) {
     const root = tempDir(t, 'exe-installer');
     const lock = validateRunnerLock(lockOf({
         testrunner: archiveEntry(NAME, {
@@ -128,7 +128,7 @@ function installerOver(t, bytes, { executable = 'llama-server', strip = 0, run =
     const cacheRoot = path.join(root, 'data', 'runners');
     const runRoot = path.join(root, 'opt', 'runners');
     const installer = createRunnerInstaller({
-        lock, cacheRoot, runRoot, run, ...(zstdDecoder ? { zstdDecoder } : {}),
+        lock, cacheRoot, runRoot, run, ...(zstdDecoder ? { zstdDecoder } : {}), ...(remove ? { remove } : {}), ...(onWarning ? { onWarning } : {}),
         inspect: async ({ target }) => ({ state: 'complete', bytes: fs.statSync(target).size }),
     });
     const entry = installer.entryFor('testrunner');
@@ -206,7 +206,7 @@ function memberEnd(tar, name) {
 const tarOrNothing = (options) => (fs.statSync(options.args[1]).size === 0 ? Promise.resolve({ code: 0, output: '' }) : tarRun(options));
 
 const refusedCutShort = (label) => (error) => error.code === 'install_failed'
-    && new RegExp(`^decompressing ${label.replaceAll('.', '\\.')} failed: (Z_BUF_ERROR|ZSTD_error_[a-z_]+|it was cut short \\(no end-of-archive blocks\\))`).test(error.message);
+    && new RegExp(`^decompressing ${label.replaceAll('.', '\\.')} failed: (Z_BUF_ERROR|ZSTD_error_[a-z_]+|it was cut short \\(.+\\), or has more zstd frames than this Node decodes)`).test(error.message);
 
 test('an archive cut short does not install, whether the Node version reports the cut or ends quietly', async (t) => {
     const tar = tarOf(t, { 'llama-server': { content: '#!/bin/sh\n'.padEnd(1000, '#') }, 'lib/libggml-cpu.so': { mode: 0o644, content: 'x'.repeat(3000) } });
@@ -243,32 +243,34 @@ test('a tar cut inside a member of zeros is refused, though its last blocks are 
     assert.equal((await installerOver(t, zlib.zstdCompressSync(tar)).installer.ensureRunnable('testrunner')).rebuilt, true);
 });
 
+// A decoder that hands on the first `keep` bytes it decoded, then either fails as Node 24 does or just ends as Node 25.8 does.
+const cutting = (keep, fail) => () => {
+    let seen = 0;
+    const real = zlib.createZstdDecompress();
+    const out = new Transform({
+        transform(chunk, _encoding, done) { done(); },
+    });
+    real.on('data', (chunk) => { const room = keep - seen; if (room > 0) out.push(chunk.subarray(0, room)); seen += chunk.length; });
+    real.on('error', (error) => out.destroy(error));
+    real.on('end', () => (fail ? out.destroy(Object.assign(new Error('unexpected end of file'), { code: 'Z_BUF_ERROR', errno: -5 })) : out.push(null)));
+    return Duplex.from({ writable: real, readable: out });
+};
+
 test('a decoder that reports the cut (Node 24) and one that ends quietly (Node 25.8) both leave no marker, no copy and no staging', async (t) => {
     const tar = tarOf(t, { 'llama-server': {}, 'lib/libggml-cpu.so': { mode: 0o644, content: 'x'.repeat(3000) } });
     const bytes = zlib.zstdCompressSync(tar);
-    // A decoder that hands on the first `keep` bytes it decoded, then either fails as Node 24 does or just ends.
-    const cutting = (keep, fail) => () => {
-        let seen = 0;
-        const real = zlib.createZstdDecompress();
-        const out = new Transform({
-            transform(chunk, _encoding, done) { done(); },
-        });
-        real.on('data', (chunk) => { const room = keep - seen; if (room > 0) out.push(chunk.subarray(0, room)); seen += chunk.length; });
-        real.on('error', (error) => out.destroy(error));
-        real.on('end', () => (fail ? out.destroy(Object.assign(new Error('unexpected end of file'), { code: 'Z_BUF_ERROR', errno: -5 })) : out.push(null)));
-        return Duplex.from({ writable: real, readable: out });
-    };
     const calls = [];
     const run = async (options) => { calls.push(options.args); return tarRun(options); };
     // Node 24: a zlib error, coded, wrapped as install_failed.
     const reporting = installerOver(t, bytes, { run, zstdDecoder: cutting(1536, true) });
     await assert.rejects(() => reporting.installer.ensureRunnable('testrunner'),
         (error) => error.code === 'install_failed' && error.message === 'decompressing runner-1.0.0.tar.zst failed: Z_BUF_ERROR (unexpected end of file)');
-    // Node 25.8: no error, and a .tar that stops on the end of its first member (no end-of-archive blocks), or empty, or in mid-member.
+    // Node 25.8: no error, and a .tar that stops on the end of its first member, or is empty, or stops in mid-member.
     for (const keep of [0, 700, memberEnd(tar, 'llama-server')]) {
         const quiet = installerOver(t, bytes, { run, zstdDecoder: cutting(keep, false) });
         await assert.rejects(() => quiet.installer.ensureRunnable('testrunner'),
-            (error) => error.code === 'install_failed' && error.message === 'decompressing runner-1.0.0.tar.zst failed: it was cut short (no end-of-archive blocks)', `keep ${keep}`);
+            (error) => error.code === 'install_failed'
+                && /^decompressing runner-1\.0\.0\.tar\.zst failed: it was cut short \((no end-of-archive blocks|a (member|pax header) runs past the end of the file)\), or has more zstd frames than this Node decodes$/.test(error.message), `keep ${keep}`);
         assert.equal(fs.existsSync(quiet.marker), false, `keep ${keep}`);
         assert.equal(fs.existsSync(quiet.runDir), false, `keep ${keep}`);
         assert.equal(fs.existsSync(quiet.stageDir), false, `keep ${keep}`);
@@ -279,6 +281,41 @@ test('a decoder that reports the cut (Node 24) and one that ends quietly (Node 2
         assert.equal(fs.existsSync(h.stageDir), false);
     }
     assert.deepEqual(calls, [], 'tar never ran');
+});
+
+test('an archive cut where a member whose data ends in zeros ends, after the launch file, does not install on either Node behaviour', async (t) => {
+    // The verifier's case: a data file, 2,048 zero bytes, and then the members the cut throws away. A cut there has zeros for its
+    // last blocks, so a check of the tail takes it for a whole tar and the copy is marked ready without the later members.
+    const tar = tarOf(t, {
+        'llama-server': {}, 'data.bin': { mode: 0o644, content: crypto.randomBytes(3000) }, 'zeros.bin': { mode: 0o644, content: Buffer.alloc(2048) },
+        'lib/libggml-cpu.so': { mode: 0o644, content: crypto.randomBytes(5000) },
+    });
+    const cut = memberEnd(tar, 'zeros.bin');
+    assert.ok(tar.subarray(cut - 2 * TAR_BLOCK, cut).every((byte) => byte === 0), 'the premise: the cut ends in zeros');
+    assert.ok(tar.length - cut > 5000, 'the premise: the library is what is cut off');
+    const calls = [];
+    const run = async (options) => { calls.push(options.args); return tarRun(options); };
+    const refused = (label) => (error) => error.code === 'install_failed'
+        && /^decompressing runner-1\.0\.0\.tar\.zst failed: it was cut short \(no end-of-archive blocks\), or has more zstd frames than this Node decodes$/.test(error.message);
+    // A complete zstd frame of the cut tar (what Node 24 or a writer that cut early gives) ...
+    const frame = installerOver(t, zlib.zstdCompressSync(tar.subarray(0, cut)), { run });
+    await assert.rejects(() => frame.installer.ensureRunnable('testrunner'), refused('frame'));
+    // ... and the whole stream through a decoder that ends quietly at the cut (Node 25.8).
+    const quiet = installerOver(t, zlib.zstdCompressSync(tar), { run, zstdDecoder: cutting(cut, false) });
+    await assert.rejects(() => quiet.installer.ensureRunnable('testrunner'), refused('quiet'));
+    for (const h of [frame, quiet]) {
+        assert.equal(fs.existsSync(h.marker), false);
+        assert.equal(fs.existsSync(h.runDir), false);
+        assert.equal(fs.existsSync(h.stageDir), false);
+    }
+    assert.deepEqual(calls, [], 'tar never ran');
+    // The whole archive installs with every member; and so does one whose last member is zeros, which no tail check could tell from a cut.
+    const whole = installerOver(t, zlib.zstdCompressSync(tar));
+    assert.equal((await whole.installer.ensureRunnable('testrunner')).rebuilt, true);
+    assert.ok(fs.existsSync(path.join(whole.runDir, 'lib', 'libggml-cpu.so')));
+    const zeroTail = installerOver(t, zlib.zstdCompressSync(tarOf(t, { 'llama-server': {}, 'zeros.bin': { mode: 0o644, content: Buffer.alloc(2048) } })));
+    assert.equal((await zeroTail.installer.ensureRunnable('testrunner')).rebuilt, true);
+    assert.equal(fs.statSync(path.join(zeroTail.runDir, 'zeros.bin')).size, 2048);
 });
 
 test('a tar cut exactly where a member ends, after the launch file, is refused: it has no end-of-archive blocks', async (t) => {
@@ -293,7 +330,8 @@ test('a tar cut exactly where a member ends, after the launch file, is refused: 
     const calls = [];
     const h = installerOver(t, zlib.zstdCompressSync(cut), { run: async (options) => { calls.push(options.args); return tarRun(options); } });
     await assert.rejects(() => h.installer.ensureRunnable('testrunner'),
-        (error) => error.code === 'install_failed' && /^decompressing runner-1\.0\.0\.tar\.zst failed: it was cut short \(no end-of-archive blocks\)$/.test(error.message));
+        (error) => error.code === 'install_failed'
+            && /^decompressing runner-1\.0\.0\.tar\.zst failed: it was cut short \(no end-of-archive blocks\), or has more zstd frames than this Node decodes$/.test(error.message));
     assert.deepEqual(calls, []);
     assert.equal(fs.existsSync(h.marker), false);
     assert.equal(fs.existsSync(h.runDir), false);
@@ -303,7 +341,7 @@ test('a tar cut exactly where a member ends, after the launch file, is refused: 
     const twoBlocks = installerOver(t, zlib.zstdCompressSync(Buffer.concat([cut, Buffer.alloc(2 * TAR_BLOCK)])));
     assert.equal((await twoBlocks.installer.ensureRunnable('testrunner')).rebuilt, true);
     assert.ok(fs.existsSync(path.join(twoBlocks.runDir, 'llama-server')));
-    // A whole archive written with the usual padding to 10 KiB installs, and so does an empty one.
+    // A whole archive padded out to a 10 KiB record, as GNU tar writes it, installs (bsdtar does not pad), and an empty one has no launch file.
     const padded = Buffer.concat([tar, Buffer.alloc(10240 - (tar.length % 10240))]);
     assert.equal((await installerOver(t, zlib.zstdCompressSync(padded)).installer.ensureRunnable('testrunner')).rebuilt, true);
     assert.equal((await installerOver(t, zlib.zstdCompressSync(Buffer.alloc(1024))).installer.ensureRunnable('testrunner').catch((error) => error.code)), 'install_failed', 'an empty tar has no launch file');
@@ -321,8 +359,10 @@ test('a .tar.zst that unpacks to far more than its size is refused, with no stag
     assert.equal(fs.existsSync(h.stageDir), false);
     assert.equal(fs.existsSync(h.marker), false);
     // The cap is a multiple of the compressed size above the floor: a stream that unpacks to 3 times its size is nowhere near it.
+    // A whole tar of one 6 MiB member that is a repeat of 2 MiB of noise: it compresses to about a third, nowhere near 32 times.
     const random = crypto.randomBytes(2 * 1024 * 1024);
-    const fine = installerOver(t, zlib.zstdCompressSync(Buffer.concat([random, random, random, Buffer.alloc(1024)])), { executable: null, run: async () => ({ code: 0, output: '' }) });
+    const big = tarOf(t, { 'big.bin': { mode: 0o644, content: Buffer.concat([random, random, random]) } });
+    const fine = installerOver(t, zlib.zstdCompressSync(big), { executable: null, run: async () => ({ code: 0, output: '' }) });
     assert.equal((await fine.installer.ensureRunnable('testrunner')).rebuilt, true);
 });
 
@@ -516,4 +556,51 @@ test('a failed unpack or a refused size leaves no partial runnable copy and no s
     // The next attempt starts clean and installs.
     const again = installerOver(t, tar, { run: tarRun });
     assert.equal((await again.installer.ensureRunnable('testrunner')).rebuilt, true);
+});
+
+test('a cleanup that fails is reported and never hides the error that led to it, and the other removal is still tried', async (t) => {
+    const tar = zlib.zstdCompressSync(tarOf(t, { 'llama-server': {} }));
+    const tarFails = async (options) => {
+        fs.writeFileSync(path.join(options.args[options.args.indexOf('-C') + 1], 'half-unpacked'), 'partial');
+        return { code: 2, signal: null, output: 'tar: boom\n', aborted: false };
+    };
+    const original = (error) => error.code === 'install_failed' && /^unpacking runner-1\.0\.0\.tar\.zst failed \(exit 2\): tar: boom$/.test(error.message);
+    const really = (target) => fs.promises.rm(target, { recursive: true, force: true });
+    // The runnable copy cannot be removed: the error stays the tar's, the scratch directory is still removed, and the failure is reported.
+    const removed = [];
+    const warnings = [];
+    const one = installerOver(t, tar, {
+        run: tarFails, onWarning: (message) => warnings.push(message),
+        remove: async (target) => { removed.push(target); if (target.endsWith(`${path.sep}1.0.0`)) throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' }); return really(target); },
+    });
+    await assert.rejects(() => one.installer.ensureRunnable('testrunner'), original);
+    assert.deepEqual(removed, [one.runDir, one.tmpDir], 'both were tried, the copy first');
+    assert.equal(fs.existsSync(one.tmpDir), false, 'the scratch directory went');
+    assert.equal(fs.existsSync(one.marker), false);
+    assert.deepEqual(warnings, [`could not remove ${one.runDir} after the build of testrunner 1.0.0 failed (install_failed): EPERM`]);
+    // Neither can: two reports, the same error.
+    const both = [];
+    const two = installerOver(t, tar, {
+        run: tarFails, onWarning: (message) => both.push(message),
+        remove: async () => { throw Object.assign(new Error('read-only file system'), { code: 'EROFS' }); },
+    });
+    await assert.rejects(() => two.installer.ensureRunnable('testrunner'), original);
+    assert.equal(both.length, 2);
+    assert.match(both[0], /could not remove .*1\.0\.0 after .*: EROFS$/);
+    assert.match(both[1], /could not remove .*\.tmp-testrunner after .*: EROFS$/);
+    // A failure that is not the tar's, such as a refused size, keeps its own error too.
+    const cap = installerOver(t, zlib.zstdCompressSync(Buffer.alloc(4 * 1024 * 1024)), { remove: async () => { throw new Error('no'); } });
+    await assert.rejects(() => cap.installer.ensureRunnable('testrunner'), (error) => error.code === 'install_failed' && /it unpacks to more than/.test(error.message));
+    // The controller's default installer reports into the controller's log.
+    const data = tempDir(t, 'cleanup-log');
+    const installWarnings = { write: () => assert.fail('the controller has not taken over') };
+    const controller = createController({
+        dataDir: data, env: { PATH: '/usr/bin' }, seedCatalog: [], stateStore: createStateStore({ dataDir: data }), installWarnings,
+        snapshot: async () => ({ gpu: { available: false, state: 'absent', reason: 'none' }, memory: {}, disk: {}, cpus: 1, cores: 1 }),
+        detectRunner: () => ({ installed: false, version: null, reason: null }),
+    });
+    t.after(async () => { await controller.drain(); fs.rmSync(data, { recursive: true, force: true }); });
+    installWarnings.write('could not remove /opt/runners/x after the build of x 1 failed (install_failed): EPERM');
+    const lines = (await controller.status()).logs.map((entry) => entry.line);
+    assert.ok(lines.includes('runner install: could not remove /opt/runners/x after the build of x 1 failed (install_failed): EPERM'), lines.join('\n'));
 });

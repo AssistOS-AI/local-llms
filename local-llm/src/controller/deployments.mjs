@@ -164,10 +164,13 @@ export function createController({
     // the agent's own lock of this platform (the image's entry wins on a clash;
     // DS004), a verified cache under /data/runners, runnable copies under /opt/runners.
     runnerLocks = loadRunnerLocks({ image: env.LOCAL_LLM_RUNNER_LOCK || undefined }),
+    // Where the installer says what it could not clean up; the controller's log is made below, and takes over.
+    installWarnings = { write: () => {} },
     installer = createRunnerInstaller({
         lock: runnerLocks,
         cacheRoot: path.join(dataDir, 'runners'),
         runRoot: env.LOCAL_LLM_RUN_ROOT || undefined,
+        onWarning: (message) => installWarnings.write(message),
     }),
     detectRunner = (runner) => runner.detect({ spawnSync, installer }),
     // Test seams for Hugging Face snapshots (the store's defaults are the real downloader).
@@ -207,6 +210,7 @@ export function createController({
     now = () => new Date(),
 } = {}) {
     const log = createLogBuffer({ file: path.join(dataDir, 'logs', 'runner.log') });
+    installWarnings.write = (message) => log.append('controller', `runner install: ${message}`);
     const queue = createCommandQueue();
     const state = reconcileAfterRestart(stateStore.load(), now().toISOString());
     // Where the two runner locks met (DS004): an id in both keeps the image's entry; an agent lock that could not be read is left out.
