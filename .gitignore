@@ -22,3 +22,13 @@ node_modules/
 __pycache__/
 *.pyc
 .venv/
+
+# Agent skills linked from the workspace skills hub (DocumentationSkills); not versioned here
+/.agents/skills/achilles-specs
+/.agents/skills/article-build
+/.agents/skills/detect-main-behaviors
+/.agents/skills/gamp-specs
+/.agents/skills/node-coding-style
+/.agents/skills/review-specs
+/.agents/skills/unslop
+/.agents/skills/web-design
