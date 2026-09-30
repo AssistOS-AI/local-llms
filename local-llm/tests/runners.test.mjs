@@ -176,6 +176,29 @@ describe('llama.cpp runner', () => {
         assertParamError(() => llamaCppRunner.normalizeParams({}, { model: bad }), 'ctxSize');
     });
 
+    it('caps a default context at the model\'s training context and refuses an explicit one above it', () => {
+        const short = Object.freeze({ id: 'short', contextLength: 4096 });
+        for (const runner of [llamaCppRunner, ikLlamaCppRunner]) {
+            // The schema default (16384) and a catalog recommendation above the training context are capped, per slot.
+            assert.equal(runner.normalizeParams({}, { model: short }).ctxSize, 4096);
+            assert.equal(runner.normalizeParams({ parallel: 2 }, { model: short }).ctxSize, 8192);
+            const recommended = { ...short, recommended: { dedicated: { [runner.id]: { ctxSize: 65536 } } } };
+            assert.equal(runner.normalizeParams({}, { model: recommended }).ctxSize, 4096);
+            // A default inside the training context, and an explicit value, are kept as they are.
+            assert.equal(runner.normalizeParams({}, { model: { id: 'long', contextLength: 40960 } }).ctxSize, 16384);
+            assert.equal(runner.normalizeParams({ ctxSize: 2048 }, { model: short }).ctxSize, 2048);
+            assertParamError(() => runner.normalizeParams({ ctxSize: 8192 }, { model: short }), 'ctxSize');
+            // The Run form sends the capped values back explicitly; they validate unchanged.
+            const capped = runner.normalizeParams({}, { model: short });
+            assert.deepEqual(runner.normalizeParams(capped, { model: short }), capped);
+            assert.deepEqual(runner.describeContext({}, { model: short }).totalContext, 4096);
+        }
+        assert.ok(hasPair(llamaLaunch({}, { model: short }).args, '--ctx-size', '4096'));
+        // The unified default (32768) is capped the same way.
+        assert.equal(llamaCppRunner.normalizeParams({}, { model: short, profile: 'unified' }).ctxSize, 4096);
+        assertParamError(() => llamaCppRunner.normalizeParams({ ctxSize: 8192 }, { model: short, profile: 'unified' }), 'ctxSize');
+    });
+
     it('adds --jinja only when the model requires it', () => {
         assert.ok(llamaLaunch({}, { model: { id: 'm', requiresJinja: true } }).args.includes('--jinja'));
         assert.ok(!llamaLaunch({}).args.includes('--jinja'));

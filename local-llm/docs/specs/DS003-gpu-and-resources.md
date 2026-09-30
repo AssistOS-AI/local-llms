@@ -36,7 +36,7 @@ Admission sizes every runner from the GPU's total and free memory. A GPU that gi
 
 ### llama-server load mode
 
-The llama-server adapters take `loadMode` (`auto`, `none`, `mmap`, `mlock`, `mmap+mlock`, `dio`), mapped one to one to llama.cpp's `--load-mode` (added in b10105; b10875 removed `--no-mmap`, `--mmap`, `--mlock` and `--direct-io`). `auto`, the dedicated default, passes no flag. ik_llama.cpp keeps its older flags and has no direct I/O: `none` is `--no-mmap`, `mlock` is `--mlock --no-mmap`, `mmap+mlock` is `--mlock`, and `dio` is refused. The former `noMmap` and `mlock` booleans are gone (LM Studio keeps its own `noMmap`, which its SDK takes as `tryMmap`). The model's training context caps `ctxSize` at `contextLength` per slot.
+The llama-server adapters take `loadMode` (`auto`, `none`, `mmap`, `mlock`, `mmap+mlock`, `dio`), mapped one to one to llama.cpp's `--load-mode` (added in b10105; b10875 removed `--no-mmap`, `--mmap`, `--mlock` and `--direct-io`). `auto`, the dedicated default, passes no flag. ik_llama.cpp keeps its older flags and has no direct I/O: `none` is `--no-mmap`, `mlock` is `--mlock --no-mmap`, `mmap+mlock` is `--mlock`, and `dio` is refused. The former `noMmap` and `mlock` booleans are gone (LM Studio keeps its own `noMmap`, which its SDK takes as `tryMmap`). The model's training context caps `ctxSize` at `contextLength` per slot: a default above it (the schema's 16,384, or the catalog's recommendation) is lowered to it, and an explicit value above it is refused.
 
 ### Admission
 

@@ -201,7 +201,16 @@ export function createLlamaServerRunner({
     function normalizeParams(params = {}, { model, profile = 'dedicated' } = {}) {
         const schema = paramSchemaFor(profile);
         if (!schema) throw new ParamError('(runner)', `${displayName} has no parameters for the ${profile} profile`);
-        const values = validateParams(schema, params, { defaults: recommendedFor(model, id, profile) });
+        const defaults = recommendedFor(model, id, profile);
+        let values = validateParams(schema, params, { defaults });
+        const trainedContext = Number.isInteger(model?.contextLength) ? model.contextLength * values.parallel : null;
+        // A default context (the catalog's or the schema's) larger than the
+        // model's training context is capped at it, so a model trained on a
+        // short context runs without an admin setting ctxSize. An explicit
+        // value above it is still refused below.
+        if (trainedContext !== null && values.ctxSize > trainedContext && params?.ctxSize === undefined) {
+            values = validateParams(schema, { ...params, ctxSize: trainedContext }, { defaults });
+        }
         if (profile === 'dedicated' && values.ubatchSize > values.batchSize) {
             throw new ParamError('ubatchSize', `must be <= batchSize (${values.batchSize})`);
         }
@@ -211,8 +220,8 @@ export function createLlamaServerRunner({
             throw new ParamError('mtp', `${model?.displayName || 'This model'} has no multi-token-prediction head (its entry does not declare mtp), `
                 + 'so MTP cannot be turned on; set mtp to false, or declare mtp in the model entry if its weights have one');
         }
-        if (Number.isInteger(model?.contextLength) && values.ctxSize > model.contextLength * values.parallel) {
-            throw new ParamError('ctxSize', `must be <= ${model.contextLength * values.parallel} (the model's training context of `
+        if (trainedContext !== null && values.ctxSize > trainedContext) {
+            throw new ParamError('ctxSize', `must be <= ${trainedContext} (the model's training context of `
                 + `${model.contextLength} tokens per slot)`);
         }
         return values;
