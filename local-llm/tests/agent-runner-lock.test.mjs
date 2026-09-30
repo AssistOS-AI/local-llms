@@ -576,6 +576,10 @@ test('an entry only the agent lock has is offered where the runner has a policy,
     const inImage = await ollamaOf(present);
     assert.equal(inImage.supported, true);
     assert.equal('install' in inImage, false);
+    // The controller says so at start, once; with no such binary it says nothing.
+    const said = (h) => h.controller.status().then((status) => status.logs.filter((entry) => /runner lock: ollama is in the agent's lock/.test(entry.line)).map((entry) => entry.line));
+    assert.deepEqual(await said(present), ["runner lock: ollama is in the agent's lock, but the image holds /opt/ollama/bin/ollama; the image's binary is used"]);
+    assert.deepEqual(await said(cpu), []);
     await assert.rejects(() => present.controller.installRunner({ runnerId: 'ollama' }),
         (error) => error.code === 'runner_unavailable' && /Ollama is part of this image and needs no install/.test(error.message));
     // An id no lock lists is not installable at all; Uninstall still works for one a lock lists, under any profile.

@@ -216,6 +216,13 @@ export function createController({
     for (const { file, reason } of runnerLocks?.ignored ?? []) {
         log.append('controller', `runner lock: the agent's lock ${file} is ignored: ${String(reason).slice(0, 300)}`);
     }
+    // An entry only the agent's lock has, for a runner whose own executable the image already holds: the image wins here too.
+    for (const [id, origin] of Object.entries(installer.lock?.origin ?? {})) {
+        const definition = Object.hasOwn(runners, id) ? runners[id] : null;
+        if (origin === 'agent' && definition?.executable && fileExists(definition.executable)) {
+            log.append('controller', `runner lock: ${id} is in the agent's lock, but the image holds ${definition.executable}; the image's binary is used`);
+        }
+    }
     let detected = {};
     let job = null;
     // The acquisition planning of the Run being admitted, which Stop, Cancel and drain can abort (F5).
