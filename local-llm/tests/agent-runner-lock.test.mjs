@@ -2,7 +2,7 @@
 // image's; .tar.zst archives; the CI check that gates entries; and the runners
 // that come from it at run time.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -124,8 +124,12 @@ function needed(t, { event, changed, commits = 2 }) {
     return fs.readFileSync(output, 'utf8').trim();
 }
 
+// The Detect script is bash and git; an image without them cannot run it.
+const hasTools = ['git', 'bash'].every((tool) => spawnSync(tool, ['--version'], { stdio: 'ignore' }).status === 0);
+
 test('the runner-lock check is needed for a change to a lock, the installer, the downloader or the registry code, and for nothing else', {
-    skip: !repositoryRoot && 'the repository root is not mounted, so its .github directory is not here',
+    skip: (!repositoryRoot && 'the repository root is not mounted, so its .github directory is not here')
+        || (!hasTools && 'git and bash are needed to run the Detect step\'s script'),
 }, (t) => {
     for (const file of [
         'local-llm/catalog/runners.lock.linux-arm64.json', 'local-llm/catalog/runners.lock.linux-amd64.json',
