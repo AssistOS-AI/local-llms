@@ -11,6 +11,7 @@ import {
     formatMiB,
     progressPercent,
     runnerLabel,
+    stripBidi,
 } from '../../../local-llm-settings/local-llm-settings-model.js';
 
 export const ACTIVE_PHASES = new Set(['downloading', 'copying', 'verifying', 'pulling', 'starting', 'loading', 'ready', 'stopping']);
@@ -510,7 +511,7 @@ export function lookupResultsHtml(result = {}, { selectedFile = '' } = {}) {
     const gated = result?.gated === 'auto' || result?.gated === 'manual' || (typeof result?.gated === 'string' && result.gated !== '');
     const badges = [
         `<span class="status-badge">${escapeHtml(gatedLabel(result?.gated))}</span>`,
-        result?.license ? `<span class="status-badge">Licence ${escapeHtml(result.license)}</span>` : '',
+        result?.license ? `<span class="status-badge">Licence ${escapeHtml(stripBidi(result.license))}</span>` : '',
     ].filter(Boolean).join('');
     const head = `
         <div class="settings-card-meta">${escapeHtml(result?.repo ?? '')} at commit ${escapeHtml(String(result?.commit ?? '').slice(0, 12))}</div>

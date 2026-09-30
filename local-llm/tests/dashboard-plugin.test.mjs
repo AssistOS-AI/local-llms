@@ -16,7 +16,7 @@ import {
     statusCardHtml,
     tableRunners,
 } from '../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-view.js';
-import { fieldsFromSchema, rememberRunners, runnerOptions } from '../IDE-plugins/local-llm-settings/local-llm-settings-model.js';
+import { fieldsFromSchema, rememberRunners, runnerOptions, stripBidi } from '../IDE-plugins/local-llm-settings/local-llm-settings-model.js';
 import { RUNNERS } from '../src/runners/index.mjs';
 
 const ROOT = new URL('..', import.meta.url);
@@ -786,7 +786,7 @@ test('the Add model form offers the four sources, a Look up button, a results re
 function addFormHarness(t, callTool, { kind = 'huggingface', values = {} } = {}) {
     const h = pollingHarness(t, callTool);
     const p = h.presenter;
-    const names = ['id', 'displayName', 'license', 'repo', 'revision', 'file', 'quantization', 'contextLength', 'layers', 'kvBytesPerToken'];
+    const names = ['id', 'displayName', 'license', 'repo', 'revision', 'file', 'quantization', 'tag', 'contextLength', 'layers', 'kvBytesPerToken'];
     const controls = Object.fromEntries(names.map((name) => [name, { name, value: values[name] ?? '' }]));
     const attributes = { 'data-options': encodeURIComponent(JSON.stringify([{ value: 'dense', label: 'Dense' }, { value: 'moe', label: 'Mixture of experts' }])) };
     const architecture = {
@@ -855,7 +855,9 @@ test('Look up lists a repository, picking a file fills the form from its header,
     await p.submitAddModel({ preventDefault() {} });
     const add = calls.filter(([tool]) => tool === 'local_llm_model_add').at(-1)[1].model;
     assert.equal(add.sizingSource, 'gguf-header');
-    assert.deepEqual([add.contextLength, add.memory, add.sources.gguf.file, add.sources.gguf.revision], [32768, { layers: 24, kvBytesPerToken: 12288 }, 'qwen2.5-0.5b-instruct-q4_k_m.gguf', 'main']);
+    // Add pins the commit the lookup read (the form's revision was empty, which would have meant the branch as it is by then).
+    assert.deepEqual([add.contextLength, add.memory, add.sources.gguf.file, add.sources.gguf.revision],
+        [32768, { layers: 24, kvBytesPerToken: 12288 }, 'qwen2.5-0.5b-instruct-q4_k_m.gguf', GGUF_LOOKUP.commit]);
     assert.equal(p.lookupSizing, null, 'the form starts again after Add');
     assert.equal(h.region.innerHTML, '');
     assert.equal(h.label.hidden, true);
@@ -908,13 +910,15 @@ test('Look up for a safetensors or EXL3 repository sizes it from config.json; an
         assert.deepEqual(Object.keys(model.sources), [kind]);
         assert.equal(model.sources[kind].type, 'hf-snapshot');
         assert.deepEqual([model.sizingSource, model.contextLength, model.memory], ['config.json', 32768, { layers: 24, kvBytesPerToken: 12288 }]);
+        assert.equal(model.sources[kind].revision, GGUF_LOOKUP.commit, 'a snapshot is pinned at the commit whose config.json was read');
     }
     // No config.json in the repository: the label says the defaults apply, and no sizing source is recorded.
     const bare = addFormHarness(t, async () => asTool({ ...snapshot, sizing: null }), { kind: 'hf' });
     bare.controls.repo.value = 'owner/repo';
     await bare.p.lookupModel();
     assert.match(bare.label.textContent, /No config\.json was found/);
-    assert.equal(bare.p.lookupSizing, null);
+    // Nothing was sized, so no sizing source; the commit the lookup read is still remembered for Add.
+    assert.deepEqual([bare.p.lookupSizing.source, bare.p.lookupSizing.commit, bare.p.lookupSizing.values], [null, GGUF_LOOKUP.commit, { contextLength: '', layers: '', kvBytesPerToken: '' }]);
     // An Ollama tag has no lookup, and an empty repository is asked for before any request.
     const calls = [];
     const none = addFormHarness(t, async (tool, args) => { calls.push(tool); return asTool({}); }, { kind: 'ollama' });
@@ -966,6 +970,136 @@ test('Look up for a safetensors or EXL3 repository sizes it from config.json; an
     pending[0](asTool(GGUF_LOOKUP));
     await running;
     assert.equal(once.button.disabled, false);
+});
+
+test('Add pins the commit the lookup read, while the form still names what it read, and otherwise the revision as typed', async (t) => {
+    const COMMIT_A = 'a'.repeat(40);
+    const lookupAt = (overrides = {}) => async (tool, args) => asTool(tool === 'local_llm_model_lookup'
+        ? { ...GGUF_LOOKUP, commit: COMMIT_A, revision: args.revision || 'main', ...(args.file ? { sizing: SIZING } : {}), ...overrides } : { model: {} });
+    const addAfter = async (change, { revision = '', kind = 'huggingface', overrides } = {}) => {
+        const sent = [];
+        const inner = lookupAt(overrides);
+        const form = addFormHarness(t, async (tool, args) => { sent.push([tool, args]); return inner(tool, args); }, { kind });
+        form.controls.repo.value = GGUF_LOOKUP.repo;
+        form.controls.revision.value = revision;
+        await form.p.lookupModel();
+        if (kind === 'huggingface') await form.p.pickLookupFile(null, '0');
+        change(form.controls);
+        await form.p.submitAddModel({ preventDefault() {} });
+        const entry = sent.filter(([tool]) => tool === 'local_llm_model_add').at(-1)[1].model;
+        return { entry, source: entry.sources.gguf ?? entry.sources.hf ?? entry.sources.exl3, form };
+    };
+    // The branch is named (or left empty): Add gets the commit, so it pins what was sized even if the branch moved on.
+    for (const revision of ['', 'main']) assert.equal((await addAfter(() => {}, { revision })).source.revision, COMMIT_A, `revision '${revision}'`);
+    assert.equal((await addAfter(() => {}, { revision: 'dev' })).source.revision, COMMIT_A);
+    assert.equal((await addAfter(() => {}, { kind: 'hf' })).source.revision, COMMIT_A, 'a snapshot too');
+    assert.equal((await addAfter(() => {}, { kind: 'exl3' })).source.revision, COMMIT_A);
+    // Values changed by hand are manual, but the files are the ones that were looked up, so the commit stays.
+    const edited = await addAfter((controls) => { controls.layers.value = '28'; });
+    assert.deepEqual([edited.entry.sizingSource, edited.source.revision], ['manual', COMMIT_A]);
+    // Another repository, revision or file is not what was looked up: the revision is pinned as typed, as it always was.
+    const other = await addAfter((controls) => { controls.repo.value = 'someone/else'; }, { revision: 'dev' });
+    assert.deepEqual([other.entry.sizingSource, other.source.revision], ['manual', 'dev']);
+    const moved = await addAfter((controls) => { controls.revision.value = 'v2'; });
+    assert.equal(moved.source.revision, 'v2');
+    const otherFile = await addAfter((controls) => { controls.file.value = 'other.gguf'; });
+    assert.equal(otherFile.source.revision, 'main');
+    // A lookup that named no commit (an older agent) leaves the typed revision alone; an Ollama tag has no revision.
+    assert.equal((await addAfter(() => {}, { revision: 'dev', overrides: { commit: undefined } })).source.revision, 'dev');
+    assert.equal((await addAfter(() => {}, { revision: 'dev', overrides: { commit: 'not-a-commit' } })).source.revision, 'dev');
+    const tag = [];
+    const ollama = addFormHarness(t, async (tool, args) => { tag.push([tool, args]); return asTool({ model: {} }); }, { kind: 'ollama', values: { id: 'tagged', tag: 'qwen2.5:0.5b' } });
+    await ollama.p.submitAddModel({ preventDefault() {} });
+    assert.deepEqual(tag.at(-1)[1].model.sources, { ollama: { type: 'ollama', tag: 'qwen2.5:0.5b' } });
+});
+
+test('a failed file pick puts the selection back on the file in the form, a long suggested name fits the form, and a listing with no usable header sizing leaves the form alone', async (t) => {
+    const calls = [];
+    let failPick = false;
+    const h = addFormHarness(t, async (tool, args) => {
+        calls.push([tool, args]);
+        if (args.file && failPick) throw new Error('invalid_gguf: bad header');
+        return asTool(args.file ? { ...GGUF_LOOKUP, sizing: SIZING } : GGUF_LOOKUP);
+    });
+    const { p, controls } = h;
+    const checkedRows = () => [...h.region.innerHTML.matchAll(/<input type="radio" name="lookupFile" value="(\d)"[^>]*? checked>/g)].map((match) => match[1]);
+    controls.repo.value = GGUF_LOOKUP.repo;
+    await p.lookupModel();
+    await p.pickLookupFile(null, '0');
+    assert.deepEqual(checkedRows(), ['0']);
+    assert.equal(controls.file.value, 'qwen2.5-0.5b-instruct-q4_k_m.gguf');
+    // The next pick fails: the form keeps file 0, so the list says file 0 and not the row that was tried.
+    failPick = true;
+    await p.pickLookupFile(null, '2');
+    assert.deepEqual(checkedRows(), ['0'], 'the selection is the file in the form');
+    assert.equal(controls.file.value, 'qwen2.5-0.5b-instruct-q4_k_m.gguf');
+    assert.equal(h.label.hidden, true);
+    // With no file in the form the selection is cleared; with a file the list does not hold, none is selected either.
+    controls.file.value = '';
+    await p.pickLookupFile(null, '1');
+    assert.deepEqual(checkedRows(), []);
+    controls.file.value = 'typed-by-hand.gguf';
+    await p.pickLookupFile(null, '1');
+    assert.deepEqual(checkedRows(), []);
+    // The display name suggested from a long repository name and quantization is cut to the form's 120 characters.
+    failPick = false;
+    const long = addFormHarness(t, async (tool, args) => asTool({ ...GGUF_LOOKUP, repo: `owner/${'n'.repeat(150)}`, ...(args.file ? { sizing: SIZING } : {}) }));
+    long.controls.repo.value = 'owner/x';
+    await long.p.lookupModel();
+    await long.p.pickLookupFile(null, '0');
+    assert.equal(long.controls.displayName.value.length, 120);
+    assert.ok(long.controls.displayName.value.startsWith('nnnn'));
+    const fits = addFormHarness(t, async (tool, args) => asTool({ ...GGUF_LOOKUP, repo: `owner/${'n'.repeat(106)}`, ...(args.file ? { sizing: SIZING } : {}) }));
+    fits.controls.repo.value = 'owner/x';
+    await fits.p.lookupModel();
+    await fits.p.pickLookupFile(null, '0');
+    assert.equal(fits.controls.displayName.value, `${'n'.repeat(106)} Q4_K_M`, 'a name within the limit is untouched');
+    assert.ok(fits.controls.id.value.length <= 64);
+    // A header this agent could not size (no usable architecture): nothing is read, so typed values and the architecture stay,
+    // values an earlier pick put there are cleared, and the label says the estimate will use its defaults.
+    const unsized = { ...SIZING, contextLength: null, architecture: 'dense', memory: { layers: null, kvBytesPerToken: null }, notes: ['general.architecture is missing'] };
+    let next = SIZING;
+    const pick = addFormHarness(t, async (tool, args) => asTool(args.file ? { ...GGUF_LOOKUP, sizing: next } : GGUF_LOOKUP));
+    pick.controls.repo.value = GGUF_LOOKUP.repo;
+    await pick.p.lookupModel();
+    await pick.p.pickLookupFile(null, '0');
+    assert.deepEqual([pick.controls.contextLength.value, pick.controls.layers.value, pick.controls.kvBytesPerToken.value], ['32768', '24', '12288']);
+    next = unsized;
+    await pick.p.pickLookupFile(null, '2');
+    assert.deepEqual([pick.controls.contextLength.value, pick.controls.layers.value, pick.controls.kvBytesPerToken.value], ['', '', ''], 'the first pick\'s values are not kept for a file that has none');
+    assert.match(pick.label.textContent, /^Nothing could be read from the GGUF header, so the memory estimate uses its defaults\. general\.architecture is missing\.$/);
+    pick.controls.layers.value = '30';
+    await pick.p.pickLookupFile(null, '1');
+    assert.equal(pick.controls.layers.value, '30', 'a value the admin typed is not erased by a header that has none');
+    assert.equal(pick.controls.contextLength.value, '');
+    pick.architecture.value = 'moe';
+    await pick.p.pickLookupFile(null, '2');
+    assert.equal(pick.architecture.value, 'moe', 'an unsizable header does not change the architecture on the form');
+    assert.equal(pick.p.lookupSizing.architecture, 'moe');
+    assert.equal(pick.p.lookupSizing.commit, GGUF_LOOKUP.commit);
+});
+
+test('bidirectional control characters in a licence never reach the page or the form', async (t) => {
+    const evil = 'MIT\u202Egpl\u2066x\u2069\u202C';
+    assert.equal(stripBidi(evil), 'MITgplx');
+    assert.equal(stripBidi('\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069'), '');
+    assert.equal(stripBidi('plain apache-2.0 é 日本'), 'plain apache-2.0 é 日本');
+    assert.equal(stripBidi(undefined), '');
+    const html = lookupResultsHtml({ ...GGUF_LOOKUP, license: evil });
+    assert.match(html, /<span class="status-badge">Licence MITgplx<\/span>/);
+    assert.doesNotMatch(html, /[\u202A-\u202E\u2066-\u2069]/);
+    const h = addFormHarness(t, async (tool, args) => asTool({ ...GGUF_LOOKUP, license: evil, ...(args.file ? { sizing: SIZING } : {}) }));
+    h.controls.repo.value = GGUF_LOOKUP.repo;
+    await h.p.lookupModel();
+    await h.p.pickLookupFile(null, '0');
+    assert.equal(h.controls.license.value, 'MITgplx');
+    assert.doesNotMatch(h.region.innerHTML, /[\u202A-\u202E\u2066-\u2069]/);
+    // A licence of nothing but controls leaves the field empty.
+    const empty = addFormHarness(t, async (tool, args) => asTool({ ...GGUF_LOOKUP, license: '\u202E\u2069', ...(args.file ? { sizing: SIZING } : {}) }));
+    empty.controls.repo.value = GGUF_LOOKUP.repo;
+    await empty.p.lookupModel();
+    await empty.p.pickLookupFile(null, '0');
+    assert.equal(empty.controls.license.value, '');
 });
 
 test('the source fields follow the four kinds, and the lookup is forgotten when the source changes', () => {

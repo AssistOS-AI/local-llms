@@ -5,6 +5,7 @@ import {
     escapeHtml,
     fieldsFromSchema,
     formatBytes,
+    lookupCommitFor,
     lookupFormatFor,
     mergeLogs,
     modelEntryFromForm,
@@ -17,6 +18,7 @@ import {
     runnerOptions,
     shouldPoll,
     sizingSourceFor,
+    stripBidi,
     suggestModelId,
 } from '../../../local-llm-settings/local-llm-settings-model.js';
 import {
@@ -494,7 +496,8 @@ export class LocalLlmDashboard {
             if (serial === this.lookupSerial && !this.closed) {
                 const message = error?.message || 'The lookup failed.';
                 if (args.file && this.lookup) {
-                    this.renderLookup(this.lookup.result, { selectedFile: args.file });
+                    // The pick failed, so the form keeps the file it had: the list shows that one selected, not the one that failed.
+                    this.renderLookup(this.lookup.result, { selectedFile: String(this.addForm?.elements?.file?.value || '').trim() });
                     this.setSizingLabel('');
                     this.setStatus(message, 'error');
                 } else {
@@ -539,42 +542,54 @@ export class LocalLlmDashboard {
     }
 
     // Fills the form from a lookup: the file, its quantization, sizing, and an id, name and licence when those are
-    // empty. The looked-up values are remembered, so a value changed by hand afterwards is recorded as manual.
+    // empty. The looked-up values are remembered, so a value changed by hand afterwards is recorded as manual, and so is
+    // the commit, which Add pins. A value the lookup could not read leaves the field alone, except that a value an earlier
+    // lookup put there (another file's) is cleared rather than kept for this one.
     async fillFromLookup({ result, row = null }) {
         const sizing = result.sizing;
         const text = (value) => (Number.isFinite(value) ? String(value) : '');
+        const current = (name) => String(this.addForm.elements?.[name]?.value || '');
         if (row) {
             this.setFormValue('file', row.file);
             this.setFormValue('quantization', row.quantization || '');
         }
         const name = String(result.repo || '').split('/').pop();
-        if (!String(this.addForm.elements?.id?.value || '').trim()) this.setFormValue('id', suggestModelId(result.repo, row?.quantization || ''));
-        if (!String(this.addForm.elements?.displayName?.value || '').trim()) this.setFormValue('displayName', [name, row?.quantization].filter(Boolean).join(' '));
-        if (!String(this.addForm.elements?.license?.value || '').trim() && typeof result.license === 'string') this.setFormValue('license', result.license);
-        if (!sizing) {
-            this.lookupSizing = null;
-            this.setSizingLabel(row ? '' : 'No config.json was found, so the memory estimate uses its defaults.');
-            return;
-        }
+        if (!current('id').trim()) this.setFormValue('id', suggestModelId(result.repo, row?.quantization || ''));
+        // The form's own limit on the name is 120 characters.
+        if (!current('displayName').trim()) this.setFormValue('displayName', [name, row?.quantization].filter(Boolean).join(' ').slice(0, 120).trim());
+        const license = typeof result.license === 'string' ? stripBidi(result.license).trim() : '';
+        if (!current('license').trim() && license && license.length <= 80) this.setFormValue('license', license);
         const values = {
-            contextLength: text(sizing.contextLength),
-            layers: text(sizing.memory?.layers),
-            kvBytesPerToken: text(sizing.memory?.kvBytesPerToken),
+            contextLength: text(sizing?.contextLength),
+            layers: text(sizing?.memory?.layers),
+            kvBytesPerToken: text(sizing?.memory?.kvBytesPerToken),
         };
-        for (const [field, value] of Object.entries(values)) this.setFormValue(field, value);
-        await this.setArchitecture(sizing.architecture);
+        const before = this.lookupSizing?.values || {};
+        for (const [field, value] of Object.entries(values)) {
+            if (value !== '' || current(field) === '' || current(field) === (before[field] ?? null)) this.setFormValue(field, value);
+        }
+        const read = Object.values(values).some((value) => value !== '');
+        // A header the reader could not size says nothing about the architecture: the choice on the form stands.
+        if (read) await this.setArchitecture(sizing.architecture);
+        const architecture = read ? sizing.architecture : (this.element.querySelector('#localLlmArchitecture')?.value || 'dense');
         this.lookupSizing = {
-            source: sizing.source,
+            source: sizing?.source ?? null,
             repo: result.repo,
             revision: result.revision || 'main',
             ...(row ? { file: row.file } : {}),
-            architecture: sizing.architecture === 'moe' ? 'moe' : 'dense',
+            architecture: architecture === 'moe' ? 'moe' : 'dense',
+            ...(typeof result.commit === 'string' ? { commit: result.commit } : {}),
             values,
         };
-        const notes = Array.isArray(sizing.notes) && sizing.notes.length ? ` ${sizing.notes.join('; ')}.` : '';
-        this.setSizingLabel(sizing.source === 'gguf-header'
-            ? `Sizing read from the GGUF header; checked again after download.${notes}`
-            : `Sizing read from config.json, checked against its pinned digest.${notes}`);
+        const notes = Array.isArray(sizing?.notes) && sizing.notes.length ? ` ${sizing.notes.join('; ')}.` : '';
+        const from = sizing?.source === 'config.json' ? 'config.json' : 'the GGUF header';
+        if (!sizing) this.setSizingLabel(row ? '' : 'No config.json was found, so the memory estimate uses its defaults.');
+        else if (!read) this.setSizingLabel(`Nothing could be read from ${from}, so the memory estimate uses its defaults.${notes}`);
+        else {
+            this.setSizingLabel(sizing.source === 'gguf-header'
+                ? `Sizing read from the GGUF header; checked again after download.${notes}`
+                : `Sizing read from config.json, checked against its pinned digest.${notes}`);
+        }
     }
 
     async submitAddModel(event) {
@@ -584,6 +599,8 @@ export class LocalLlmDashboard {
         raw.sourceKind = this.sourceKind?.value || 'huggingface';
         raw.architecture = this.element.querySelector('#localLlmArchitecture')?.value || 'dense';
         raw.sizingSource = sizingSourceFor(raw, this.lookupSizing);
+        // Add pins the commit whose files the lookup read, even if the branch has moved since.
+        raw.commit = lookupCommitFor(raw, this.lookupSizing);
         const entry = modelEntryFromForm(raw);
         const added = await this.withBusy(`Adding ${entry.id} and pinning its source…`, async () => {
             await callLocalLlm('local_llm_model_add', { model: entry });

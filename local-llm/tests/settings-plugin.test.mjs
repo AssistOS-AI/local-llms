@@ -6,6 +6,7 @@ import * as presenterModule from '../IDE-plugins/local-llm-settings/local-llm-se
 import {
     confirmMessage,
     fieldsFromSchema,
+    lookupCommitFor,
     lookupFormatFor,
     mergeLogs,
     modelEntryFromForm,
@@ -17,6 +18,7 @@ import {
     runnerOptions,
     shouldPoll,
     sizingSourceFor,
+    stripBidi,
     suggestModelId,
 } from '../IDE-plugins/local-llm-settings/local-llm-settings-model.js';
 import { validateModel } from '../src/controller/catalog.mjs';
@@ -307,6 +309,43 @@ test('the sizing source follows what a lookup filled in: untouched values keep i
         assert.equal(id, expected, repo);
         assert.match(id, idPattern, repo);
     }
+});
+
+test('a looked-up commit replaces the revision in every Hugging Face source, and only a real commit does', () => {
+    const commit = 'f'.repeat(40);
+    const base = { id: 'x-model', repo: 'owner/repo', revision: 'dev', file: 'm.gguf' };
+    assert.equal(modelEntryFromForm({ ...base, sourceKind: 'huggingface', commit }).sources.gguf.revision, commit);
+    assert.equal(modelEntryFromForm({ ...base, sourceKind: 'hf', commit }).sources.hf.revision, commit);
+    assert.equal(modelEntryFromForm({ ...base, sourceKind: 'exl3', commit }).sources.exl3.revision, commit);
+    assert.equal(modelEntryFromForm({ ...base, revision: '', sourceKind: 'huggingface', commit }).sources.gguf.revision, commit, 'an empty revision too');
+    // Anything that is not 40 lowercase hex characters is ignored, and the revision as typed stands (main when empty).
+    for (const junk of [undefined, null, '', 'main', 'F'.repeat(40), 'f'.repeat(39), 'f'.repeat(41), `${commit} `, 'g'.repeat(40), 7, ['f'.repeat(40)]]) {
+        assert.equal(modelEntryFromForm({ ...base, sourceKind: 'huggingface', commit: junk }).sources.gguf.revision, 'dev', String(junk));
+    }
+    assert.equal(modelEntryFromForm({ ...base, revision: '', sourceKind: 'hf', commit: 'nope' }).sources.hf.revision, 'main');
+    // An Ollama tag has no revision to replace.
+    assert.deepEqual(modelEntryFromForm({ id: 'x-tag', sourceKind: 'ollama', tag: 'q:1', commit }).sources, { ollama: { type: 'ollama', tag: 'q:1' } });
+    // The entries validate with a commit as their revision.
+    for (const kind of ['huggingface', 'hf', 'exl3']) assert.doesNotThrow(() => validateModel(modelEntryFromForm({ ...base, sourceKind: kind, commit })), kind);
+    // The commit comes from the lookup only while the form still names what it read.
+    const lookup = { source: 'gguf-header', repo: 'owner/repo', revision: 'main', file: 'm.gguf', architecture: 'dense', commit, values: {} };
+    const form = { repo: 'owner/repo', revision: '', file: 'm.gguf' };
+    assert.equal(lookupCommitFor(form, lookup), commit);
+    assert.equal(lookupCommitFor({ ...form, revision: 'main' }, lookup), commit);
+    assert.equal(lookupCommitFor({ ...form, layers: '99', kvBytesPerToken: '1', architecture: 'moe' }, lookup), commit, 'edited sizing does not change the files');
+    for (const change of [{ repo: 'owner/other' }, { revision: 'dev' }, { file: 'other.gguf' }]) assert.equal(lookupCommitFor({ ...form, ...change }, lookup), undefined, JSON.stringify(change));
+    assert.equal(lookupCommitFor(form, null), undefined);
+    assert.equal(lookupCommitFor(form, { ...lookup, commit: undefined }), undefined);
+    assert.equal(lookupCommitFor(form, { ...lookup, commit: 'main' }), undefined);
+    // A snapshot's lookup names no file, so any file in the form is beside the point.
+    assert.equal(lookupCommitFor({ ...form, file: 'whatever.gguf' }, { ...lookup, file: undefined }), commit);
+    // A lookup that sized nothing (no source) still carries its commit, and gives no sizing source.
+    assert.equal(lookupCommitFor(form, { ...lookup, source: null }), commit);
+    assert.equal(sizingSourceFor({ ...form, layers: '24' }, { ...lookup, source: null }), undefined);
+    // stripBidi drops the bidirectional controls and nothing else.
+    assert.equal(stripBidi('a\u202Eb\u2066c\u2069d'), 'abcd');
+    assert.equal(stripBidi('\u200E\u200F'), '\u200E\u200F', 'only the ranges named: embeddings, overrides and isolates');
+    assert.equal(stripBidi(null), '');
 });
 
 test('tool results are parsed, and tool failures surface their message', () => {
