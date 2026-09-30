@@ -1,0 +1,106 @@
+# The install check of the agent's own runner lock (local-llm/catalog/runners.lock.linux-<arch>.json, DS004).
+#
+# An entry of that lock reaches workspaces with the repository revision they
+# run, not with an image that was proven and promoted. This workflow is what
+# stands in for that promotion: it installs every entry of the platform's lock
+# inside the published image, on that architecture's own runner, exactly as the
+# agent does (download, verify, unpack, then the library-link checks), and a
+# change that adds or edits an entry must pass it on both architectures.
+#
+# It runs for a pull request that touches the locks or the installer code, and
+# on demand. It never runs on a push, so pushing a branch starts nothing; the
+# proof for a revision is the run on its pull request or a dispatch.
+
+name: runner-lock-check
+
+on:
+  pull_request:
+    paths:
+      - 'local-llm/catalog/runners.lock.linux-*.json'
+      - 'local-llm/src/controller/runnerInstaller.mjs'
+      - 'local-llm/src/controller/runnerLock.mjs'
+      - 'local-llm/tools/runner_install_check.mjs'
+      - '.github/workflows/runner-lock-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install-check:
+    name: Install every agent-lock entry on ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: ubuntu-24.04
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 90
+    env:
+      IMAGE: docker.io/assistos/local-llm:latest
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - name: Checkout this revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Free runner disk
+        # An archive is downloaded, staged, decompressed and unpacked inside the container.
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Pull the published image
+        run: |
+          set -euo pipefail
+          docker pull -q "$IMAGE"
+          mkdir -p "$RUNNER_TEMP/runner-lock-check"
+          docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE" | tee "$RUNNER_TEMP/runner-lock-check/image.txt"
+
+      - name: Install each lock entry, one at a time
+        # Each runner is installed in its own container, removed afterwards,
+        # with the repository's local-llm directory mounted read-only as /code:
+        # the same installer code, lock and tool the agent runs. A proprietary
+        # entry is never downloaded here (installing it would accept its terms
+        # on behalf of whoever runs CI); it is validated from the lock with no
+        # network. A lock with no entries has nothing to check.
+        run: |
+          set -euo pipefail
+          lock="local-llm/catalog/runners.lock.linux-${ARCH}.json"
+          test -f "$lock"
+          evidence="$RUNNER_TEMP/runner-lock-check"
+          status=0
+          for runner in $(node -e 'for (const id of Object.keys(require(process.argv[1]).runners)) console.log(id)' "$PWD/$lock"); do
+            df -h / >> "$evidence/disk.txt"
+            net=(); mode=()
+            if node -e 'process.exit(require(process.argv[2]).runners[process.argv[1]].licence.proprietary === true ? 0 : 1)' "$runner" "$PWD/$lock"; then
+              net=(--network=none); mode=(--validate-only)
+            fi
+            if docker run --rm "${net[@]}" --cap-drop=ALL --security-opt=no-new-privileges \
+                -v "$PWD/local-llm:/code:ro" "$IMAGE" \
+                node /code/tools/runner_install_check.mjs "$runner" "${mode[@]}" \
+                --lock "/code/catalog/runners.lock.linux-${ARCH}.json" > "$evidence/$runner.json" \
+                && { [ "${#mode[@]}" -eq 0 ] || grep -q '"downloaded": false' "$evidence/$runner.json"; }; then
+              echo "$runner: passed${mode[*]:+ (validated, not downloaded)}"
+            else
+              echo "$runner: failed"
+              status=1
+            fi
+            cat "$evidence/$runner.json"
+          done
+          df -h / >> "$evidence/disk.txt"
+          exit "$status"
+
+      - name: Upload install report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runner-lock-check-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-lock-check
+          if-no-files-found: ignore
+          retention-days: 30
