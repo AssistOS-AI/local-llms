@@ -96,7 +96,7 @@ llama.cpp has the unified-memory policy of this release, and vLLM an experimenta
 
 ### llama.cpp on the CPU
 
-llama.cpp has the CPU policy of this release. A runner without one is `incompatible` in the `cpu` profile ("… needs an NVIDIA GPU in this release"), and `local_llm_runner_install` refuses it with `runner_unavailable`. llama.cpp loads the best CPU backend for the CPU by itself (`libggml-cpu-armv8.2_2.so` on the M1's Podman machine). Its CUDA backend is skipped when the driver library is absent.
+llama.cpp has the CPU policy of this release. A runner without one is `incompatible` in the `cpu` profile ("… needs an NVIDIA GPU in this release"), and `local_llm_runner_install` refuses it with `runner_unavailable`. llama.cpp loads the best CPU backend for the CPU by itself (`libggml-cpu-armv8.2_2.so` on the M1's Podman machine, as `llama-server -lv 4 --list-devices` logs; a server run's log names only the device, `- CPU : CPU (…)` under `device_info:`, which is what the status reports). Its CUDA backend is skipped when the driver library is absent.
 
 llama.cpp's CPU parameters (`paramSchemaFor('cpu')`):
 
