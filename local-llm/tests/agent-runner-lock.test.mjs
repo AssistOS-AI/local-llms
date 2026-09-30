@@ -141,13 +141,19 @@ test('the agent lock for this platform is merged with the image lock; an id in b
     assert.equal(path.dirname(agentRunnerLockFile('x64')), path.resolve(import.meta.dirname, '..', 'catalog'));
     for (const arch of ['riscv64', 'ia32', 'constructor', '__proto__', 'toString']) assert.equal(agentRunnerLockFile(arch), null, arch);
     // The controller builds its installer from the merged lock and says where the two met.
-    const data = tempDir(t, 'locks-data');
+    const data = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-locks-data-'));
+    // Both controllers write under the one directory, and it goes after both have drained.
+    const controllers = [];
+    t.after(async () => {
+        await Promise.all(controllers.map((each) => each.drain()));
+        fs.rmSync(data, { recursive: true, force: true });
+    });
     const controller = createController({
         dataDir: data, env: { PATH: '/usr/bin' }, seedCatalog: [], stateStore: createStateStore({ dataDir: data }), runnerLocks: merged,
         snapshot: async () => ({ gpu: { available: false, state: 'absent', reason: 'none' }, memory: {}, disk: {}, cpus: 1, cores: 1 }),
         detectRunner: () => ({ installed: false, version: null, reason: null }),
     });
-    t.after(() => controller.drain());
+    controllers.push(controller);
     const lines = (await controller.status()).logs.map((entry) => entry.line);
     assert.ok(lines.some((line) => line.includes("runner lock: both is in the image's lock and in the agent's lock; the image's entry is used")), lines.join('\n'));
     const warned = createController({
@@ -155,7 +161,7 @@ test('the agent lock for this platform is merged with the image lock; an id in b
         snapshot: async () => ({ gpu: { available: false, state: 'absent', reason: 'none' }, memory: {}, disk: {}, cpus: 1, cores: 1 }),
         detectRunner: () => ({ installed: false, version: null, reason: null }),
     });
-    t.after(() => warned.drain());
+    controllers.push(warned);
     const ignoredLines = (await warned.status()).logs.map((entry) => entry.line);
     assert.ok(ignoredLines.some((line) => line.includes("runner lock: the agent's lock") && line.includes('is ignored')), ignoredLines.join('\n'));
 });
@@ -398,10 +404,7 @@ function ollamaModel(source, extra = {}) {
 // A controller on an injected snapshot and runner process. `installer` and `runnerLocks` are the test's own; detection is the adapters'.
 function controllerOn(t, { snap = () => snapshotOf(ABSENT_GPU), seed, imageContract = ARM64_CONTRACT, fileExists = (file) => file === IN_IMAGE,
     fetchImpl, installer, runnerLocks, dataDir = null, runners, resolveOllama } = {}) {
-    let dir = dataDir;
-    if (!dir) {
-        dir = tempDir(t, 'ollama-controller');
-    }
+    const dir = dataDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-ollama-controller-'));
     const started = [];
     const calls = [];
     const downloads = [];
@@ -453,7 +456,11 @@ function controllerOn(t, { snap = () => snapshotOf(ABSENT_GPU), seed, imageContr
         ...(runners ? { runners } : {}),
         ...(resolveOllama ? { resolveOllama } : {}),
     });
-    t.after(() => controller.drain());
+    // The drain saves state and writes the log, so the directory (which this harness owns, given or not) goes only after it.
+    t.after(async () => {
+        await controller.drain();
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
     return { controller, started, calls, downloads, dataDir: dir };
 }
 
@@ -497,7 +504,7 @@ function ollamaInstaller(t, { image = {} } = {}) {
 
 test('Ollama installed on demand runs from its runnable copy, with GPUs hidden and num_gpu 0 on the cpu profile', async (t) => {
     const lock = ollamaInstaller(t);
-    const dataDir = tempDir(t, 'ollama-controller');
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-ollama-controller-'));
     // The manifest a finished pull leaves, and a tag pinned to exactly it.
     const pulled = writeOllamaModel(dataDir, TAG);
     const model = ollamaModel({ manifestDigest: pulled.manifestDigest, size: pulled.size });
@@ -590,7 +597,7 @@ test('an entry only the agent lock has is offered where the runner has a policy,
 });
 
 test('an Ollama pull whose stored manifest differs from the pinned digest fails with identity_changed and nothing is loaded', async (t) => {
-    const dataDir = tempDir(t, 'ollama-identity');
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-ollama-identity-'));
     const pulled = writeOllamaModel(dataDir, TAG);
     const wrong = `sha256:${'f'.repeat(64)}`;
     const model = ollamaModel({ manifestDigest: wrong, size: pulled.size });

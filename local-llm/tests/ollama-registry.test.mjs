@@ -92,7 +92,6 @@ test('a manifest that is too large, not JSON, or not a usable version 2 manifest
 
 function controllerOf(t, { resolveOllama, registryEntries = [] } = {}) {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-ollama-pin-'));
-    t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
     if (registryEntries.length) {
         fs.mkdirSync(path.join(dataDir, 'state'), { recursive: true });
         fs.writeFileSync(path.join(dataDir, 'state', 'controller.json'),
@@ -103,7 +102,11 @@ function controllerOf(t, { resolveOllama, registryEntries = [] } = {}) {
         snapshot: async () => ({ gpu: { available: false, state: 'absent', reason: 'none' }, memory: {}, disk: {}, cpus: 1, cores: 1 }),
         detectRunner: () => ({ installed: false, version: null, reason: null }),
     });
-    t.after(() => controller.drain());
+    // The drain saves state and writes the log, so the directory goes only after it.
+    t.after(async () => {
+        await controller.drain();
+        fs.rmSync(dataDir, { recursive: true, force: true });
+    });
     return controller;
 }
 
