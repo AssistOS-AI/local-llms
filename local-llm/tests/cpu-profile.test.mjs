@@ -34,7 +34,7 @@ import { RUNNERS, getRunner, runnerSummary } from '../src/runners/index.mjs';
 import { llamaCppRunner } from '../src/runners/llamaCpp.mjs';
 import { createLlamaServerRunner } from '../src/runners/llamaServer.mjs';
 import { ParamError } from '../src/runners/params.mjs';
-import { parseRunnerReport } from '../src/controller/runnerProcess.mjs';
+import { createLogBuffer, parseRunnerReport } from '../src/controller/runnerProcess.mjs';
 import { createStateStore } from '../src/controller/stateStore.mjs';
 
 const MIB = 1024 * 1024;
@@ -1064,6 +1064,62 @@ test('runner report: CPU buffer lines and the CPU backend variant are read, and 
     assert.deepEqual([empty.device, empty.modelMiB, empty.totalMiB, empty.offloaded], [null, null, null, null]);
 });
 
+// The log of a live run of qwen2.5-0.5b on the CPU of the M1 Podman machine (llama.cpp b11159), as the runner wrote it to stderr. The log file
+// adds "<ISO time> [stderr] " in front of each line; the controller's own log buffer, which the report is read from, holds the line without it.
+const B11159_CPU_LOG = [
+    '0.00.063.964 I cmn  common_param: device_info:',
+    '0.00.063.977 I cmn  common_param:   - CPU     : CPU (5894 MiB, 5894 MiB free)',
+    '0.00.064.499 I cmn  common_param: system_info: n_threads = 3 (n_threads_batch = 3) / 4 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | ',
+    '0.00.603.845 I load_tensors:   CPU_Mapped model buffer size =   325.02 MiB',
+    '0.00.603.846 I load_tensors:   CPU_REPACK model buffer size =   208.30 MiB',
+    '0.01.002.809 I llama_kv_cache:        CPU KV buffer size =    48.00 MiB',
+    '0.01.038.030 I sched_reserve:        CPU compute buffer size =    39.51 MiB',
+];
+// The excerpt of that log this test was written from did not include the layer line. This one has llama.cpp's usual wording (the one
+// the parser already reads) and the same prefix style, and is not a verbatim line of that run.
+const B11159_OFFLOAD_LINE = '0.00.603.840 I load_tensors: offloaded 0/25 layers to GPU';
+
+test('runner report: the real b11159 CPU log names the CPU device, with its buffers, through the log buffer and with the file prefix', () => {
+    const lines = [...B11159_CPU_LOG.slice(0, 3), B11159_OFFLOAD_LINE, ...B11159_CPU_LOG.slice(3)];
+    const expected = { device: 'CPU', modelMiB: 533.32, kvMiB: 48, computeMiB: 39.51, totalMiB: 621, offloaded: { layers: 0, of: 25 } };
+    const shape = (report) => ({ device: report.device, modelMiB: report.modelMiB, kvMiB: report.kvMiB, computeMiB: report.computeMiB, totalMiB: report.totalMiB, offloaded: report.offloaded });
+    // As the controller holds it: each line through the log buffer, which is what status() reads.
+    const log = createLogBuffer();
+    for (const line of lines) log.append('stderr', line);
+    assert.deepEqual(shape(parseRunnerReport(log.all(), { profile: 'cpu' })), expected);
+    // As the runner log file has it: "<ISO time> [stderr] " in front of each line.
+    const prefixed = lines.map((line) => ({ line: `2026-09-30T17:53:21.157Z [stderr] ${line}` }));
+    assert.deepEqual(shape(parseRunnerReport(prefixed, { profile: 'cpu' })), expected);
+    // No claim is made beyond what is logged: no instruction-set variant (system_info lists flags, not a variant name).
+    assert.doesNotMatch(parseRunnerReport(log.all(), { profile: 'cpu' }).device, /armv|neon|fma/i);
+    // The device list also names the CPU beside a GPU, so without the cpu profile the device is not claimed from it.
+    assert.equal(parseRunnerReport(log.all()).device, null);
+    assert.equal(parseRunnerReport(log.all(), { profile: 'dedicated' }).device, null);
+    assert.equal(parseRunnerReport(log.all(), { profile: 'unified' }).device, null);
+    // A GPU run whose device list has both: the GPU's report is what it always was, on every profile.
+    const gpuRun = [
+        '0.00.060.001 I cmn  common_param: device_info:',
+        '0.00.060.002 I cmn  common_param:   - CUDA0   : NVIDIA GeForce RTX 3060 (12288 MiB, 11000 MiB free)',
+        '0.00.060.003 I cmn  common_param:   - CPU     : CPU (31000 MiB, 28000 MiB free)',
+        '0.00.600.001 I llama_model_load_from_file_impl: using device CUDA0 (NVIDIA GeForce RTX 3060) - 11000 MiB free',
+        '0.00.603.840 I load_tensors: offloaded 25/25 layers to GPU',
+        '0.00.603.845 I load_tensors:        CUDA0 model buffer size =   373.71 MiB',
+        '0.00.603.846 I load_tensors:   CPU_Mapped model buffer size =    10.00 MiB',
+        '0.01.002.809 I llama_kv_cache:      CUDA0 KV buffer size =    48.00 MiB',
+        '0.01.038.030 I sched_reserve:      CUDA0 compute buffer size =    39.51 MiB',
+    ].map((line) => ({ line }));
+    for (const options of [{}, { profile: 'dedicated' }, { profile: 'unified' }]) {
+        const gpu = parseRunnerReport(gpuRun, options);
+        assert.deepEqual([gpu.device, gpu.modelMiB, gpu.kvMiB, gpu.computeMiB, gpu.offloaded], ['CUDA0 (NVIDIA GeForce RTX 3060)', 373.71, 48, 39.51, { layers: 25, of: 25 }], JSON.stringify(options));
+    }
+    // A GPU run that has only printed its device list so far has no device yet, not the CPU.
+    const early = gpuRun.slice(0, 3);
+    assert.equal(parseRunnerReport(early, { profile: 'dedicated' }).device, null);
+    assert.equal(parseRunnerReport(early).device, null);
+    // The variant a build that does log its backend load reports still wins over the plain device name.
+    assert.equal(parseRunnerReport([{ line: 'load_backend: loaded CPU backend from /opt/llama.cpp/libggml-cpu-armv8.2_2.so' }, ...B11159_CPU_LOG.map((line) => ({ line }))], { profile: 'cpu' }).device, 'CPU (armv8.2_2)');
+});
+
 test('controller: the status report reads the CPU log lines of a cpu deployment', async (t) => {
     const h = harness(t);
     await h.controller.run({ modelId: 'small-cpu', runnerId: 'llama.cpp', requestId: 'request-0001' });
@@ -1082,6 +1138,17 @@ test('controller: the status report reads the CPU log lines of a cpu deployment'
     assert.equal(runnerReport.device, 'CPU (armv8.2_2)');
     assert.deepEqual([runnerReport.modelMiB, runnerReport.kvMiB, runnerReport.computeMiB, runnerReport.totalMiB], [373.71, 48, 112.3, 534]);
     assert.deepEqual(runnerReport.offloaded, { layers: 0, of: 25 });
+    await h.controller.stop();
+});
+
+test('controller: the status report of a cpu deployment reads the b11159 log as the runner writes it', async (t) => {
+    const h = harness(t);
+    await h.controller.run({ modelId: 'small-cpu', runnerId: 'llama.cpp', requestId: 'request-0001' });
+    await until(() => h.controller.state.deployment?.phase === 'ready');
+    for (const line of [...B11159_CPU_LOG.slice(0, 3), B11159_OFFLOAD_LINE, ...B11159_CPU_LOG.slice(3)]) h.started[0].log.append('stderr', line);
+    const { runnerReport } = await h.controller.status();
+    assert.deepEqual([runnerReport.device, runnerReport.modelMiB, runnerReport.kvMiB, runnerReport.computeMiB, runnerReport.offloaded],
+        ['CPU', 533.32, 48, 39.51, { layers: 0, of: 25 }]);
     await h.controller.stop();
 });
 
