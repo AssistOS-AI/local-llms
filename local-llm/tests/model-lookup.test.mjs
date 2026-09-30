@@ -643,7 +643,6 @@ async function until(predicate, timeoutMs = 3000) {
 // download leaves on disk for the pinned GGUF; `download` replaces the whole download.
 function harness(t, { hf, weights = null, download = null, registry = null, seed = [] } = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-lookup-'));
-    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
     if (registry) {
         fs.mkdirSync(path.join(dir, 'state'), { recursive: true });
         fs.writeFileSync(path.join(dir, 'state', 'controller.json'), JSON.stringify({ version: 1, deployment: null, params: {}, requests: {}, registry }));
@@ -686,7 +685,11 @@ function harness(t, { hf, weights = null, download = null, registry = null, seed
         unifiedGuardMs: 5,
         dropCache: () => true,
     });
-    t.after(() => controller.drain());
+    // The drain saves state and writes the log, so the directory goes only after it.
+    t.after(async () => {
+        await controller.drain();
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
     const logLines = (text) => {
         let log = '';
         try { log = fs.readFileSync(path.join(dir, 'logs', 'runner.log'), 'utf8'); } catch { /* no log yet */ }
