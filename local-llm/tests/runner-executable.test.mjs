@@ -228,6 +228,21 @@ test('an archive cut short does not install, whether the Node version reports th
     assert.ok(fs.existsSync(path.join(ok.runDir, 'lib', 'libggml-cpu.so')));
 });
 
+test('a tar cut inside a member of zeros is refused, though its last blocks are zeros: its size is not a multiple of 512', async (t) => {
+    // The cut keeps a whole launch file and 2,500 bytes of a member that is all zeros, so the end looks like the marker and only the size gives it away.
+    const tar = tarOf(t, { 'llama-server': {}, 'zeros.bin': { mode: 0o644, content: Buffer.alloc(10_000) } });
+    const dataStart = memberEnd(tar, 'zeros.bin') - Math.ceil(10_000 / TAR_BLOCK) * TAR_BLOCK;
+    const cut = tar.subarray(0, dataStart + 2500);
+    assert.notEqual(cut.length % TAR_BLOCK, 0);
+    assert.ok(cut.subarray(-2 * TAR_BLOCK).every((byte) => byte === 0), 'the premise: the last two blocks are zeros');
+    const h = installerOver(t, zlib.zstdCompressSync(cut));
+    await assert.rejects(() => h.installer.ensureRunnable('testrunner'), refusedCutShort('runner-1.0.0.tar.zst'));
+    assert.equal(fs.existsSync(h.marker), false);
+    assert.equal(fs.existsSync(h.runDir), false);
+    // The whole archive is fine.
+    assert.equal((await installerOver(t, zlib.zstdCompressSync(tar)).installer.ensureRunnable('testrunner')).rebuilt, true);
+});
+
 test('a decoder that reports the cut (Node 24) and one that ends quietly (Node 25.8) both leave no marker, no copy and no staging', async (t) => {
     const tar = tarOf(t, { 'llama-server': {}, 'lib/libggml-cpu.so': { mode: 0o644, content: 'x'.repeat(3000) } });
     const bytes = zlib.zstdCompressSync(tar);
