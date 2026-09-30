@@ -503,23 +503,13 @@ const CPU_LEADS = Object.freeze({
     'unreadable-timeout': 'the NVIDIA GPU could not be read for 60 s',
 });
 
-/**
- * The CPU policy of llama-server (DS005). There is no envelope and no benchmark:
- * estimateCpuLlamaServer sizes every run, bundled or added at run time. The
- * need must fit the pool less the host reserve (else `incompatible`), what is
- * available now less the floor (else `insufficient-now`), and the disk; the
- * memory guard stops the runner below the floor and is the backstop, not the
- * control. `decision` says why this is the CPU (cause, reason); `gpuRecovered`
- * is set by the controller when the GPU that was unreadable would now be chosen.
- */
-export function admitCpuLlamaServer({ model, source, params, memory = {}, cgroupMemory = null, disk, remainingDownloadBytes = 0, gpu, decision },
-    result) {
-    if (!(source.size > 0)) {
-        return result('incompatible', `${model.displayName}'s weight size is unknown, so it cannot be sized on the CPU; `
-            + 'add the model again so its files are pinned.', {});
-    }
-    const pool = cpuPool(memory, cgroupMemory);
-    const estimate = estimateCpuLlamaServer({ model, source, params, pool });
+// What every CPU policy ends with: the warnings, then the verdict. The need must
+// fit the pool less the host reserve (else `incompatible`), what is available now
+// less the floor (else `insufficient-now`), and the disk; the memory guard stops the
+// runner below the floor and is the backstop, not the control. `decision` says why
+// this is the CPU (cause, reason); `gpuRecovered` is set by the controller when the
+// GPU that was unreadable would now be chosen. `shrink` is the runner's own advice.
+function cpuVerdict({ estimate, pool, model, cgroupMemory, disk, remainingDownloadBytes, gpu, decision, result, shrink }) {
     const warnings = [];
     const lead = CPU_LEADS[decision?.cause];
     const why = String(decision?.reason || '').replace(/\.+\s*$/, '').slice(0, 300);
@@ -538,7 +528,7 @@ export function admitCpuLlamaServer({ model, source, params, memory = {}, cgroup
     if (!Number.isFinite(pool.totalBytes)) return result('incompatible', CPU_MEMORY_UNREADABLE, estimate, warnings);
     if (estimate.ramBytes > pool.totalBytes - estimate.hostReserveBytes) {
         return result('incompatible', `Needs about ${amount(estimate.ramBytes)} of the ${amount(pool.totalBytes)} of memory on this machine, `
-            + `which must keep ${amount(estimate.hostReserveBytes)} for the host. Reduce the context or the parallel slots, or pick a smaller model.`,
+            + `which must keep ${amount(estimate.hostReserveBytes)} for the host. ${shrink}`,
         estimate, warnings);
     }
     if (estimate.ramBytes > pool.availableBytes - estimate.floorBytes) {
@@ -550,4 +540,76 @@ export function admitCpuLlamaServer({ model, source, params, memory = {}, cgroup
             + `${amount(disk.freeBytes)} is free.`, estimate, warnings);
     }
     return result('ok', null, estimate, warnings);
+}
+
+/**
+ * The CPU policy of llama-server (DS005). There is no envelope and no benchmark:
+ * estimateCpuLlamaServer sizes every run, bundled or added at run time.
+ */
+export function admitCpuLlamaServer({ model, source, params, memory = {}, cgroupMemory = null, disk, remainingDownloadBytes = 0, gpu, decision },
+    result) {
+    if (!(source.size > 0)) {
+        return result('incompatible', `${model.displayName}'s weight size is unknown, so it cannot be sized on the CPU; `
+            + 'add the model again so its files are pinned.', {});
+    }
+    const pool = cpuPool(memory, cgroupMemory);
+    const estimate = estimateCpuLlamaServer({ model, source, params, pool });
+    return cpuVerdict({ estimate, pool, model, cgroupMemory, disk, remainingDownloadBytes, gpu, decision, result,
+        shrink: 'Reduce the context or the parallel slots, or pick a smaller model.' });
+}
+
+// Ollama's own need on the CPU beyond the weights and the KV cache: the server and its runner process (provisional, like every CPU constant).
+export const OLLAMA_CPU = Object.freeze({ runtimeBytes: 768 * MIB });
+
+/**
+ * What Ollama needs on the CPU (DS005), from the tag's pinned size and never
+ * from a measurement: all weights resident, an f16 KV cache for the whole
+ * `numCtx` (Ollama runs one slot here), the compute buffers at llama.cpp's
+ * flash-attention formula and Ollama's default batch of 512, and the server
+ * and runner process. `kvBytesPerToken` falls back to the dedicated default and
+ * is named when it does.
+ */
+export function estimateCpuOllama({ model, source, params, pool = {} }) {
+    const memory = model.memory || {};
+    const defaulted = [];
+    const kvPerToken = memory.kvBytesPerToken ?? (defaulted.push('memory.kvBytesPerToken'), DEFAULT_KV_BYTES_PER_TOKEN);
+    const kvBytes = Math.round(kvPerToken * params.numCtx + (memory.fixedKvBytes || 0));
+    const computeBytes = Math.round(computeBufferBytes({ ubatchSize: 512, flashAttn: 'on' }));
+    const weightsBytes = source.size || 0;
+    const ramBytes = weightsBytes + kvBytes + computeBytes + OLLAMA_CPU.runtimeBytes;
+    const poolBytes = Number.isFinite(pool.totalBytes) ? pool.totalBytes : null;
+    const from = model.seed ? 'the catalog entry' : 'the model entry added at run time';
+    return {
+        weightsBytes,
+        kvBytes,
+        computeBytes,
+        runtimeBytes: OLLAMA_CPU.runtimeBytes,
+        ramBytes,
+        poolBytes,
+        floorBytes: poolBytes === null ? null : cpuFloorBytes(poolBytes),
+        hostReserveBytes: poolBytes === null ? null : cpuHostReserveBytes(poolBytes),
+        measured: false,
+        defaulted,
+        userSizing: userSizing(model, ['memory.kvBytesPerToken', 'memory.fixedKvBytes']),
+        basis: `estimate, not measured on this machine: the tag's pinned size, f16 KV cache for numCtx at ${kvPerToken} bytes per token `
+            + `(${defaulted.includes('memory.kvBytesPerToken') ? 'a default: the entry has no memory.kvBytesPerToken' : `from ${from}`}), `
+            + 'compute buffers and the Ollama server and runner'
+            + (defaulted.length ? `; defaults used for ${defaulted.join(', ')}` : ''),
+    };
+}
+
+/**
+ * The CPU policy of Ollama (DS005): sized from the tag's pinned size, so a tag
+ * whose size is not pinned (an entry stored before tags were pinned) is refused
+ * until an update pins it. Ollama pulls its own weights, so the pinned size is
+ * also the disk the pull needs.
+ */
+export function admitCpuOllama({ model, source, params, memory = {}, cgroupMemory = null, disk, remainingDownloadBytes = 0, gpu, decision }, result) {
+    if (!(source.size > 0)) {
+        return result('incompatible', 'The tag\'s size is not pinned; update the model entry so it is pinned.', {});
+    }
+    const pool = cpuPool(memory, cgroupMemory);
+    const estimate = estimateCpuOllama({ model, source, params, pool });
+    return cpuVerdict({ estimate, pool, model, cgroupMemory, disk, remainingDownloadBytes, gpu, decision, result,
+        shrink: 'Reduce the context or pick a smaller model.' });
 }

@@ -174,6 +174,8 @@ export function createController({
     downloadSnapshot = undefined,
     inspectSnapshot = undefined,
     resolveSnapshot = undefined,
+    // Reads an Ollama tag's identity from its registry when a model is added (DS002).
+    resolveOllama = undefined,
     // The last check before loading reads what the real downloader wrote; an
     // injected downloader brings its own check, or none.
     verify = download === downloadArtifact ? verifyArtifact : async () => ({ notes: [] }),
@@ -231,13 +233,14 @@ export function createController({
     // Installable through the controller: in a runner lock and with an adapter
     // here. A lock entry for a runner this release cannot run is installed only
     // by the CI install check. An entry of the image's lock is always offered.
-    // One that only the agent's lock has (DS004) is offered where it could run,
-    // that is under a profile the runner has a policy for, so a GPU profile sees
-    // no new runner; and not when the image already holds the runner's own
-    // executable (the image wins on a clash).
+    // One that only the agent's lock has (DS004) is offered on the cpu profile
+    // alone, to a runner with a CPU policy, so the dedicated and unified profiles
+    // see exactly the runners they did; and not when the image already holds the
+    // runner's own executable (the image wins on a clash).
     const fromAgentLock = (definition) => installer.lock?.origin?.[definition.id] === 'agent';
     const offeredByLock = (definition) => installer.installable(definition.id)
-        && (!fromAgentLock(definition) || (schemaOf(definition, profile) !== null && !(definition.executable && fileExists(definition.executable))));
+        && (!fromAgentLock(definition)
+            || (profile === 'cpu' && schemaOf(definition, 'cpu') !== null && !(definition.executable && fileExists(definition.executable))));
     const installable = (id) => typeof id === 'string' && Object.hasOwn(runners, id) && offeredByLock(runners[id]);
     // Listed by a lock at all, whatever the profile: Uninstall still works to free the disk.
     const lockListed = (id) => typeof id === 'string' && Object.hasOwn(runners, id) && installer.installable(id);
@@ -305,6 +308,7 @@ export function createController({
         ...(downloadSnapshot ? { downloadSnapshot } : {}),
         ...(inspectSnapshot ? { inspectSnapshot } : {}),
         ...(resolveSnapshot ? { resolveSnapshot } : {}),
+        ...(resolveOllama ? { resolveOllama } : {}),
         verify,
         verifySnapshot,
         sharedModelsRoot,
@@ -1791,7 +1795,7 @@ export function createController({
             await currentProfile();
             const refusal = profileRefusal(getRunner(runnerId));
             if (refusal) throw new LocalLlmError('runner_unavailable', refusal, { runner: runnerId });
-            // An entry only the agent's lock has is offered where the runner has a policy for the profile.
+            // An entry only the agent's lock has is offered on the cpu profile alone.
             if (!installable(runnerId)) {
                 throw new LocalLlmError('runner_unavailable', notInstallableReason(getRunner(runnerId)), { runner: runnerId });
             }

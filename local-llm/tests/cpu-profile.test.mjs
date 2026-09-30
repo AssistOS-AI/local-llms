@@ -531,11 +531,13 @@ test('CPU threads through the runner: the default follows the machine, the admin
 });
 
 test('runner summaries and the vLLM switch on the cpu profile', () => {
-    // llama.cpp has a CPU schema; every other runner has none and says why. A decided profile only: undecided adds nothing.
+    // llama.cpp and, since Phase 3, Ollama have a CPU schema; every other runner has none and says why. A decided profile only: undecided adds nothing.
     const summaries = Object.fromEntries(Object.values(RUNNERS).map((runner) => [runner.id, runnerSummary(runner, 'cpu')]));
-    assert.ok(summaries['llama.cpp'].paramSchema);
-    assert.equal('profileUnsupportedReason' in summaries['llama.cpp'], false);
-    for (const id of ['ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi', 'lmstudio']) {
+    for (const id of ['llama.cpp', 'ollama']) {
+        assert.ok(summaries[id].paramSchema, id);
+        assert.equal('profileUnsupportedReason' in summaries[id], false, id);
+    }
+    for (const id of ['ik_llama.cpp', 'vllm', 'tabbyapi', 'lmstudio']) {
         assert.equal(summaries[id].paramSchema, null, id);
         assert.equal(summaries[id].profileUnsupportedReason,
             `${RUNNERS[id].displayName} needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.`, id);
@@ -670,6 +672,7 @@ test('controller: an absent GPU commits cpu at the first overview and logs it on
 
 test('controller: GPU-only runners are refused on cpu before anything downloads and cannot be installed', async (t) => {
     // No image contract: every runner counts as present, so the refusal is the profile's, not the platform's.
+    // Ollama is not one of them since Phase 3: it has a CPU policy and is admitted once it is installed.
     const installed = [];
     const installer = {
         installable: (id) => ['vllm', 'lmstudio', 'tabbyapi'].includes(id),
@@ -677,16 +680,23 @@ test('controller: GPU-only runners are refused on cpu before anything downloads 
         entryFor: () => { installed.push('entryFor'); throw new Error('an install must not get this far on cpu'); },
         pathsFor: () => ({}),
     };
-    const h = harness(t, { imageContract: null, installer });
+    const TAGGED = validateModel({ id: 'tagged-cpu', profiles: ['cpu'], sources: { ollama: { type: 'ollama', tag: 'qwen2.5:0.5b', size: 400 * MIB } } }, { seed: true });
+    const h = harness(t, { imageContract: null, installer, seed: [SMALL, BIG, UNIFIED_ONLY, TAGGED] });
     await h.controller.overview();
     const refusal = (name) => `${name} needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.`;
-    for (const runnerId of ['ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi', 'lmstudio']) {
+    for (const runnerId of ['ik_llama.cpp', 'vllm', 'tabbyapi', 'lmstudio']) {
         await assert.rejects(() => h.controller.run({ modelId: 'small-cpu', runnerId, requestId: `request-${runnerId.replace(/\W/g, '')}` }),
             (error) => error.code === 'runner_unavailable' && error.message === refusal(getRunner(runnerId).displayName), runnerId);
     }
     assert.equal(h.calls.download.length, 0, 'nothing downloaded');
     assert.equal(h.controller.state.deployment, null, 'nothing recorded');
     assert.deepEqual(h.controller.state.requests, {});
+    // Ollama has a policy for the profile: the same Run is admitted, from the tag's pinned size, and recorded under cpu.
+    const accepted = await h.controller.run({ modelId: 'tagged-cpu', runnerId: 'ollama', requestId: 'request-ollama' });
+    assert.equal(accepted.accepted, true);
+    assert.deepEqual([h.controller.state.deployment.profile, h.controller.state.deployment.admission.status], ['cpu', 'ok']);
+    assert.equal(h.controller.state.deployment.admission.estimate.weightsBytes, 400 * MIB);
+    await h.controller.stop();
     // Install: a runner with no policy for the profile is refused, before its lock entry is read.
     for (const runnerId of ['vllm', 'lmstudio', 'tabbyapi']) {
         await assert.rejects(() => h.controller.installRunner({ runnerId, acceptLicence: true }),
@@ -781,9 +791,11 @@ test('controller: the overview and status report the decision, the limits and pe
     assert.deepEqual([overview.limits.floorBytes, overview.limits.hostReserveBytes], [cpuFloorBytes(M1_TOTAL), cpuHostReserveBytes(M1_TOTAL)]);
     assert.deepEqual([overview.limits.poolBytes, overview.limits.availableBytes], [M1_TOTAL, M1_AVAILABLE]);
     const byId = Object.fromEntries(overview.runners.map((runner) => [runner.id, runner]));
-    assert.ok(byId['llama.cpp'].paramSchema);
-    assert.equal('profileUnsupportedReason' in byId['llama.cpp'], false);
-    for (const id of ['ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi', 'lmstudio']) {
+    for (const id of ['llama.cpp', 'ollama']) {
+        assert.ok(byId[id].paramSchema, id);
+        assert.equal('profileUnsupportedReason' in byId[id], false, id);
+    }
+    for (const id of ['ik_llama.cpp', 'vllm', 'tabbyapi', 'lmstudio']) {
         assert.equal(byId[id].paramSchema, null, id);
         assert.match(byId[id].profileUnsupportedReason, /needs an NVIDIA GPU in this release/, id);
     }

@@ -1,6 +1,8 @@
 import { spawnSync as realSpawnSync } from 'node:child_process';
+import path from 'node:path';
 
-import { admitOllama } from '../controller/admission.mjs';
+import { admissionResult, admitOllama } from '../controller/admission.mjs';
+import { admitCpuOllama } from '../controller/profiles.mjs';
 import { parseRunnerReport } from '../controller/runnerProcess.mjs';
 import { LocalLlmError } from '../errors.mjs';
 import {
@@ -55,12 +57,37 @@ const paramSchema = deepFreeze({
     }
 });
 
-function normalizeParams(params = {}, { model } = {}) {
+// The cpu profile (DS005): no GPU is used, so a layer count, flash attention and a KV cache type are
+// not offered. The KV cache is f16 (OLLAMA_KV_CACHE_TYPE) and Ollama's own default decides flash attention.
+const cpuParamSchema = deepFreeze({
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+        numCtx: {
+            type: 'integer', minimum: 512, maximum: 131072, default: 4096,
+            title: 'Context size',
+            description: 'Context window in tokens (num_ctx). The KV cache lives in this machine\'s memory, so a larger context needs more of it.'
+        },
+        numThread: paramSchema.properties.numThread,
+        keepAlive: paramSchema.properties.keepAlive
+    }
+});
+
+// The dedicated schema, and the cpu one. Other profiles have no policy: on unified memory the
+// runner is refused by admission, as it always was.
+function paramSchemaFor(profile = 'dedicated') {
+    if (profile === 'cpu') return cpuParamSchema;
+    return profile === 'dedicated' ? paramSchema : null;
+}
+
+// Only the cpu profile reads parameters of its own; every other profile reads what it always read.
+function normalizeParams(params = {}, { model, profile = 'dedicated' } = {}) {
+    if (profile === 'cpu') return validateParams(cpuParamSchema, params, { defaults: recommendedFor(model, ID, 'cpu') });
     return validateParams(paramSchema, params, { defaults: recommendedFor(model, ID) });
 }
 
-function describeContext(params = {}, { model } = {}) {
-    const { numCtx } = normalizeParams(params, { model });
+function describeContext(params = {}, { model, profile = 'dedicated' } = {}) {
+    const { numCtx } = normalizeParams(params, { model, profile });
     return { totalContext: numCtx, perRequestContext: numCtx, parallel: 1, kvUnified: false };
 }
 
@@ -70,10 +97,13 @@ function keepAliveValue(keepAlive) {
     return keepAlive === '-1' ? -1 : keepAlive;
 }
 
-export function requestOptions(params = {}, { model } = {}) {
-    const values = normalizeParams(params, { model });
+export function requestOptions(params = {}, { model, profile } = {}) {
+    const values = normalizeParams(params, { model, profile });
     const options = { num_ctx: values.numCtx };
-    if (values.numGpu != null) {
+    // On the cpu profile no layer goes to a GPU, whatever the environment shows (DS005).
+    if (profile === 'cpu') {
+        options.num_gpu = 0;
+    } else if (values.numGpu != null) {
         options.num_gpu = values.numGpu;
     }
     if (values.numThread != null) {
@@ -87,8 +117,12 @@ function parseVersion(output) {
     return match ? match[1] : null;
 }
 
-function detect({ spawnSync = realSpawnSync } = {}) {
-    return probeVersion({
+// The image's own binary when it has one (the amd64 image); otherwise the agent's lock may offer an
+// install (the arm64 image has no Ollama, DS004), and detection asks the installer, which reads the
+// cache and its install record. The probe is synchronous and the installer's answer is not, so only
+// a caller that passes an installer can get a promise back.
+function detect({ spawnSync = realSpawnSync, installer } = {}) {
+    const inImage = probeVersion({
         spawnSync,
         executable: EXECUTABLE,
         args: ['--version'],
@@ -96,30 +130,42 @@ function detect({ spawnSync = realSpawnSync } = {}) {
         parse: parseVersion,
         pinnedVersion: ollamaRunner.pinnedVersion
     });
+    if (inImage.installed || !installer?.installable(ID)) return inImage;
+    return (async () => {
+        const info = await installer.describe(ID);
+        return info.installed
+            ? { installed: true, version: info.version, reason: null }
+            : { installed: false, version: null, reason: 'Not installed. An admin can Install it under Runners.' };
+    })();
 }
 
-function buildLaunch({ params, port, dataDir, model } = {}) {
-    const values = normalizeParams(params, { model });
+// `runnerDir` is the runnable copy of an install from the agent's lock (DS004); the image's binary otherwise.
+// On the cpu profile no driver library is on the path and no device is visible, so the CUDA driver is not
+// loaded even where a GPU is attached but unusable (DS003).
+function buildLaunch({ params, port, dataDir, model, profile, runnerDir } = {}) {
+    const values = normalizeParams(params, { model, profile });
     const root = assertAbsolutePath(dataDir, 'dataDir');
+    const cpu = profile === 'cpu';
+    const command = runnerDir ? path.join(assertAbsolutePath(runnerDir, 'runnerDir'), 'bin', 'ollama') : EXECUTABLE;
     const env = {
         HOME: `${root}/home`,
         OLLAMA_MODELS: `${root}/models/ollama`,
         OLLAMA_HOST: `127.0.0.1:${assertPort(port)}`,
         OLLAMA_NUM_PARALLEL: '1',
         OLLAMA_MAX_LOADED_MODELS: '1',
-        OLLAMA_KV_CACHE_TYPE: values.kvCacheType,
+        OLLAMA_KV_CACHE_TYPE: values.kvCacheType ?? 'f16',
         // The OpenAI-compatible /v1 endpoint takes no `options`; this makes
         // num_ctx the server default so a chat request does not reload the
         // model with a different context.
         OLLAMA_CONTEXT_LENGTH: String(values.numCtx),
         OLLAMA_KEEP_ALIVE: values.keepAlive,
         OLLAMA_NO_CLOUD: '1',
-        LD_LIBRARY_PATH: NVIDIA_LIB_DIR
+        ...(cpu ? { CUDA_VISIBLE_DEVICES: '' } : { LD_LIBRARY_PATH: NVIDIA_LIB_DIR })
     };
     if (values.flashAttention != null) {
         env.OLLAMA_FLASH_ATTENTION = values.flashAttention ? '1' : '0';
     }
-    return { command: EXECUTABLE, args: ['serve'], env };
+    return { command, args: ['serve'], env };
 }
 
 // Progress of `/api/pull`, one JSON object per line. Every blob digest the
@@ -162,7 +208,9 @@ async function streamPull(ctx, base, tag) {
 // pull the tag unless it is complete, check the pinned manifest digest,
 // re-check admission, then load the model and confirm Ollama keeps it loaded.
 async function start(ctx) {
-    const process = ctx.launch(ctx.runner.buildLaunch({ params: ctx.params, port: ctx.port, dataDir: ctx.dataDir, model: ctx.model }));
+    const process = ctx.launch(ctx.runner.buildLaunch({
+        params: ctx.params, port: ctx.port, dataDir: ctx.dataDir, model: ctx.model, profile: ctx.profile, runnerDir: ctx.runnerDir,
+    }));
     const base = `http://127.0.0.1:${ctx.port}`;
     await ctx.waitForHttp(`${base}/api/version`, { process });
     const tag = ctx.artifact.tag;
@@ -188,7 +236,7 @@ async function start(ctx) {
     const load = await ctx.fetch(`${base}/api/generate`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: tag, prompt: '', stream: false, ...ctx.runner.requestOptions(ctx.params) }),
+        body: JSON.stringify({ model: tag, prompt: '', stream: false, ...ctx.runner.requestOptions(ctx.params, { profile: ctx.profile }) }),
         signal: ctx.signal,
     });
     if (!load.ok) throw new LocalLlmError('load_failed', `Ollama could not load ${tag} (HTTP ${load.status}).`);
@@ -211,6 +259,7 @@ export const ollamaRunner = Object.freeze({
     // container, and the Router's agent-port relay is closed (DS001).
     apiKey: false,
     paramSchema,
+    paramSchemaFor,
     basicParams: Object.freeze(['numCtx']),
     moeParams: Object.freeze([]),
     normalizeParams,
@@ -221,5 +270,6 @@ export const ollamaRunner = Object.freeze({
     chatModel: (deployment) => deployment.artifact.tag,
     requestOptions,
     admit: admitOllama,
+    admitCpu: (input) => admitCpuOllama(input, admissionResult),
     parseReport: parseRunnerReport
 });

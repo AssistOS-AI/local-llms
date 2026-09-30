@@ -45,12 +45,7 @@ export function defaultPorts(runners = RUNNERS) {
     return Object.freeze(ports);
 }
 
-/**
- * The runner's parameter schema for a hardware profile, or null when it has
- * no policy for it (DS005). An undecided profile (null) has no policy, so a
- * runner offered only by the agent's lock (DS004) stays unavailable until the
- * profile is known.
- */
+/** The runner's parameter schema for a hardware profile, or null when it has no policy for it (DS005). */
 export function schemaOf(runner, profile = 'dedicated') {
     if (typeof runner.paramSchemaFor === 'function') return runner.paramSchemaFor(profile);
     return profile === 'dedicated' ? runner.paramSchema : null;
