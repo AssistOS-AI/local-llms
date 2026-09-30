@@ -424,6 +424,66 @@
       "env": {
         "TOOL_NAME": "local_llm_runner_uninstall"
       }
+    },
+    {
+      "name": "local_llm_model_lookup",
+      "title": "Look up a model",
+      "description": "Look a model up on Hugging Face before adding it: the commit the revision resolves to, whether the repository is gated, its licence, and the files of the format with their sizes and sha256 (GGUF files with their quantization, a split GGUF grouped under its first shard). For one GGUF file it also reads the start of that file (at most 32 MiB) for its layer count, training context and KV cache size; for a safetensors or EXL3 snapshot the sizing comes from its pinned config.json. Downloads no weights and writes nothing; add the model with local_llm_model_add, then Run it.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "huggingface"
+            ]
+          },
+          "repo": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}\\/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$",
+            "maxLength": 193,
+            "description": "A Hugging Face repository id, owner/name."
+          },
+          "revision": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$",
+            "maxLength": 128,
+            "description": "A branch, tag or commit; main when left out."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "gguf",
+              "hf",
+              "exl3"
+            ],
+            "default": "gguf",
+            "description": "gguf lists GGUF files; hf and exl3 list a snapshot's files."
+          },
+          "file": {
+            "type": "string",
+            "maxLength": 512,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._+/-]{0,511}\\.gguf$",
+            "description": "One GGUF file (the first shard of a split GGUF) whose header is read for its sizing. format gguf only."
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_model_lookup"
+      }
     }
   ]
 }

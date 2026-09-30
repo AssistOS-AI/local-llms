@@ -51,7 +51,7 @@ const COMMIT_ANY_CASE_RE = /^[A-Fa-f0-9]{40}$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const GIT_OID_RE = /^[a-f0-9]{40}$/;
 const MAX_FILE_SEGMENTS = 4;
-const MAX_TREE_PAGES = 50;
+export const MAX_TREE_PAGES = 50;
 const SPACE_MARGIN = 1.05;
 const RATE_WINDOW_MS = 5000;
 const IDENTITY_KEYS = Object.freeze(['repo', 'file', 'commit', 'size', 'sha256']);
@@ -74,13 +74,13 @@ function invalidSource(message) {
     return new DownloadError('INVALID_SOURCE', message);
 }
 
-function assertRepo(repo) {
+export function assertRepo(repo) {
     if (typeof repo !== 'string' || !REPO_RE.test(repo) || repo.includes('..')) {
         throw invalidSource('Invalid Hugging Face repository name');
     }
 }
 
-function assertFile(file) {
+export function assertFile(file) {
     if (typeof file !== 'string' || file.includes('..') || !file.endsWith('.gguf')) {
         throw invalidSource('Invalid model file path');
     }
@@ -90,7 +90,7 @@ function assertFile(file) {
     }
 }
 
-function assertRevision(revision) {
+export function assertRevision(revision) {
     if (typeof revision !== 'string' || revision.includes('..')) {
         throw invalidSource('Invalid revision');
     }
@@ -120,7 +120,7 @@ function encodeSegments(value) {
     return value.split('/').map(encodeURIComponent).join('/');
 }
 
-function authHeaders(token) {
+export function authHeaders(token) {
     return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
@@ -140,7 +140,7 @@ async function discardBody(response) {
 // its own deadline, which also covers reading the body.
 export const METADATA_TIMEOUT_MS = 15_000;
 
-async function fetchJson(url, { token, fetchImpl, timeoutMs = METADATA_TIMEOUT_MS }) {
+export async function fetchJson(url, { token, fetchImpl, timeoutMs = METADATA_TIMEOUT_MS }) {
     const signal = AbortSignal.timeout(timeoutMs);
     let response;
     try {
@@ -183,7 +183,7 @@ function networkReason(err) {
     return err?.name === 'TypeError' ? 'fetch-failed' : 'unknown';
 }
 
-async function resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs }) {
+export async function resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs }) {
     if (COMMIT_RE.test(revision)) {
         return revision;
     }
@@ -198,7 +198,7 @@ async function resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeou
 
 // The tree API pages large directories through a Link header. Only same-origin
 // next links are followed, so the token is never sent anywhere else.
-function nextTreePage(link, baseUrl) {
+export function nextTreePage(link, baseUrl) {
     const match = /<([^>]+)>\s*;\s*rel="?next"?/.exec(link ?? '');
     if (!match) {
         return null;
@@ -231,7 +231,7 @@ async function findTreeEntry({ repo, file, commit, token, fetchImpl, baseUrl, ti
     return null;
 }
 
-function lfsIdentity(entry) {
+export function lfsIdentity(entry) {
     const oid = typeof entry?.lfs?.oid === 'string' ? entry.lfs.oid.toLowerCase() : '';
     const size = entry?.lfs?.size;
     if (!SHA256_RE.test(oid) || !Number.isSafeInteger(size) || size <= 0 || size !== entry.size) {

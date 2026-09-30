@@ -31,6 +31,7 @@ import {
     verifyArtifact,
     verifySnapshotFile,
 } from './downloader.mjs';
+import { ggufSizing, readGgufHeaderFile } from './ggufHeader.mjs';
 import {
     readMemory as readHostMemory,
     readMemoryPressure,
@@ -39,6 +40,7 @@ import {
     unreapedQueries as hardwareUnreaped,
     untilStopped,
 } from './hardware.mjs';
+import { lookupHuggingFaceModel } from './modelLookup.mjs';
 import {
     UNIFIED,
     UNREADABLE_COMMIT_MS,
@@ -148,6 +150,7 @@ export function createController({
     inspect = inspectArtifact,
     remove = removeArtifact,
     resolveHf = resolveHuggingFaceArtifact,
+    lookup = lookupHuggingFaceModel,
     startRunner = startRunnerProcess,
     fetchImpl = globalThis.fetch,
     ports = defaultPorts(runners),
@@ -1107,6 +1110,45 @@ export function createController({
         });
     }
 
+    // A user entry that says its sizing came from the GGUF header (`sizingSource: 'gguf-header'`): the header of the file
+    // just verified, and the entry with what that header gives in place of the stored values, or the entry itself when
+    // nothing differs. The stored values came from a file read before the entry was pinned; a repository that moved
+    // between the lookup and Add, or a header that lied, shows here. A difference is logged. Typed values, seeds,
+    // snapshots and runner-fetched Ollama tags are not re-read. A file whose header cannot be read is not sized at all.
+    async function verifiedGgufSizing(model, source, file) {
+        if (model.seed || model.sizingSource !== 'gguf-header' || source?.type !== 'huggingface') return model;
+        let sizing;
+        try {
+            sizing = ggufSizing((await readGgufHeaderFile(file)).kv);
+        } catch (error) {
+            throw new LocalLlmError(error?.code === 'invalid_gguf' ? 'invalid_gguf' : 'sizing_unreadable',
+                `The downloaded ${path.basename(file)} has no readable GGUF header (${error.message}), so the sizing stored for ${model.id} cannot be checked.`);
+        }
+        const stored = {
+            contextLength: model.contextLength ?? null,
+            layers: model.memory?.layers ?? null,
+            kvBytesPerToken: model.memory?.kvBytesPerToken ?? null,
+            architecture: model.architecture,
+        };
+        const verified = {
+            contextLength: sizing.contextLength,
+            layers: sizing.layers,
+            kvBytesPerToken: sizing.kvBytesPerToken,
+            architecture: sizing.architecture,
+        };
+        const changed = Object.keys(verified).filter((key) => verified[key] !== stored[key]);
+        if (changed.length === 0) return model;
+        const say = (value) => (value === null ? 'none' : String(value));
+        log.append('controller', `${model.id}: the GGUF header of the verified file differs from the sizing stored when the model was added `
+            + `(${changed.map((key) => `${key} ${say(stored[key])} -> ${say(verified[key])}`).join(', ')}); the verified values are used`);
+        return Object.freeze({
+            ...model,
+            architecture: verified.architecture,
+            contextLength: verified.contextLength ?? undefined,
+            memory: Object.freeze({ ...model.memory, layers: verified.layers ?? undefined, kvBytesPerToken: verified.kvBytesPerToken ?? undefined }),
+        });
+    }
+
     async function runPipeline(deployment, model, signal) {
         const definition = getRunner(deployment.runnerId);
         const store = storeFor(deployment.artifact);
@@ -1134,6 +1176,9 @@ export function createController({
                     }
                 } catch {}
             }
+            // The sizing read from the GGUF header at lookup is unverified until the download is: read it again from the
+            // verified file, so this admission, the last one and the runner's start use what the file says (DS002).
+            model = await verifiedGgufSizing(model, deployment.artifact, fetched.path);
             // An early refusal before the runner is prepared; the check that counts is the last one, below.
             await recheckAdmission(deployment, model, { signal });
             throwIfAborted(signal);
@@ -1531,6 +1576,22 @@ export function createController({
         });
     }
 
+    // A lookup reads Hugging Face metadata and, for one GGUF file, the first megabytes of it (the header); it writes
+    // nothing. Like addModel it runs outside the command queue, so a slow request never holds up Stop, Cancel or Run,
+    // and every lookup in flight ends when the agent drains.
+    const lookups = new Set();
+
+    async function lookupModel(args) {
+        if (draining) throw new LocalLlmError('shutting_down', 'The agent is restarting; look the model up again once it is back.');
+        const stop = new AbortController();
+        lookups.add(stop);
+        try {
+            return await lookup(args, { token: env.HF_TOKEN || '', fetchImpl, baseUrl: hfBaseUrl, signal: stop.signal });
+        } finally {
+            lookups.delete(stop);
+        }
+    }
+
     // An update keeps a source's pinned identity while it is otherwise
     // unchanged; it never silently re-resolves a branch.
     function carryPins(candidate, existing) {
@@ -1728,6 +1789,7 @@ export function createController({
     async function drain() {
         draining = true;
         planning?.abort();
+        for (const stop of lookups) stop.abort();
         // The active job, then every hardware query (the job's, a command's or
         // the overview's), stop at once: a snapshot's nvidia-smi queries can
         // take 10 s each. A killed query is waited for during the command wait
@@ -1787,6 +1849,7 @@ export function createController({
         cancelDownload,
         deleteWeights,
         addModel,
+        lookupModel,
         updateModel,
         removeModel,
         installRunner,
