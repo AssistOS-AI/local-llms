@@ -18,7 +18,7 @@ const GIB = 1024 * MIB;
 const SHA = 'a'.repeat(64);
 
 // The image's runner lock, reduced: one python and one proprietary archive runner, as the amd64 image has.
-const IMAGE_LOCK = {
+export const IMAGE_LOCK = {
     schema: 'local-llm.runners-lock/v1',
     runners: {
         vllm: {

@@ -130,7 +130,9 @@ export async function fetchOllamaRegistryManifest(tag, { fetchImpl = globalThis.
             if (![301, 302, 303, 307, 308].includes(response.status)) break;
             const next = response.headers?.get?.('location') ? new URL(response.headers.get('location'), url) : null;
             if (next && next.origin !== origin) {
-                throw fail(`The registry redirected the manifest request of ${tag} away from ${new URL(baseUrl).host}, which is not followed.`);
+                // The same host under another scheme or port is not "away from" it.
+                const where = next.hostname === new URL(baseUrl).hostname ? `to another scheme or port on ${new URL(baseUrl).hostname}` : `away from ${new URL(baseUrl).host}`;
+                throw fail(`The registry redirected the manifest request of ${tag} ${where}, which is not followed.`);
             }
             if (hop >= MAX_REDIRECTS || !next) {
                 throw fail(`The registry redirected the manifest request of ${tag} ${next ? 'more than ' + MAX_REDIRECTS + ' times' : 'without saying where'}, which is not followed.`);

@@ -533,7 +533,8 @@ function controllerOn(t, { snap = () => snapshotOf(ABSENT_GPU), seed, imageContr
 // download and unpack are stand-ins, and what they were asked to do.
 function ollamaInstaller(t, { image = {} } = {}) {
     const root = tempDir(t, 'ollama-install');
-    const archive = zlib.zstdCompressSync(Buffer.from('not a tar: the unpack below is a stand-in for GNU tar'));
+    // An empty tar (two blocks of zeros): the unpack below is a stand-in for GNU tar, and the decompressed file must still be a whole tar.
+    const archive = zlib.zstdCompressSync(Buffer.alloc(1024));
     const agent = path.join(root, 'agent.json');
     fs.writeFileSync(agent, JSON.stringify(lockDocument({
         ollama: { version: '0.34.4', kind: 'archive', licence: { name: 'MIT', url: 'https://github.com/ollama/ollama/blob/v0.34.4/LICENSE' },

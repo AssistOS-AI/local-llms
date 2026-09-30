@@ -35,6 +35,8 @@ const TOOL_OUTPUT_KEPT = 64 * 1024;
 // bytes, so the cap only keeps a bad one from filling the container's disk (Ollama's is about 2.7 times).
 const ZSTD_MAX_RATIO = 32;
 const ZSTD_MIN_LIMIT = 1024 * 1024;
+const TAR_BLOCK = 512;
+const TAR_END_BYTES = 2 * TAR_BLOCK;
 
 const WHEEL_RE = /^([A-Za-z0-9](?:[A-Za-z0-9._]*[A-Za-z0-9])?)-([A-Za-z0-9.!+_]+)(?:-\d[^-]*)?-[^-]+-[^-]+-[^-]+\.whl$/;
 
@@ -63,16 +65,39 @@ async function copyHashed(source, destination, signal) {
 }
 
 /**
+ * Whether a file is a whole tar: a multiple of 512 bytes that ends with the end-of-archive marker, at least
+ * two blocks of zeros (every writer pads to its record size with zeros; GNU tar and bsdtar to 10 KiB).
+ * A stream cut inside a member is not a multiple of 512, and one cut on a member's end has no marker.
+ */
+async function endsLikeATar(file) {
+    const { size } = await fs.promises.stat(file);
+    if (size < TAR_END_BYTES || size % TAR_BLOCK !== 0) return false;
+    const handle = await fs.promises.open(file, 'r');
+    try {
+        const end = Buffer.alloc(TAR_END_BYTES);
+        await handle.read(end, 0, TAR_END_BYTES, size - TAR_END_BYTES);
+        return end.every((byte) => byte === 0);
+    } finally {
+        await handle.close();
+    }
+}
+
+/**
  * Decompress a pinned .tar.zst into a plain .tar beside it. The image has no
  * zstd tool and runTool gives a process no stdin, so Node's zlib does it and
  * tar then reads the .tar. A stream that is not zstd, or that unpacks to more
  * than ZSTD_MAX_RATIO times its size, is an `install_failed` with the partial
- * .tar removed; a stop ends it as ABORTED. A stream that is cut short is NOT
- * reported: Node's zstd decoder ends quietly with whatever it decoded (observed
- * on Node 25.8, down to an empty .tar). Tar may notice, and the executable
- * check after the unpack (assertLaunchExecutable) is what catches the rest.
+ * .tar removed; a stop ends it as ABORTED.
+ *
+ * A stream that is cut short is handled two ways, by Node's version. Node 24 reports it as a zlib
+ * error (`Z_BUF_ERROR`, "unexpected end of file"), which is an `install_failed` like the rest. Node
+ * 25.8 does not: its decoder ends quietly with whatever it decoded, down to an empty .tar, and
+ * nothing else in the unpack notices, since tar takes a .tar that ends on a member's end for a whole
+ * one. So the decompressed .tar must itself be whole (endsLikeATar), on any Node; the sha256 pin
+ * covers the bytes on disk, and the executable check after the unpack (assertLaunchExecutable)
+ * covers a wrong strip.
  */
-async function decompressZstd(source, destination, { signal, label }) {
+async function decompressZstd(source, destination, { signal, label, decoder }) {
     const limit = Math.max(ZSTD_MIN_LIMIT, ZSTD_MAX_RATIO * (await fs.promises.stat(source)).size);
     let written = 0;
     const bounded = new Transform({
@@ -83,11 +108,18 @@ async function decompressZstd(source, destination, { signal, label }) {
         },
     });
     try {
-        await pipeline(fs.createReadStream(source), zlib.createZstdDecompress(), bounded, fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 }), { signal });
+        await pipeline(fs.createReadStream(source), decoder(), bounded, fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 }), { signal });
     } catch (error) {
         await fs.promises.rm(destination, { force: true });
         if (signal?.aborted) throw new DownloadError('ABORTED', `Stopped while decompressing ${label}`, { retryable: true });
-        throw new LocalLlmError('install_failed', `decompressing ${label} failed: ${error?.code === 'unpack_limit' ? error.message : (error?.code || error?.message || error)}`);
+        const why = error?.code === 'unpack_limit' ? error.message
+            : (error?.code && error?.message && error.code !== error.message ? `${error.code} (${error.message})` : (error?.code || error?.message || error));
+        throw new LocalLlmError('install_failed', `decompressing ${label} failed: ${why}`);
+    }
+    // Quietly truncated output (Node 25) is not an error to the decoder, so the .tar is checked for its end.
+    if (!(await endsLikeATar(destination))) {
+        await fs.promises.rm(destination, { force: true });
+        throw new LocalLlmError('install_failed', `decompressing ${label} failed: it was cut short (no end-of-archive blocks)`);
     }
 }
 
@@ -113,7 +145,13 @@ export async function assertLaunchExecutable(entry, runDir) {
     if (real !== root && !real.startsWith(`${root}${path.sep}`)) throw fail('it leads outside the runnable copy');
     const stats = await fs.promises.stat(real);
     if (!stats.isFile()) throw fail('it is not a regular file');
-    if ((stats.mode & 0o111) === 0) throw fail('it is not executable');
+    // The mode says some execute bit is set; access() says the user that runs the agent can use it (mode 0645 has a bit and is no use to its owner).
+    try {
+        if ((stats.mode & 0o111) === 0) throw new Error('no execute bit');
+        await fs.promises.access(real, fs.constants.X_OK);
+    } catch {
+        throw fail('it is not executable');
+    }
     return file;
 }
 
@@ -192,6 +230,8 @@ export function createRunnerInstaller({
     inspect = inspectFile,
     statfs = (target) => fs.promises.statfs(target),
     run = runTool,
+    // The zstd decoder; tests stand in for how a Node version ends a stream that was cut short.
+    zstdDecoder = () => zlib.createZstdDecompress(),
     // Tests only: the lock allows https, a local test server speaks http.
     allowHttp = false,
     now = () => new Date(),
@@ -364,7 +404,7 @@ export function createRunnerInstaller({
                 // container's own filesystem holds the compressed file, the .tar and the unpacked files at once.
                 const staged = path.join(sourceDir, file.name);
                 const tarFile = path.join(sourceDir, file.name.slice(0, -'.zst'.length));
-                await decompressZstd(staged, tarFile, { signal, label: file.name });
+                await decompressZstd(staged, tarFile, { signal, label: file.name, decoder: zstdDecoder });
                 await fs.promises.rm(staged, { force: true });
                 await step(`unpacking ${file.name}`, 'tar', ['-xf', tarFile, ...flags], { signal, env });
                 await fs.promises.rm(tarFile, { force: true });
@@ -395,13 +435,13 @@ export function createRunnerInstaller({
             const sourceDir = await stageVerified(entry, paths, { signal });
             await fs.promises.rm(paths.runDir, { recursive: true, force: true });
             await build(entry, paths, { signal, sourceDir });
-            // The marker says the copy can run: prove the binary is in it first, and leave no copy behind if it is not.
-            try {
-                await assertLaunchExecutable(entry, paths.runDir);
-            } catch (error) {
-                await fs.promises.rm(paths.runDir, { recursive: true, force: true });
-                throw error;
-            }
+            // The marker says the copy can run: prove the binary is in it first.
+            await assertLaunchExecutable(entry, paths.runDir);
+        } catch (error) {
+            // A failed build (the unpack, the size cap, a stop, a missing binary) leaves no partial copy and no scratch directory.
+            await fs.promises.rm(paths.runDir, { recursive: true, force: true });
+            await fs.promises.rm(paths.tmpDir, { recursive: true, force: true });
+            throw error;
         } finally {
             await fs.promises.rm(paths.stageDir, { recursive: true, force: true });
         }

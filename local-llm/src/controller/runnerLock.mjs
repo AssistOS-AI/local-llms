@@ -286,9 +286,13 @@ function validateRunner(id, value, options) {
         check: validateCheck(value.check, `${field}.check`, { kind: value.kind, ...options }),
     };
     entry.totalBytes = files.reduce((sum, file) => sum + file.size, 0);
-    // Names this exact entry: a changed lock entry needs a fresh runnable copy.
+    // Names this exact entry: a changed lock entry needs a fresh runnable copy. The launch file is part of it
+    // when the entry names one, so a copy marked ready before it was named is built again and proven; an
+    // entry that names none (every image-lock entry) has the digest it always had, so nothing installed on
+    // a GPU host is rebuilt.
     entry.digest = crypto.createHash('sha256')
-        .update(JSON.stringify({ id, version: entry.version, kind: entry.kind, files }))
+        .update(JSON.stringify({ id, version: entry.version, kind: entry.kind, files,
+            ...(entry.check.executable ? { check: { executable: entry.check.executable } } : {}) }))
         .digest('hex');
     return Object.freeze(entry);
 }
@@ -340,6 +344,9 @@ export function loadRunnerLocks({ image = DEFAULT_RUNNER_LOCK, agent = agentRunn
     const ignored = [];
     if (agent) {
         try {
+            // The lock comes with the repository revision; a file that is a link could be pointed elsewhere by a later
+            // change that no path filter would notice. (A directory above it may be a link: the workspace mounts do that.)
+            if (fsApi.lstatSync(agent, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error('it is a symbolic link, not a file of the repository');
             fromAgent = loadRunnerLock(agent, { fsApi, requireExecutable: true });
         } catch (error) {
             ignored.push({ file: agent, reason: error?.message || String(error) });

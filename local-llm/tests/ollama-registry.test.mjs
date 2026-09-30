@@ -50,14 +50,20 @@ test('a redirect is followed only within the registry\'s own origin, and never f
     const bytes = manifestBytes({ layers: [10] });
     const elsewhere = await registry(t, { '/v2/library/m/manifests/1': { body: bytes } });
     const reg = await registry(t, (req) => ({
-        '/v2/library/away/manifests/1': { status: 302, headers: { Location: `${elsewhere.base}/v2/library/m/manifests/1` } },
+        // Another host (localhost is not 127.0.0.1), the same host on another port, and the same host under another scheme.
+        '/v2/library/away/manifests/1': { status: 302, headers: { Location: `${elsewhere.base.replace('127.0.0.1', 'localhost')}/v2/library/m/manifests/1` } },
+        '/v2/library/port/manifests/1': { status: 302, headers: { Location: `${elsewhere.base}/v2/library/m/manifests/1` } },
+        '/v2/library/scheme/manifests/1': { status: 302, headers: { Location: `${elsewhere.base.replace('http:', 'https:')}/v2/library/m/manifests/1` } },
         '/v2/library/near/manifests/1': { status: 307, headers: { Location: '/v2/library/m/manifests/1' } },
         '/v2/library/m/manifests/1': { body: bytes },
         '/v2/library/loop/manifests/1': { status: 302, headers: { Location: '/v2/library/loop/manifests/1' } },
         '/v2/library/nolocation/manifests/1': { status: 302 },
     })[req.url]);
     assert.equal((await fetchFrom(reg.base)('near:1')).size, 510);
-    await assert.rejects(() => fetchFrom(reg.base)('away:1'), refused('pin_failed', /redirected the manifest request of away:1 away from .*which is not followed/));
+    await assert.rejects(() => fetchFrom(reg.base)('away:1'), refused('pin_failed', /^The registry redirected the manifest request of away:1 away from 127\.0\.0\.1:\d+, which is not followed\.$/));
+    // The same host is not "away from" itself: the message says what differs.
+    await assert.rejects(() => fetchFrom(reg.base)('port:1'), refused('pin_failed', /^The registry redirected the manifest request of port:1 to another scheme or port on 127\.0\.0\.1, which is not followed\.$/));
+    await assert.rejects(() => fetchFrom(reg.base)('scheme:1'), refused('pin_failed', /^The registry redirected the manifest request of scheme:1 to another scheme or port on 127\.0\.0\.1, which is not followed\.$/));
     assert.deepEqual(elsewhere.requests, [], 'the other origin was never contacted');
     // A same-origin loop is not "away from" anywhere, and a redirect that says nowhere is named as that.
     await assert.rejects(() => fetchFrom(reg.base)('loop:1'), (error) => error.code === 'pin_failed'

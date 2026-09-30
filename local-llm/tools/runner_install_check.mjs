@@ -101,10 +101,12 @@ export async function probeExecutable({ entry, runDir, provided = new Set(), ldd
     const result = spawn(file, ['--version'], { encoding: 'utf8', timeout: VERSION_TIMEOUT_MS, env: { PATH: '/usr/bin:/bin', HOME: '/tmp', CUDA_VISIBLE_DEVICES: '' } });
     const output = `${result.stdout || ''}${result.stderr || ''}`.trim();
     const wanted = entry.version.replace(/^b(?=\d)/, '');
+    // The pinned version as a whole token: not inside a longer number (0.34.40, 10.34.4) or a longer dotted version (0.34.4.1).
+    const named = new RegExp(`(?<![\\d.])${wanted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!\\.?\\d)`);
     report.version = { status: result.error ? (result.error.code || 'error') : result.status, output: output.slice(0, VERSION_OUTPUT_KEPT), expected: wanted };
     if (result.error || result.status !== 0) {
         problems.push(`${relative} --version failed (${result.error?.code || result.error?.message || `exit ${result.status ?? result.signal}`}): ${output.slice(-200)}`);
-    } else if (!output.includes(wanted)) {
+    } else if (!named.test(output)) {
         problems.push(`${relative} --version does not name ${wanted}: ${output.slice(0, 200)}`);
     }
     return { report, problems };
