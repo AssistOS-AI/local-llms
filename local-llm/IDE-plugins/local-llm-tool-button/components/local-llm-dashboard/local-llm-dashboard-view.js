@@ -492,7 +492,8 @@ function sizingLine(sizing) {
         Number.isFinite(memory.kvBytesPerToken) ? `KV cache ${count(memory.kvBytesPerToken)} bytes per token (f16)` : 'KV cache size not read, so the estimate uses its default',
         String(sizing.architecture) === 'moe' ? 'mixture of experts' : 'dense',
     ];
-    const notes = Array.isArray(sizing.notes) ? sizing.notes.filter((note) => typeof note === 'string' && note) : [];
+    // A note can repeat a key name from the model's own files, so it loses bidi controls like the licence does.
+    const notes = Array.isArray(sizing.notes) ? sizing.notes.filter((note) => typeof note === 'string' && note).map((note) => stripBidi(note)) : [];
     return `<div class="settings-card-meta">Read from ${escapeHtml(from)}: ${escapeHtml(parts.join(' · '))}${notes.length ? escapeHtml(` (${notes.join('; ')})`) : ''}</div>`;
 }
 

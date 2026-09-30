@@ -1102,6 +1102,16 @@ test('bidirectional control characters in a licence never reach the page or the 
     assert.equal(empty.controls.license.value, '');
 });
 
+test('bidirectional control characters in a sizing note never reach the page', () => {
+    // A note can repeat a key name from the model's own header or config.json.
+    const noted = { ...SIZING, notes: ['qwen2‮.ssm.conv_kernel⁦ marks a recurrent layer⁩'] };
+    for (const result of [{ ...GGUF_LOOKUP, sizing: noted }, { ...GGUF_LOOKUP, format: 'hf', files: [], sizing: { ...noted, source: 'config.json' } }]) {
+        const html = lookupResultsHtml(result);
+        assert.match(html, /qwen2\.ssm\.conv_kernel marks a recurrent layer/);
+        assert.doesNotMatch(html, /[‪-‮⁦-⁩]/);
+    }
+});
+
 test('the source fields follow the four kinds, and the lookup is forgotten when the source changes', () => {
     const fields = [
         { dataset: { sourceField: 'huggingface hf exl3' }, hidden: false, querySelector: () => ({ name: 'repo', required: false }) },
