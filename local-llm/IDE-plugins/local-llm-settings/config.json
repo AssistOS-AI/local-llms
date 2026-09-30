@@ -4,7 +4,7 @@
   "component": "local-llm-settings",
   "location": [],
   "label": "Local LLMs",
-  "tooltip": "Run open-weight models on this workspace's GPU.",
+  "tooltip": "Run open-weight models on this workspace's GPU, or on its CPU when it has no usable NVIDIA GPU.",
   "presenter": "LocalLlmSettings",
   "type": "global",
   "autoPin": false,

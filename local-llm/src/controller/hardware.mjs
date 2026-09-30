@@ -6,7 +6,10 @@
 // The GPU's memory model decides the hardware profile (DS005): `dedicated`
 // when nvidia-smi reports its memory in MiB, `unified` when the GPU shares
 // system memory (it reports no memory figures and ATS or HMM addressing, or
-// it is on the known-unified list), and anything else is unknown and refused.
+// it is on the known-unified list). Every GPU that cannot be used says why in
+// `state`: `absent` (no nvidia-smi), `unusable` (memory model unknown although
+// the device answered) or `unreadable` (a query failed); a usable GPU has no
+// state. The `cpu` profile is decided from these (profiles.mjs, decideProfile).
 
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
@@ -172,7 +175,8 @@ function csvRows(text) {
 /**
  * The GPU as nvidia-smi reports it: up to three queries in turn. A stop
  * (`signal`) ends the query in progress at once and throws an AbortError,
- * never a GPU that looks unavailable.
+ * never a GPU that looks unavailable. An unavailable result carries `state`
+ * (`absent`, `unusable` or `unreadable`); an available one keeps its shape.
  */
 export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI, env = process.env, signal } = {}) {
     const query = await run(execFileImpl, nvidiaSmi, [
@@ -193,10 +197,10 @@ export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI,
                     + 'revoked: run `ploinky gpu grant --agent local-llms/local-llm`; '
                     + 'not applied yet: run `ploinky start`; or the host has no usable GPU.')
             : `nvidia-smi failed: ${(query.stderr || query.error?.message || '').trim().slice(0, 300)}`;
-        return { available: false, reason };
+        return { available: false, state: query.error?.code === 'ENOENT' ? 'absent' : 'unreadable', reason };
     }
     const [first] = csvRows(query.stdout);
-    if (!first || first.length < 5) return { available: false, reason: 'nvidia-smi reported no GPU' };
+    if (!first || first.length < 5) return { available: false, state: 'unreadable', reason: 'nvidia-smi reported no GPU' };
     const [name, total, used, free, driver] = first;
     const memory = { totalBytes: mib(total), usedBytes: mib(used), freeBytes: mib(free) };
     const memoryNumeric = Object.values(memory).every(Number.isFinite);
@@ -204,15 +208,27 @@ export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI,
     const memoryModel = memoryModelOf({ memoryNumeric, device: facts?.device });
     if (memoryModel === 'unknown') {
         // Admission sizes every runner from the memory figures, so a GPU that
-        // gives none and is not known to share system memory is unknown, and
-        // every Run is refused rather than admitted blind.
+        // gives none and is not known to share system memory cannot be used.
+        // Whether it shares system memory is known only from the device query:
+        // when that failed the model is not known yet (a query can fail once),
+        // and only when it answered is the GPU unusable for good.
+        if (!facts) {
+            return {
+                available: false,
+                state: 'unreadable',
+                name,
+                driverVersion: driver,
+                reason: `nvidia-smi gave no memory figures for ${name} and its device query failed, so its memory model is not known yet`,
+            };
+        }
         return {
             available: false,
+            state: 'unusable',
             name,
             driverVersion: driver,
-            ...(facts || {}),
+            ...facts,
             reason: `nvidia-smi reports no memory figures for ${name} (total ${total}, used ${used}, free ${free}), `
-                + 'so this agent cannot size models for it and refuses every Run. '
+                + 'so this agent cannot use it and runs models on the CPU. '
                 + 'GPUs that share system memory are supported only when the driver reports ATS or HMM addressing.',
         };
     }
@@ -286,6 +302,23 @@ function readText(fsApi, file) {
     }
 }
 
+/**
+ * The container's memory limit and use from cgroup v2 (`memory.max`,
+ * `memory.current`), or null when there is no limit (`max`) or it cannot be
+ * read. The CPU profile caps its pool with it (DS005): /proc/meminfo shows the
+ * host's memory, not the container's.
+ */
+export function readCgroupMemory({ fsApi = fs } = {}) {
+    const bytes = (file) => {
+        const text = readText(fsApi, file);
+        const value = text !== null && /^\d+$/.test(text.trim()) ? Number(text.trim()) : null;
+        return Number.isSafeInteger(value) ? value : null;
+    };
+    const maxBytes = bytes('/sys/fs/cgroup/memory.max');
+    if (maxBytes === null) return null;
+    return { maxBytes, currentBytes: bytes('/sys/fs/cgroup/memory.current') };
+}
+
 // "0-3,8,10-11" -> [0, 1, 2, 3, 8, 10, 11]
 function parseCpuList(text) {
     const cpus = [];
@@ -355,6 +388,15 @@ export function defaultThreads(cores) {
 }
 
 /**
+ * The default CPU threads on the `cpu` profile (DS005): physical cores minus 1
+ * on hosts with four cores or fewer, where minus 2 would leave one or two
+ * threads, and minus 2 above that. A Podman machine of four CPUs gets 3.
+ */
+export function cpuDefaultThreads(cores) {
+    return cores <= 4 ? Math.max(1, cores - 1) : cores - 2;
+}
+
+/**
  * The CPUs of the highest-capacity class this process may run on, when sysfs
  * `cpu_capacity` shows cores of different capacity (DGX Spark: 10 Cortex-X925
  * at 997-1024 and 10 Cortex-A725 at 718-731); null when every allowed CPU has
@@ -408,5 +450,7 @@ export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signa
         memory: readMemory({ fsApi }),
         disk,
         cpus: os.availableParallelism?.() ?? os.cpus().length,
+        cores: physicalCoreCount({ fsApi }),
+        cgroupMemory: readCgroupMemory({ fsApi }),
     };
 }

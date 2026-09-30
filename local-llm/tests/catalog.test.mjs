@@ -37,7 +37,7 @@ test('the seed catalog is schema v3: sources by weight format, parameters and me
     assert.deepEqual(Object.keys(gpt.sources), ['gguf', 'ollama', 'hf']);
     assert.equal(gpt.sources.gguf.sha256, '27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901');
     assert.equal(gpt.sources.ollama.tag, 'gpt-oss:20b');
-    assert.deepEqual(gpt.profiles, ['dedicated', 'unified']);
+    assert.deepEqual(gpt.profiles, ['dedicated', 'unified', 'cpu']);
     assert.deepEqual([awq.profiles, exl3.profiles], [['dedicated'], ['dedicated']]);
     assert.deepEqual(Object.keys(gpt.recommended.dedicated), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'lmstudio']);
     // LM Studio gets the llama.cpp runner's gpt-oss placement, with flash attention on (it has no auto).
@@ -50,7 +50,7 @@ test('the seed catalog is schema v3: sources by weight format, parameters and me
     const schema = JSON.parse(fs.readFileSync(new URL('../catalog/schema.json', import.meta.url), 'utf8'));
     assert.equal(schema.$id, 'local-llm.catalog/v3');
     assert.deepEqual(Object.keys(schema.$defs.model.properties.sources.properties), Object.keys(WEIGHT_FORMATS));
-    assert.deepEqual(Object.keys(schema.$defs.model.properties.recommended.properties), ['dedicated', 'unified']);
+    assert.deepEqual(Object.keys(schema.$defs.model.properties.recommended.properties), ['dedicated', 'unified', 'cpu']);
 });
 
 test('an entry is validated per format; runner-keyed sources are refused', () => {
@@ -62,21 +62,29 @@ test('an entry is validated per format; runner-keyed sources are refused', () =>
     assert.throws(() => validateModel({ id: 'qwen-small', sources: { ollama: GGUF } }), /sources\.ollama\.type must be ollama/);
 });
 
-test('profiles default to both; recommended and validated are keyed by profile, then runner', () => {
+test('profiles default to every profile; recommended and validated are keyed by profile, then runner', () => {
     // `validated` is a measurement record: only a trusted seed entry carries one.
     const model = validateModel({
         id: 'qwen-small', sources: { gguf: GGUF },
         recommended: { dedicated: { 'llama.cpp': { ctxSize: 8192 } }, unified: { 'llama.cpp': { ctxSize: 32768 } } },
         validated: { unified: { 'llama.cpp': 'DGX Spark, b11159' } },
     }, { seed: true });
-    assert.deepEqual(model.profiles, ['dedicated', 'unified']);
+    assert.deepEqual(model.profiles, ['dedicated', 'unified', 'cpu']);
     assert.deepEqual(model.recommended.unified['llama.cpp'], { ctxSize: 32768 });
     assert.equal(model.validated.unified['llama.cpp'], 'DGX Spark, b11159');
     assert.equal(model.unified, null);
     assert.deepEqual(validateModel({ id: 'x-only', sources: { gguf: GGUF }, profiles: ['unified'] }).profiles, ['unified']);
-    for (const profiles of [[], ['cpu'], ['unified', 'unified'], 'unified']) {
-        assert.throws(() => validateModel({ id: 'bad-profiles', sources: { gguf: GGUF }, profiles }), /profiles must list/);
+    assert.deepEqual(validateModel({ id: 'cpu-only', sources: { gguf: GGUF }, profiles: ['cpu'] }).profiles, ['cpu']);
+    for (const profiles of [[], ['gpu'], ['unified', 'unified'], ['cpu', 'cpu'], 'unified']) {
+        assert.throws(() => validateModel({ id: 'bad-profiles', sources: { gguf: GGUF }, profiles }),
+            { message: /profiles must list one or more of dedicated, unified, cpu/ });
     }
+    // `recommended` and `validated` are keyed by cpu too, and an unknown profile is still refused.
+    const cpuKeyed = validateModel({ id: 'cpu-keyed', sources: { gguf: GGUF }, recommended: { cpu: { 'llama.cpp': { ctxSize: 4096 } } },
+        validated: { cpu: { 'llama.cpp': 'M1 Podman machine' } } }, { seed: true });
+    assert.deepEqual(cpuKeyed.recommended.cpu['llama.cpp'], { ctxSize: 4096 });
+    assert.throws(() => validateModel({ id: 'gpu-keyed', sources: { gguf: GGUF }, recommended: { gpu: { 'llama.cpp': {} } } }),
+        /recommended has an unknown profile 'gpu'/);
     // A v2 entry (recommended keyed by runner) is not valid v3.
     assert.throws(() => validateModel({ id: 'v2-entry', sources: { gguf: GGUF }, recommended: { 'llama.cpp': { ctxSize: 8192 } } }),
         /recommended has an unknown profile 'llama\.cpp'/);

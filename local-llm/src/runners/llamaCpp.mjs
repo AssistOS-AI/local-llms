@@ -25,6 +25,7 @@ export const llamaCppRunner = createLlamaServerRunner({
         loadModes: LOAD_MODES,
         loadArgs,
         unified: true,
+        cpu: true,
         jinja: (model) => Boolean(model?.requiresJinja),
         parseVersion,
     }),

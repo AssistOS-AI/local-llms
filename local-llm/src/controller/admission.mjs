@@ -351,21 +351,39 @@ export function admitTabbyApi({ model, source, params, gpu, memory, disk, remain
  * The checks every runner shares, then the runner's own policy for the
  * hardware profile: `runner.admit` sizes dedicated GPU memory and RAM (DS003),
  * `runner.admitUnified` the shared pool of a GPU that shares system memory
- * (DS005). A runner without a unified policy cannot run on unified memory.
+ * and `runner.admitCpu` the memory of a machine without a usable NVIDIA GPU
+ * (DS005). A runner without a policy for the profile cannot run in it. The
+ * `cpu` profile needs no GPU, so its branch comes before the GPU check;
+ * `decision` (why the profile is `cpu`) is only read by the CPU policies.
  *
- * @param {{ runner, model, source, params, snapshot, remainingDownloadBytes?, profile? }} input
+ * @param {{ runner, model, source, params, snapshot, remainingDownloadBytes?, profile?, decision? }} input
  * @returns {{ status: 'ok'|'incompatible'|'insufficient-now', reason, estimate, warnings }}
  */
-export function admit({ runner, model, source, params, snapshot, remainingDownloadBytes = 0, profile = undefined }) {
+export function admit({ runner, model, source, params, snapshot, remainingDownloadBytes = 0, profile = undefined, decision = undefined }) {
     if (!runner.supported || typeof runner.admit !== 'function') {
         return result('incompatible', runner.unsupportedReason || `${runner.displayName} is not supported in this release.`, {});
     }
     if (!source) {
         return result('incompatible', `${model.displayName} has no ${runner.displayName} source.`, {});
     }
+    if (profile === 'cpu') {
+        if (typeof runner.admitCpu !== 'function') {
+            return result('incompatible', `${runner.displayName} needs an NVIDIA GPU in this release; `
+                + 'on this machine models run on the CPU with the runners listed in the Runners tab.', {});
+        }
+        return runner.admitCpu({
+            model, source, params, gpu: snapshot?.gpu, memory: snapshot?.memory || {}, cgroupMemory: snapshot?.cgroupMemory ?? null,
+            disk: snapshot?.disk, remainingDownloadBytes, decision,
+        });
+    }
     const gpu = snapshot?.gpu;
     if (!gpu?.available) {
-        return result('incompatible', gpu?.reason || 'No GPU is available to this agent.', {});
+        const why = gpu?.reason || 'No GPU is available to this agent.';
+        // A GPU profile was committed and its GPU is gone or unreadable now: every Run is refused
+        // until local-llm restarts, which then decides the cpu profile (DS005).
+        const restart = profile === 'dedicated' || profile === 'unified'
+            ? ` This agent started with the ${profile} profile; restart local-llm to run on the CPU.` : '';
+        return result('incompatible', restart ? `${String(why).replace(/\.$/, '')}.${restart}` : why, {});
     }
     const current = gpu.memoryModel === 'unified' ? 'unified' : 'dedicated';
     const selected = profile ?? current;

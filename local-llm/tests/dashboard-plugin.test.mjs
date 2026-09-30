@@ -516,3 +516,111 @@ test('installing a proprietary runner shows its Terms, the internal-use rule and
     assert.doesNotMatch(agpl, /proprietary/);
     assert.match(installMessage({ id: 'vllm', install: { version: '0.30.0', totalBytes: 4e9, licence: { name: 'Apache-2.0' } } }), /Licence: Apache-2\.0\.$/);
 });
+
+// The cpu profile (DS005): no NVIDIA GPU is usable, so the dashboard shows the CPU, its memory and the disk.
+const CPU_MIB = 1024 * 1024;
+const CPU_REASON = 'No GPU is attached to this agent: GPU not applied to this Box yet';
+const CPU_HARDWARE = {
+    gpu: { available: false, state: 'absent', reason: CPU_REASON },
+    memory: { totalBytes: 6036128 * 1024, availableBytes: 3122576 * 1024 },
+    disk: { freeBytes: 100_000 * CPU_MIB, totalBytes: 400_000 * CPU_MIB },
+    cpus: 4,
+    cores: 4,
+};
+const CPU_LIMITS = { floorBytes: 618099508, hostReserveBytes: 1536 * CPU_MIB, poolBytes: 6036128 * 1024, availableBytes: 3122576 * 1024 };
+
+test('on the cpu profile the cards show the CPU, memory with its floor and disk, and why no NVIDIA GPU is used', async () => {
+    const html = hardwareCardsHtml(CPU_HARDWARE, null, { profile: 'cpu', decision: { cause: 'absent', reason: `${CPU_REASON}.` }, limits: CPU_LIMITS });
+    assert.deepEqual([...html.matchAll(/data-llm-card="([a-z]+)"/g)].map((match) => match[1]), ['compute', 'memory', 'disk']);
+    assert.match(html, />CPU · 4 cores</);
+    assert.match(html, /No NVIDIA GPU is used: no NVIDIA GPU is attached\. No GPU is attached to this agent: GPU not applied to this Box yet\./);
+    assert.match(html, />3,049 MiB of 5,895 MiB</);
+    assert.match(html, /keeps 589 MiB free for the workspace/);
+    assert.match(html, /<meter[^>]*aria-label="Memory in use"/);
+    assert.match(html, /Disk free/);
+    assert.doesNotMatch(html, /GPU memory|RAM available|Unified memory|NaN|null|undefined/);
+    // Every cause leads its own wording.
+    const lead = (cause) => hardwareCardsHtml(CPU_HARDWARE, null, { profile: 'cpu', decision: { cause, reason: 'r' }, limits: CPU_LIMITS });
+    assert.match(lead('unusable'), /the NVIDIA GPU cannot be used\. r\./);
+    assert.match(lead('mismatch'), /this image&#39;s CUDA runners were not built for this GPU\. r\./);
+    assert.match(lead('unreadable-timeout'), /the NVIDIA GPU could not be read for 60 s\. r\./);
+    assert.match(lead(undefined), /No NVIDIA GPU is used: no NVIDIA GPU is used\./);
+    // Without the controller's limits the card falls back to the snapshot, and no missing value reaches it.
+    const bare = hardwareCardsHtml({ memory: {}, disk: {} }, null, { profile: 'cpu' });
+    assert.doesNotMatch(bare, /NaN|null|undefined/);
+    assert.match(bare, />CPU</);
+    assert.match(hardwareCardsHtml({ ...CPU_HARDWARE, cores: 1 }, null, { profile: 'cpu', limits: CPU_LIMITS }), />CPU · 1 core</);
+    assert.match(hardwareCardsHtml({ ...CPU_HARDWARE, cores: undefined }, null, { profile: 'cpu', limits: CPU_LIMITS }), />CPU · 4 cores</, 'the logical CPUs when the cores are not reported');
+    assert.match(hardwareCardsHtml(CPU_HARDWARE, null, { profile: 'cpu', limits: { ...CPU_LIMITS, poolBytes: 4096 * CPU_MIB, availableBytes: 2048 * CPU_MIB } }), />2,048 MiB of 4,096 MiB</, 'a container limit caps the pool');
+    // Without options, or on another profile, the cards are exactly what they were.
+    const unified = { gpu: { available: true, memoryModel: 'unified', name: 'NVIDIA GB10', processes: [] }, memory: CPU_HARDWARE.memory, disk: CPU_HARDWARE.disk };
+    for (const hardware of [CPU_HARDWARE, unified]) {
+        assert.equal(hardwareCardsHtml(hardware, null, { profile: 'dedicated', decision: null, limits: null }), hardwareCardsHtml(hardware, null));
+        assert.equal(hardwareCardsHtml(hardware, null, {}), hardwareCardsHtml(hardware));
+    }
+    assert.match(hardwareCardsHtml(CPU_HARDWARE), /data-llm-card="gpu"[\s\S]*Not available/);
+    // The run form's estimate says what stays free; the status card claims no GPU layers when there are none.
+    const estimate = estimateHtml({ admission: { status: 'ok', estimate: { ramBytes: 1413 * CPU_MIB, floorBytes: 618099508 } } }, CPU_HARDWARE);
+    assert.match(estimate, /RAM about 1,413 MiB of 3,049 MiB available, keeps 589 MiB free/);
+    assert.doesNotMatch(estimateHtml({ admission: { status: 'ok', estimate: { ramBytes: 1413 * CPU_MIB } } }, CPU_HARDWARE), /keeps/);
+    const running = (offloaded) => statusCardHtml({ phase: 'ready', deployment: { modelId: 'm', runnerId: 'llama.cpp', phase: 'ready' },
+        runnerReport: { device: 'CPU (armv8.2_2)', offloaded, totalMiB: 634 } });
+    assert.match(running({ layers: 0, of: 25 }), /device CPU \(armv8\.2_2\) · buffers 634 MiB/);
+    assert.doesNotMatch(running({ layers: 0, of: 25 }), /layers on the GPU/);
+    assert.match(running({ layers: 25, of: 25 }), /25\/25 layers on the GPU/);
+    // The presenter hands the overview's profile, decision and limits to the cards.
+    const presenter = new dashboardModule.LocalLlmDashboard({ isConnected: true, querySelector: () => null, querySelectorAll: () => [] }, () => {});
+    presenter.hardware = { innerHTML: '' };
+    presenter.overview = { profile: 'cpu', profileDecision: { cause: 'absent', reason: CPU_REASON }, limits: CPU_LIMITS, hardware: CPU_HARDWARE };
+    presenter.renderHardware();
+    assert.match(presenter.hardware.innerHTML, /data-llm-card="compute"[\s\S]*CPU · 4 cores[\s\S]*keeps 589 MiB free/);
+    presenter.overview = { hardware: CPU_HARDWARE };
+    presenter.renderHardware();
+    assert.match(presenter.hardware.innerHTML, /data-llm-card="gpu"/, 'no profile: the cards of today');
+});
+
+test('a runner with no policy for the profile gets no column and no Install; while undecided every runner keeps its column', () => {
+    const reason = 'Ollama needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.';
+    const cpuRunners = [
+        { id: 'llama.cpp', displayName: 'llama.cpp', supported: true, installed: true, paramSchema: { type: 'object' } },
+        { id: 'ollama', displayName: 'Ollama', supported: true, installed: true, paramSchema: null, profileUnsupportedReason: reason },
+        { id: 'vllm', displayName: 'vLLM', supported: true, installed: false, paramSchema: null, profileUnsupportedReason: 'vLLM needs an NVIDIA GPU in this release.',
+            install: { version: '0.30.0', totalBytes: 4.2e9, licence: { name: 'Apache-2.0', url: 'https://x.example/L' }, installed: false, runnable: false, state: null } },
+        { id: 'tabby', displayName: 'Tabby', supported: true, installed: true, paramSchema: null, profileUnsupportedReason: 'Tabby needs an NVIDIA GPU in this release.',
+            install: { version: '1', totalBytes: 3e9, licence: { name: 'AGPL-3.0', url: 'https://x.example/T' }, installed: true, runnable: true, state: { phase: 'installed' } } },
+    ];
+    assert.deepEqual(tableRunners(cpuRunners).map((runner) => runner.id), ['llama.cpp']);
+    // Undecided: no runner carries the reason, so every runner that can run keeps its column.
+    const undecided = cpuRunners.map(({ profileUnsupportedReason: _reason, ...runner }) => runner);
+    assert.deepEqual(tableRunners(undecided).map((runner) => runner.id), ['llama.cpp', 'ollama', 'vllm', 'tabby']);
+    const html = runnersPanelHtml(cpuRunners);
+    assert.match(html, /Ollama needs an NVIDIA GPU in this release/);
+    assert.doesNotMatch(html, /data-local-action="installRunner/, 'no Install for a runner with no policy for the profile');
+    assert.match(html, /data-local-action="uninstallRunner tabby"/, 'an installed one can still be uninstalled to free the disk');
+    assert.match(runnersPanelHtml(undecided), /data-local-action="installRunner vllm"/);
+    // The platform's reason still comes first for a runner the image lacks.
+    const lacking = runnersPanelHtml([{ ...cpuRunners[1], supported: false, unsupportedReason: 'Ollama is not available on this platform: this image does not include it.' }]);
+    assert.match(lacking, /not available on this platform/);
+    assert.doesNotMatch(lacking, /needs an NVIDIA GPU/);
+    // The Runners intro names the runners that run models on the CPU.
+    // (Tabby and vLLM are installed on demand, so they are not "in this image".)
+    assert.match(runnersIntroText(cpuRunners, { profile: 'cpu' }), /^In this image: llama\.cpp, Ollama\. On this machine models run on the CPU, with: llama\.cpp\. Other runners are installed here/);
+    assert.equal(runnersIntroText(cpuRunners), runnersIntroText(cpuRunners, { profile: 'dedicated' }));
+    assert.doesNotMatch(runnersIntroText(cpuRunners, { profile: 'dedicated' }), /run models on the CPU/);
+    // The run form says why such a runner cannot run.
+    const presenter = new dashboardModule.LocalLlmDashboard({ isConnected: true, querySelector: () => null, querySelectorAll: () => [] }, () => {});
+    const noteFor = (runner) => {
+        const note = { textContent: '' };
+        const find = (selector) => (selector === '[data-run-runner-note]' ? note : selector === '[data-run-basic]' || selector === '[data-run-params-advanced]' ? { innerHTML: '' } : null);
+        presenter.overview = { runners: [runner], models: [{ id: 'm', runners: { [runner.id]: { download: { state: 'absent' }, admission: { status: 'incompatible' } } } }] };
+        presenter.runForm = { querySelector: find, querySelectorAll: () => [] };
+        presenter.runModelId = 'm';
+        presenter.runnerSelect = { value: runner.id };
+        return { note, run: () => presenter.renderRunFields() };
+    };
+    return (async () => {
+        const probe = noteFor(cpuRunners[1]);
+        await probe.run();
+        assert.match(probe.note.textContent, /Ollama needs an NVIDIA GPU in this release/);
+    })();
+});

@@ -45,10 +45,19 @@ export function defaultPorts(runners = RUNNERS) {
     return Object.freeze(ports);
 }
 
+// Why a runner without parameters for a decided profile cannot run there (DS005).
+const PROFILE_REFUSALS = Object.freeze({
+    dedicated: (name) => `${name} has no parameters for the dedicated profile in this release.`,
+    unified: (name) => `${name} is not available on a GPU that shares system memory in this release.`,
+    cpu: (name) => `${name} needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.`,
+});
+
 /**
  * What the overview and the dashboard learn about each runner, with its
  * parameter schema for the hardware profile (null where it has no policy for
- * that profile, DS005).
+ * that profile, DS005). `profileUnsupportedReason` is added only when a decided
+ * profile has no schema for the runner; an undecided profile (null) adds none,
+ * so every runner keeps its place until the profile is known.
  */
 export function runnerSummary(runner, profile = 'dedicated') {
     const { id, displayName, weightFormat, pinnedVersion, supported } = runner;
@@ -59,6 +68,8 @@ export function runnerSummary(runner, profile = 'dedicated') {
         id, displayName, weightFormat, pinnedVersion, supported, paramSchema,
         basicParams: runner.basicParams || [],
         moeParams: runner.moeParams || [],
+        ...(profile && paramSchema === null && Object.hasOwn(PROFILE_REFUSALS, profile)
+            ? { profileUnsupportedReason: PROFILE_REFUSALS[profile](displayName) } : {}),
     };
 }
 

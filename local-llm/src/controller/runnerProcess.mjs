@@ -60,11 +60,41 @@ const BUFFER_PATTERNS = Object.freeze([
     ['computeMiB', /CUDA0 compute buffer size =\s+([\d.]+) MiB/],
 ]);
 
-/** What the runner itself reports about its GPU use, from its log lines. */
-export function parseRunnerReport(lines) {
+// On the cpu profile llama.cpp logs its buffers under CPU names ("CPU_Mapped model buffer
+// size", "CPU KV buffer size", "CPU compute buffer size"). They are read only when the
+// run reports no CUDA buffer, so a GPU run's report is what it always was, even though
+// its offloaded layers leave CPU lines of their own.
+const CPU_BUFFER_PATTERNS = Object.freeze([
+    ['modelMiB', /\bCPU(?:_[A-Za-z0-9]+)? model buffer size =\s+([\d.]+) MiB/],
+    ['kvMiB', /\bCPU(?:_[A-Za-z0-9]+)? KV buffer size =\s+([\d.]+) MiB/],
+    ['computeMiB', /\bCPU(?:_[A-Za-z0-9]+)? compute buffer size =\s+([\d.]+) MiB/],
+]);
+
+/**
+ * What the runner itself reports about its GPU or CPU use, from its log lines.
+ * `profile` is the deployment's: on `cpu` the CPU lines are read whenever no
+ * CUDA device or buffer was reported; without it they are read only when the
+ * log shows no CUDA backend either, so a GPU run that has not yet logged its
+ * device never shows a CPU.
+ */
+export function parseRunnerReport(lines, { profile = null } = {}) {
     const report = { modelMiB: null, kvMiB: null, computeMiB: null, offloaded: null, device: null };
     const sums = { kvMiB: 0 };
+    const cpu = { modelMiB: null, kvMiB: null, computeMiB: null };
+    let cpuBackend = null;
+    let cudaBackend = false;
     for (const { line } of lines) {
+        for (const [key, pattern] of CPU_BUFFER_PATTERNS) {
+            const match = pattern.exec(line);
+            if (!match) continue;
+            // Weights and KV can sit in more than one CPU buffer (mapped, repacked); the compute buffer is one.
+            cpu[key] = key === 'computeMiB' ? Number(match[1]) : (cpu[key] ?? 0) + Number(match[1]);
+        }
+        // "load_backend: loaded CPU backend from /opt/llama.cpp/libggml-cpu-armv8.2_2.so": the variant llama.cpp picked.
+        const backend = /load_backend: loaded CPU backend from \S*libggml-cpu-([A-Za-z0-9._+-]+)\.so/.exec(line);
+        if (backend) cpuBackend = `CPU (${backend[1]})`;
+        else if (/load_backend: loaded CPU backend from \S*libggml-cpu\.so/.test(line)) cpuBackend = 'CPU';
+        if (/load_backend: loaded CUDA backend/.test(line)) cudaBackend = true;
         for (const [key, pattern] of BUFFER_PATTERNS) {
             const match = pattern.exec(line);
             if (!match) continue;
@@ -82,6 +112,11 @@ export function parseRunnerReport(lines) {
         // ik_llama.cpp names the GPU in its CUDA init lines instead.
         const listed = /^\s*Device (\d+): ([^,]+), compute capability/.exec(line);
         if (listed) report.device = `CUDA${listed[1]} (${listed[2]})`;
+    }
+    // A run with no CUDA device or buffer is on the CPU (a CUDA build loads its CPU backend too, so that line alone says nothing).
+    if ((profile === 'cpu' || !cudaBackend) && report.device === null && ['modelMiB', 'kvMiB', 'computeMiB'].every((key) => report[key] === null)) {
+        Object.assign(report, cpu);
+        report.device = cpuBackend;
     }
     const known = ['modelMiB', 'kvMiB', 'computeMiB'].map((key) => report[key]).filter((value) => value !== null);
     report.totalMiB = known.length ? Math.round(known.reduce((total, value) => total + value, 0)) : null;

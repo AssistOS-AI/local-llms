@@ -39,7 +39,15 @@ import {
     unreapedQueries as hardwareUnreaped,
     untilStopped,
 } from './hardware.mjs';
-import { UNIFIED, profileOf } from './profiles.mjs';
+import {
+    UNIFIED,
+    UNREADABLE_COMMIT_MS,
+    capabilityMismatch,
+    cpuFloorBytes,
+    cpuHostReserveBytes,
+    cpuPool,
+    decideProfile,
+} from './profiles.mjs';
 import { createRunnerInstaller, runTool } from './runnerInstaller.mjs';
 import { loadRunnerLock } from './runnerLock.mjs';
 import { createLogBuffer, parseRunnerReport, startRunnerProcess } from './runnerProcess.mjs';
@@ -53,7 +61,10 @@ const TRANSFER_PHASES = new Set(['downloading', 'copying', 'verifying']);
 const REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
 const PROBE_TIMEOUT_MS = 10_000;
 const IMAGE_CONTRACT = '/opt/local-llm/source.contract';
-const PROFILE_UNDECIDED = 'No usable GPU has been seen yet, so the hardware profile is not decided; run again once the GPU can be read.';
+const PROFILE_UNDECIDED = 'No usable GPU has been seen yet, so the hardware profile is not decided; run again once the GPU can be read. '
+    + 'If the GPU is still unreadable 60 s after the first failed read, the next Run uses the CPU.';
+// Recorded in the state file once the `cpu` profile has been added to stored two-profile user entries (DS002).
+const CPU_MIGRATION = '2026-09-30';
 
 /**
  * What the image says about itself (`/opt/local-llm/source.contract`, one
@@ -218,10 +229,18 @@ export function createController({
     // Set when the memory guard stopped a deployment's runner: its message is
     // the deployment's error, not "exited unexpectedly".
     let memoryStop = null;
-    // The hardware profile, decided once from the first snapshot and kept for
-    // the container's lifetime; a later snapshot that disagrees is reported by
-    // admission, not acted on (DS005).
+    // The hardware profile, decided once from the first snapshot that decides it
+    // and kept for the container's lifetime; a later snapshot that disagrees is
+    // reported by admission, not acted on (DS005). `profileDecision` says why
+    // (cause and reason) and `unreadable` is the window of a GPU that could not
+    // be read: it is in memory only, and a restart starts it again.
     let profile = fixedProfile;
+    let profileDecision = fixedProfile ? { profile: fixedProfile, cause: 'fixed', reason: null, gpuName: null, decidedAt: null } : null;
+    let unreadable = null;
+    // The reason of the last snapshot that left the profile undecided.
+    let undecidedReason = null;
+    // The compute capabilities the image's CUDA runners were built for (arm64: 12.1); the amd64 image lists none.
+    const capabilities = String(imageContract?.gpu_compute_capabilities || '').split(',').map((cap) => cap.trim()).filter(Boolean);
     // The unified guard's view of the current runner (in memory only).
     let guardStats = null;
     // Saved parameter sets already reported as no longer valid.
@@ -230,8 +249,23 @@ export function createController({
     // State this controller cannot read is reported, never misread (catalog v3
     // migrates nothing): a registry entry of an earlier schema stays in the
     // state file, is left out of the catalog, and is named here and in the overview.
-    for (const entry of unsupportedRegistryEntries(state.registry)) {
+    for (const entry of unsupportedRegistryEntries(state.registry, seedCatalog)) {
         log.append('controller', `model entry ${entry.id ?? '(no id)'} is not supported by this catalog and is not offered: ${entry.reason}`);
+    }
+
+    // The one change within catalog v3 that arrives with the `cpu` profile (DS002):
+    // a stored user entry that lists both GPU profiles (the old default, "every
+    // profile") also gets `cpu`, once; an entry that lists one profile keeps it.
+    // The flag is set even when the registry is empty, and the save below keeps it.
+    if (!state.cpuProfileMigration) {
+        for (const entry of state.registry) {
+            const listed = entry?.profiles;
+            if (Array.isArray(listed) && listed.length === 2 && listed.includes('dedicated') && listed.includes('unified')) {
+                listed.push('cpu');
+                log.append('controller', `model entry ${entry.id ?? '(no id)'} is now also offered on the cpu profile`);
+            }
+        }
+        state.cpuProfileMigration = CPU_MIGRATION;
     }
 
     const stores = createWeightStores({
@@ -274,16 +308,55 @@ export function createController({
         stateStore.save(state);
     }
 
-    // The profile is fixed by the first snapshot that shows a usable GPU; a
+    // The profile is fixed by the first snapshot that decides it (decideProfile,
+    // DS005): a usable GPU, or positive evidence that none can be used (`cpu`). A
     // transient failure (a cold nvidia-smi, a GPU not attached yet) leaves it
-    // undecided. Parameters are normalized, admitted, launched and guarded
-    // under the one committed profile: a Run is refused while it is undecided.
+    // undecided until 60 s after the first one, then it is `cpu`. Parameters are
+    // normalized, admitted, launched and guarded under the one committed profile:
+    // a Run is refused while it is undecided.
     function commitProfile(snap) {
-        if (!profile && snap?.gpu?.available) {
-            profile = profileOf(snap);
-            log.append('controller', `hardware profile: ${profile}${snap.gpu.name ? ` (${snap.gpu.name})` : ''}`);
+        if (profile) return profile;
+        const decision = decideProfile({ snapshot: snap, capabilities, unreadable, nowMs: now().getTime(), commitAfterMs: UNREADABLE_COMMIT_MS });
+        unreadable = decision.unreadable;
+        if (!decision.profile) {
+            undecidedReason = decision.reason;
+            return null;
         }
+        profile = decision.profile;
+        profileDecision = {
+            profile, cause: decision.cause, reason: decision.reason, gpuName: snap?.gpu?.name ?? null, decidedAt: now().toISOString(),
+        };
+        const because = profile === 'cpu' ? `${decision.cause}: ${String(decision.reason).replace(/\s+/g, ' ').slice(0, 200)}` : snap.gpu.name;
+        log.append('controller', `hardware profile: ${profile}${because ? ` (${because})` : ''}`);
         return profile;
+    }
+
+    // What the overview and status say about the decision (a copy).
+    function publicDecision() {
+        return profileDecision ? { ...profileDecision } : null;
+    }
+
+    // The decision the CPU admission reads: why this is the CPU and, when it
+    // was decided because the GPU stayed unreadable, whether that GPU would be
+    // chosen now (a restart would use it; DS005).
+    function decisionForAdmission(snap) {
+        if (profile !== 'cpu' || !profileDecision) return undefined;
+        const gpuRecovered = profileDecision.cause === 'unreadable-timeout'
+            && ['dedicated', 'unified'].includes(decideProfile({ snapshot: snap, capabilities, unreadable: null, nowMs: now().getTime() }).profile);
+        return { ...profileDecision, gpuRecovered };
+    }
+
+    // The pool limits the dashboard shows (DS005): the constants of the unified
+    // profile, and on the CPU the reserve and floor of this machine's pool.
+    function limitsFor(snap) {
+        if (profile === 'unified') return { floorBytes: UNIFIED.floorBytes, hostReserveBytes: UNIFIED.hostReserveBytes };
+        if (profile !== 'cpu') return null;
+        const pool = cpuPool(snap?.memory, snap?.cgroupMemory);
+        if (!Number.isFinite(pool.totalBytes)) return null;
+        return {
+            floorBytes: cpuFloorBytes(pool.totalBytes), hostReserveBytes: cpuHostReserveBytes(pool.totalBytes),
+            poolBytes: pool.totalBytes, availableBytes: pool.availableBytes,
+        };
     }
 
     // A fresh snapshot that stops with the drain and, for a pending Run or a
@@ -330,7 +403,8 @@ export function createController({
             if (error.code === 'shutting_down' || error.code === 'aborted') throw error;
         }
         if (commitProfile(snap)) return profile;
-        const gpuReason = snap?.gpu?.reason ? `${String(snap.gpu.reason).replace(/\.$/, '')}. ` : '';
+        const undecided = snap?.gpu?.reason || undecidedReason;
+        const gpuReason = undecided ? `${String(undecided).replace(/\.$/, '')}. ` : '';
         const admission = { status: 'incompatible', reason: `${gpuReason}${PROFILE_UNDECIDED}`, estimate: { isEstimate: true }, warnings: [] };
         throw new LocalLlmError('admission_incompatible', admission.reason, { admission });
     }
@@ -366,13 +440,13 @@ export function createController({
     // The GPUs the image's CUDA runners were built for (arm64: 12.1). The amd64
     // image names none, and nothing is checked there.
     function gpuMismatch(snap) {
-        const listed = String(imageContract?.gpu_compute_capabilities || '').split(',').map((cap) => cap.trim()).filter(Boolean);
-        const gpu = snap?.gpu;
-        if (!listed.length || !gpu?.available) return null;
-        const capability = gpu.device?.computeCapability;
-        if (capability && listed.includes(capability)) return null;
-        return `This image's runners are built for GPUs of compute capability ${listed.join(', ')}; `
-            + `${gpu.name} ${capability ? `is ${capability}` : 'did not report its compute capability'}.`;
+        return capabilityMismatch(snap?.gpu, capabilities);
+    }
+
+    // Why a runner has no policy for the committed profile, or null (DS005): it
+    // has no parameter schema for it, as with every runner but llama.cpp on the CPU.
+    function profileRefusal(definition, selected = profile) {
+        return selected ? runnerSummary(definition, selected).profileUnsupportedReason ?? null : null;
     }
 
     // Admission with the checks the controller owns (availability, the image's
@@ -383,11 +457,15 @@ export function createController({
         const refuse = (reason) => ({ status: 'incompatible', reason, estimate: { isEstimate: true }, warnings: [] });
         const availability = availabilityOf(definition);
         if (!availability.available) return refuse(availability.reason);
-        const mismatch = gpuMismatch(snap);
+        // On the CPU no GPU is used, so the GPUs the image was built for do not matter.
+        const mismatch = selected === 'cpu' ? null : gpuMismatch(snap);
         if (mismatch) return refuse(mismatch);
         // A snapshot without a GPU is refused by admit() with the GPU's own reason.
         if (!selected && snap?.gpu?.available) return refuse(PROFILE_UNDECIDED);
-        return admit({ runner: definition, model, source, params, snapshot: snap, remainingDownloadBytes, profile: selected || undefined });
+        return admit({
+            runner: definition, model, source, params, snapshot: snap, remainingDownloadBytes, profile: selected || undefined,
+            decision: selected === 'cpu' ? decisionForAdmission(snap) : undefined,
+        });
     }
 
     function findModel(modelId) {
@@ -551,6 +629,8 @@ export function createController({
         const snap = await takeSnapshot();
         commitProfile(snap);
         const runnerList = [];
+        // Why each runner has no policy for the decided profile (null while undecided).
+        const refusals = {};
         for (const definition of Object.values(runners)) {
             const gate = gateOf(definition);
             const availability = availabilityOf(definition);
@@ -559,8 +639,10 @@ export function createController({
             const info = availability.available
                 ? await runnerInfo(definition.id)
                 : { installed: false, version: null, reason: availability.reason };
+            const summary = runnerSummary(definition, profile);
+            refusals[definition.id] = summary.profileUnsupportedReason ?? null;
             runnerList.push({
-                ...runnerSummary(definition, profile),
+                ...summary,
                 ...(availability.available ? {} : { supported: false, unsupportedReason: availability.reason }),
                 ...info,
                 enabled: gate.enabled,
@@ -597,7 +679,9 @@ export function createController({
                 let params = null;
                 let paramError = null;
                 const usable = definition.supported && availabilityOf(definition).available;
-                if (usable) {
+                // A runner with no policy for the profile has no parameters to show, and says why, not a ParamError.
+                const refusal = refusals[definition.id];
+                if (usable && !refusal) {
                     try { params = effectiveParams(model, definition.id); } catch (error) { paramError = error.message; }
                 }
                 const disk = definition.supported ? weights[definition.weightFormat].download : null;
@@ -611,7 +695,8 @@ export function createController({
                     context: params && definition.describeContext ? definition.describeContext(params, { model, profile: profile || 'dedicated' }) : null,
                     admission: !availabilityOf(definition).available
                         ? admitHere({ definition, model, source, params: {}, snap })
-                        : !gate.enabled ? disabledAdmission(gate) : paramError
+                        : !gate.enabled ? disabledAdmission(gate) : refusal
+                        ? { status: 'incompatible', reason: refusal, estimate: { isEstimate: true }, warnings: [] } : paramError
                         ? { status: 'incompatible', reason: paramError, estimate: {}, warnings: [] }
                         : admitHere({ definition, model, source, params: params || {}, snap, remainingDownloadBytes: remaining }),
                 };
@@ -634,10 +719,13 @@ export function createController({
         }
         return {
             profile,
+            // Why: the cause and reason of the decision (null while undecided).
+            profileDecision: publicDecision(),
+            limits: limitsFor(snap),
             hardware: snap,
             runners: runnerList,
-            // Registry entries this catalog cannot read; remove them and add the model again.
-            unsupportedModels: unsupportedRegistryEntries(state.registry),
+            // Registry entries this catalog cannot read, or that a seed's id hides; remove them and add the model again.
+            unsupportedModels: unsupportedRegistryEntries(state.registry, seedCatalog),
             models,
             deployment: publicDeployment(),
             gatewayModel: 'soul_gateway/local-llms/local-llm/default',
@@ -646,14 +734,15 @@ export function createController({
     }
 
     async function status({ sinceSeq = 0 } = {}) {
-        await currentProfile();
+        // One snapshot serves the profile decision and the GPU the status shows.
+        let snap = null;
+        try {
+            snap = await takeSnapshot();
+        } catch {}
+        commitProfile(snap);
         const deployment = publicDeployment();
         const lines = log.since(Number(sinceSeq) || 0);
-        let gpu = null;
-        try {
-            const snap = await takeSnapshot();
-            gpu = snap.gpu;
-        } catch {}
+        const gpu = snap?.gpu ?? null;
         const definition = deployment && Object.hasOwn(runners, deployment.runnerId) ? runners[deployment.runnerId] : null;
         const parseReport = definition?.parseReport || parseRunnerReport;
         return {
@@ -662,10 +751,11 @@ export function createController({
             logs: lines,
             nextSeq: log.seq,
             gpu,
-            runnerReport: parseReport(log.all().filter((line) => line.seq > runnerLogStart)),
+            runnerReport: parseReport(log.all().filter((line) => line.seq > runnerLogStart), { profile: deployment?.profile ?? profile }),
             context: describeDeploymentContext(definition, deployment),
             lastCompletion,
             profile: profile || null,
+            profileDecision: publicDecision(),
             memoryGuard: guardStats ? { ...guardStats } : null,
         };
     }
@@ -715,6 +805,9 @@ export function createController({
             apiKey: runner.apiKey || null,
             model: definition.chatModel(deployment),
             requestOptions: definition.requestOptions?.(deployment.params) ?? null,
+            // The chat responder sizes its completion budget by it (DS001). Only the cpu profile
+            // has a budget of its own, so the other profiles' chat target stays what it was.
+            ...(deployment.profile === 'cpu' ? { profile: 'cpu' } : {}),
         };
     }
 
@@ -829,34 +922,40 @@ export function createController({
     // sampled every 250 ms in every phase; below the floor, or when
     // /proc/meminfo cannot be read, or under heavy memory pressure with
     // MemAvailable already low, the runner's process group is killed at once.
-    // It is a backstop, not protection: one load allocates faster than any
-    // sampling can follow, so admission must cover the whole known allocation.
+    // The cpu profile is guarded the same way, against the floor its admission
+    // recorded (a share of the pool, not the unified 8 GiB). It is a backstop,
+    // not protection: one load allocates faster than any sampling can follow,
+    // so admission must cover the whole known allocation.
     function startMemoryGuard(deployment, current) {
         const unified = deployment.profile === 'unified';
-        const floor = unified ? UNIFIED.floorBytes : deployment.admission?.estimate?.ramFloorBytes;
+        // The pool profiles: one pool of memory, every runner watched in every phase.
+        const pooled = unified || deployment.profile === 'cpu';
+        const floor = unified ? UNIFIED.floorBytes
+            : deployment.profile === 'cpu' ? deployment.admission?.estimate?.floorBytes
+                : deployment.admission?.estimate?.ramFloorBytes;
         if (!Number.isFinite(floor) || floor <= 0) return () => {};
         let timer = null;
         let cancelled = false;
-        if (unified) guardStats = { floorBytes: floor, minAvailableBytes: null, maxPressureAvg10: null, samples: 0 };
+        if (pooled) guardStats = { floorBytes: floor, minAvailableBytes: null, maxPressureAvg10: null, samples: 0 };
         const schedule = () => {
             if (cancelled) return;
             const ready = state.deployment?.id === deployment.id && state.deployment.phase === 'ready';
-            timer = setTimeout(tick, unified ? unifiedGuardMs : (ready ? memoryGuardReadyMs : memoryGuardLoadMs));
+            timer = setTimeout(tick, pooled ? unifiedGuardMs : (ready ? memoryGuardReadyMs : memoryGuardLoadMs));
             timer.unref?.();
         };
         const breach = (message) => {
             cancelled = true;
-            stopForMemory(deployment, current, message, { kill: unified }).catch(() => {});
+            stopForMemory(deployment, current, message, { kill: pooled }).catch(() => {});
         };
         const tick = () => {
-            // Unified: watched until the process exits, through a graceful Stop
+            // Pool profiles: watched until the process exits, through a graceful Stop
             // or Replace too (the exit cancels the guard). Dedicated: while current.
-            if (cancelled || (!unified && runner !== current)) return;
+            if (cancelled || (!pooled && runner !== current)) return;
             let available = null;
             try {
                 available = readMemory().availableBytes;
             } catch {}
-            if (unified) {
+            if (pooled) {
                 const stats = guardStats;
                 if (!Number.isFinite(available)) {
                     breach('stopped: host memory cannot be read (/proc/meminfo), so the runner cannot be watched');
@@ -1233,6 +1332,9 @@ export function createController({
         // Before anything is downloaded: a runner this image does not have (DS005).
         const availability = availabilityOf(definition);
         if (!availability.available) throw new LocalLlmError('runner_unavailable', availability.reason, { runner: runnerId });
+        // A runner with no policy for the profile (every runner but llama.cpp on the CPU) is refused before any lookup or download.
+        const refusal = profileRefusal(definition);
+        if (refusal) throw new LocalLlmError('runner_unavailable', refusal, { runner: runnerId });
         assertEnabled(definition);
         if (!source) throw new LocalLlmError('no_source', `${model.displayName} has no ${definition.displayName} source.`);
         if (installJob?.runnerId === runnerId) {
@@ -1541,9 +1643,11 @@ export function createController({
             if (!installable(runnerId)) {
                 throw new LocalLlmError('not_installable', `No installable runner '${String(runnerId)}' in this image's runner lock.`);
             }
-            // A switch may depend on the profile (vLLM on unified memory): on an image that could
-            // run there, decide it first if a snapshot can.
-            if (unifiedPossible) await currentProfile();
+            // A switch may depend on the profile (vLLM on unified memory), and a runner with no
+            // policy for it cannot be installed: decide the profile first if a snapshot can.
+            await currentProfile();
+            const refusal = profileRefusal(getRunner(runnerId));
+            if (refusal) throw new LocalLlmError('runner_unavailable', refusal, { runner: runnerId });
             assertEnabled(getRunner(runnerId));
             if (draining) throw new LocalLlmError('shutting_down', 'The agent is restarting; install again once it is back.');
             const entry = installer.entryFor(runnerId);

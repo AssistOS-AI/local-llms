@@ -247,7 +247,7 @@ export class LocalLlmDashboard {
 
     renderRunners() {
         const runners = this.overview?.runners || [];
-        const intro = runnersIntroText(runners);
+        const intro = runnersIntroText(runners, { profile: this.overview?.profile });
         if (this.runnersIntro && this.rendered.runnersIntro !== intro) {
             this.rendered.runnersIntro = intro;
             this.runnersIntro.textContent = intro;
@@ -296,7 +296,8 @@ export class LocalLlmDashboard {
 
     renderHardware() {
         const gpu = shouldPoll(this.status?.phase) ? this.status?.gpu : null;
-        this.setHtml('hardware', this.hardware, hardwareCardsHtml(this.overview?.hardware || {}, gpu));
+        const { profile = null, profileDecision = null, limits = null } = this.overview || {};
+        this.setHtml('hardware', this.hardware, hardwareCardsHtml(this.overview?.hardware || {}, gpu, { profile, decision: profileDecision, limits }));
     }
 
     renderModels() {
@@ -510,7 +511,7 @@ export class LocalLlmDashboard {
         if (note) {
             const reason = !runner.supported ? (runner.unsupportedReason || runner.reason)
                 : !runner.installed ? runner.reason
-                    : !runner.paramSchema ? 'not available on this hardware profile' : '';
+                    : !runner.paramSchema ? (runner.profileUnsupportedReason || 'not available on this hardware profile') : '';
             note.textContent = [
                 runner.version ? `${runnerLabel(runner.id)} ${runner.version}` : runnerLabel(runner.id),
                 reason,

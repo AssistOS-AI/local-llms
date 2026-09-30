@@ -324,7 +324,7 @@ export function validateModel(value, { seed = false } = {}) {
     const profiles = value.profiles === undefined ? [...PROFILES] : value.profiles;
     if (!Array.isArray(profiles) || profiles.length === 0 || profiles.some((profile) => !PROFILES.includes(profile))
         || new Set(profiles).size !== profiles.length) {
-        throw invalid(`profiles must list one or both of ${PROFILES.join(', ')}`, 'profiles');
+        throw invalid(`profiles must list one or more of ${PROFILES.join(', ')}`, 'profiles');
     }
     const recommended = validatePerProfile(value.recommended, 'recommended', (entry, field) => {
         if (!plainObject(entry)) throw invalid(`${field} must be an object of parameters`, field);
@@ -440,14 +440,22 @@ export function loadSeedCatalog(file = path.join(import.meta.dirname, '..', '..'
  * or an earlier user entry (two can exist after a downgrade hid one).
  */
 /**
- * Registry entries the catalog cannot read (an earlier schema, or invalid),
- * with the reason, so the overview can say so instead of hiding them silently.
+ * Registry entries the catalog cannot read (an earlier schema, or invalid) and
+ * valid ones a seed's id hides (a seed added after the entry was), with the
+ * reason, so the overview can say so instead of hiding them silently.
  */
-export function unsupportedRegistryEntries(registry = []) {
+export function unsupportedRegistryEntries(registry = [], seed = []) {
+    const seedIds = new Set(seed.map((model) => model.id));
     const unsupported = [];
     for (const entry of registry) {
         try {
-            validateModel(entry, { seed: false });
+            const model = validateModel(entry, { seed: false });
+            if (seedIds.has(model.id)) {
+                unsupported.push({
+                    id: model.id,
+                    reason: 'its id is also the id of a model that ships with this agent, which is offered instead; remove this entry, or add the model again under another id',
+                });
+            }
         } catch (error) {
             unsupported.push({ id: typeof entry?.id === 'string' ? entry.id.slice(0, 64) : null, reason: error.message });
         }

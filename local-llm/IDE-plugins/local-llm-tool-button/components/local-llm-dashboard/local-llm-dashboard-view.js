@@ -16,9 +16,13 @@ import {
 export const ACTIVE_PHASES = new Set(['downloading', 'copying', 'verifying', 'pulling', 'starting', 'loading', 'ready', 'stopping']);
 const DOWNLOAD_PHASES = new Set(['downloading', 'copying', 'verifying', 'pulling', 'paused']);
 
-/** The runners that get a column in the Models table: those that can run here, and that this deployment's operator did not leave off. */
+/**
+ * The runners that get a column in the Models table: those that can run here, that this deployment's
+ * operator did not leave off, and that have a policy for the hardware profile (DS005).
+ */
 export function tableRunners(runners = []) {
-    return (Array.isArray(runners) ? runners : []).filter((runner) => runner?.supported && runner.enabled !== false);
+    return (Array.isArray(runners) ? runners : [])
+        .filter((runner) => runner?.supported && runner.enabled !== false && !runner.profileUnsupportedReason);
 }
 
 function labelOf(runnerId, runners = []) {
@@ -58,8 +62,43 @@ function statCard(name, title, value, meta = '', extra = '') {
         </div>`;
 }
 
-/** The GPU, RAM and disk cards, or on a GPU that shares system memory, one unified-memory card and disk. `gpu` may come from a fresher status poll. */
-export function hardwareCardsHtml(hardware = {}, gpuOverride = null) {
+// Why no NVIDIA GPU is used, led by the cause of the profile decision (DS005).
+const CPU_LEADS = Object.freeze({
+    absent: 'no NVIDIA GPU is attached',
+    unusable: 'the NVIDIA GPU cannot be used',
+    mismatch: 'this image\'s CUDA runners were not built for this GPU',
+    'unreadable-timeout': 'the NVIDIA GPU could not be read for 60 s',
+});
+
+// The cpu profile: the compute device and why it is the CPU, the memory pool with the floor kept free, and the disk.
+function cpuCardsHtml(hardware, decision, limits) {
+    const memory = hardware.memory || {};
+    const disk = hardware.disk || {};
+    const cores = Number.isFinite(hardware.cores) ? hardware.cores : (Number.isFinite(hardware.cpus) ? hardware.cpus : null);
+    const lead = CPU_LEADS[decision?.cause] || 'no NVIDIA GPU is used';
+    const why = String(decision?.reason || '').replace(/\.+\s*$/, '');
+    // A container memory limit caps the pool, so the controller says what the pool and what is available are.
+    const pool = Number.isFinite(limits?.poolBytes) ? limits.poolBytes : memory.totalBytes;
+    const available = Number.isFinite(limits?.availableBytes) ? limits.availableBytes : memory.availableBytes;
+    const used = Number.isFinite(pool) && Number.isFinite(available) ? pool - available : null;
+    return [
+        statCard('compute', 'Compute', cores === null ? 'CPU' : `CPU · ${cores} ${cores === 1 ? 'core' : 'cores'}`,
+            `No NVIDIA GPU is used: ${lead}${why ? `. ${why}` : ''}.`),
+        statCard('memory', 'Memory available', `${formatMiB(available)} of ${formatMiB(pool)}`,
+            Number.isFinite(limits?.floorBytes) ? `keeps ${formatMiB(limits.floorBytes)} free for the workspace` : '',
+            meter({ label: 'Memory in use', value: used, max: pool, text: `${formatMiB(used)} in use` })),
+        statCard('disk', 'Disk free', formatBytes(disk.freeBytes),
+            Number.isFinite(disk.totalBytes) ? `of ${formatBytes(disk.totalBytes)}, for model weights` : 'for model weights'),
+    ].join('');
+}
+
+/**
+ * The GPU, RAM and disk cards; on a GPU that shares system memory, one unified-memory card and disk; on the
+ * cpu profile (`profile`, with the controller's `decision` and pool `limits`), the Compute, Memory and disk
+ * cards. `gpu` may come from a fresher status poll.
+ */
+export function hardwareCardsHtml(hardware = {}, gpuOverride = null, { profile = null, decision = null, limits = null } = {}) {
+    if (profile === 'cpu') return cpuCardsHtml(hardware, decision, limits);
     const gpu = gpuOverride?.available ? { ...(hardware.gpu || {}), ...gpuOverride } : (hardware.gpu || {});
     const cards = [];
     const memory = hardware.memory || {};
@@ -129,7 +168,7 @@ export function statusCardHtml(status = {}) {
     const report = status.runnerReport || {};
     const reportParts = [
         report.device ? `device ${report.device}` : '',
-        report.offloaded ? `${report.offloaded.layers}/${report.offloaded.of} layers on the GPU` : '',
+        report.offloaded?.layers > 0 ? `${report.offloaded.layers}/${report.offloaded.of} layers on the GPU` : '',
         Number.isFinite(report.totalMiB) ? `buffers ${report.totalMiB.toLocaleString('en-US')} MiB` : '',
     ].filter(Boolean);
     if (reportParts.length) lines.push(`<div class="settings-card-meta">${escapeHtml(reportParts.join(' · '))}</div>`);
@@ -293,12 +332,15 @@ function installProgress(state) {
  * The Runners tab's intro, from the overview: the runners the image itself
  * contains, and whether any other runner can be installed here. Plain text.
  */
-export function runnersIntroText(runners = []) {
+export function runnersIntroText(runners = [], { profile = null } = {}) {
     const list = (Array.isArray(runners) ? runners : []).filter(Boolean);
     if (!list.length) return '';
     const inImage = list.filter((runner) => runner.supported !== false && !runner.install)
         .map((runner) => runner.displayName || runner.id);
-    const first = inImage.length ? `In this image: ${inImage.join(', ')}.` : 'No runner is part of this image.';
+    const inImageText = inImage.length ? `In this image: ${inImage.join(', ')}.` : 'No runner is part of this image.';
+    // On the cpu profile only the runners with a CPU policy (a parameter schema for it) run models.
+    const onCpu = list.filter((runner) => runner.supported !== false && runner.paramSchema).map((runner) => runner.displayName || runner.id);
+    const first = profile === 'cpu' && onCpu.length ? `${inImageText} On this machine models run on the CPU, with: ${onCpu.join(', ')}.` : inImageText;
     const second = list.some((runner) => runner.install)
         ? 'Other runners are installed here, only when you press Install: their pinned files are downloaded, checked and set up on this workspace\'s disk.'
         : 'No other runner can be installed on this image.';
@@ -317,7 +359,7 @@ export function runnersPanelHtml(runners = []) {
         const off = runner.enabled === false;
         // A runner the image lacks says so in the platform's words, never through
         // the version probe's "Executable not found" (that is `reason`).
-        const lacking = runner.supported === false ? runner.unsupportedReason : '';
+        const lacking = (runner.supported === false ? runner.unsupportedReason : '') || runner.profileUnsupportedReason || '';
         const status = lacking || (off
             ? `${runner.installed ? 'installed · ' : ''}not enabled on this deployment`
             : runner.installed
@@ -339,7 +381,7 @@ export function runnersPanelHtml(runners = []) {
                 ${state.phase === 'error' && state.error ? `<div class="settings-status error">${escapeHtml(state.error)}</div>` : ''}`;
             if (install.installed && !install.installing) {
                 actions = `<button type="button" class="gray-button" data-local-action="uninstallRunner ${escapeHtml(runner.id)}">Uninstall</button>`;
-            } else if (!install.installing && !busy && !off) {
+            } else if (!install.installing && !busy && !off && !runner.profileUnsupportedReason) {
                 actions = `<button type="button" class="general-button" data-local-action="installRunner ${escapeHtml(runner.id)}">Install</button>`;
             }
         }
@@ -404,7 +446,8 @@ export function estimateHtml({ admission = null, context = null, error = '' } = 
     if (Number.isFinite(estimate.ramBytes) && Number.isFinite(memory.availableBytes)) {
         parts.push(`
             <div class="local-llm-estimate-row">
-                <span class="settings-card-meta">RAM about ${escapeHtml(formatMiB(estimate.ramBytes))} of ${escapeHtml(formatMiB(memory.availableBytes))} available</span>
+                <span class="settings-card-meta">RAM about ${escapeHtml(formatMiB(estimate.ramBytes))} of ${escapeHtml(formatMiB(memory.availableBytes))} available${
+    Number.isFinite(estimate.floorBytes) ? escapeHtml(`, keeps ${formatMiB(estimate.floorBytes)} free`) : ''}</span>
                 ${meter({ label: 'Estimated RAM', value: estimate.ramBytes, max: memory.availableBytes, text: `RAM about ${formatMiB(estimate.ramBytes)}` })}
             </div>`);
     }

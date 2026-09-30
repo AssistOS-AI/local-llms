@@ -89,6 +89,15 @@ function boundedInteger(value, fallback, min, max) {
     return number >= min && number <= max ? number : fallback;
 }
 
+// On the cpu profile a completion is much slower than on a GPU, and the caller's own deadline
+// (Soul Gateway: 120 s by default) is not raised for it, so the default budget is smaller (DS005, D10).
+export const CPU_MAX_COMPLETION_TOKENS = 2048;
+
+/** The completion budget on the cpu profile: 2,048 tokens unless the operator set one, whose value wins. */
+export function cpuCompletionBudget(env = process.env) {
+    return boundedInteger(env.LOCAL_LLM_MAX_COMPLETION_TOKENS, CPU_MAX_COMPLETION_TOKENS, 1, MAX_COMPLETION_TOKENS_LIMIT);
+}
+
 /** The completion budget and runner deadline from the agent's environment, each within its bounds. */
 export function chatLimits(env = process.env) {
     return {
@@ -143,6 +152,7 @@ export async function respond(payload, {
     fetchImpl = globalThis.fetch,
     out = stdout,
     limits = chatLimits(),
+    cpuMaxCompletionTokens = cpuCompletionBudget(),
     timeoutMs = limits.runnerTimeoutMs,
 } = {}) {
     const request = payload?.request;
@@ -168,7 +178,9 @@ export async function respond(payload, {
         const response = await fetchImpl(`${target.baseUrl}/v1/chat/completions`, {
             method: 'POST',
             headers,
-            body: JSON.stringify(buildRunnerRequest(request, target, limits)),
+            body: JSON.stringify(buildRunnerRequest(request, target, {
+                maxCompletionTokens: target.profile === 'cpu' ? cpuMaxCompletionTokens : limits.maxCompletionTokens,
+            })),
             signal,
         });
         if (!response.ok) {

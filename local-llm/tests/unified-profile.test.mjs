@@ -269,11 +269,24 @@ test('a runner the image lacks is not available on this platform, and Run refuse
         (error) => error.code === 'runner_unavailable');
 });
 
-test('a GPU the image\'s runners were not built for is refused before any download', async (t) => {
+// Deliberate change (CPU profile, DS005): a GPU the image's CUDA runners were not
+// built for used to be refused; it now decides the cpu profile, with the mismatch as its reason.
+test('a GPU the image\'s runners were not built for decides the cpu profile with the mismatch reason; only CPU-offered models run, and nothing downloads', async (t) => {
     const thor = { ...GB10, name: 'NVIDIA Thor', device: { ...GB10.device, pciDeviceId: '0x2B0010DE', computeCapability: '11.0', addressingMode: 'HMM' } };
-    const h = harness(t, { snap: unifiedSnapshot({ gpu: thor }), imageContract: { gpu_compute_capabilities: '12.1' } });
+    const tiny = validateModel({
+        id: 'tiny-cpu', displayName: 'Tiny CPU', contextLength: 32768, memory: { layers: 24, kvBytesPerToken: 12288 }, profiles: ['cpu'],
+        sources: { gguf: { ...GGUF, file: 'tiny.gguf', size: 400 * MIB } },
+    }, { seed: true });
+    const h = harness(t, { snap: unifiedSnapshot({ gpu: thor }), imageContract: { gpu_compute_capabilities: '12.1' }, seed: [...SEED, MEASURED, tiny] });
+    const overview = await h.controller.overview();
+    assert.equal(overview.profile, 'cpu');
+    assert.equal(overview.profileDecision.cause, 'mismatch');
+    assert.match(overview.profileDecision.reason, /built for GPUs of compute capability 12\.1; NVIDIA Thor is 11\.0/);
+    // A CPU-offered model is admitted on llama.cpp; the unified-only model is not offered at all.
+    assert.equal(overview.models.find((model) => model.id === 'tiny-cpu').runners['llama.cpp'].admission.status, 'ok');
+    assert.ok(!overview.models.some((model) => model.id === 'big-moe'));
     await assert.rejects(() => h.controller.run({ modelId: 'big-moe', runnerId: 'llama.cpp', requestId: 'request-0001' }),
-        (error) => error.code === 'admission_incompatible' && /built for GPUs of compute capability 12\.1; NVIDIA Thor is 11\.0/.test(error.message));
+        (error) => error.code === 'unknown_model');
     assert.equal(h.calls.download.length, 0);
 });
 

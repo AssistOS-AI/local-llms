@@ -145,9 +145,10 @@ test('no memory figures and no device facts (the second query failed) is unknown
     assert.deepEqual(calls.map((call) => call[1]), [GPU_QUERY[0], DEVICE_QUERY[0]]);
     assert.equal(gpu.available, false);
     assert.equal(gpu.name, 'NVIDIA GB10');
-    assert.equal(gpu.reason, 'nvidia-smi reports no memory figures for NVIDIA GB10 (total [N/A], used [N/A], free [N/A]), '
-        + 'so this agent cannot size models for it and refuses every Run. '
-        + 'GPUs that share system memory are supported only when the driver reports ATS or HMM addressing.');
+    // Deliberate change (CPU profile, DS005): a failed device query is unreadable, not a verdict on the GPU.
+    assert.equal(gpu.state, 'unreadable');
+    assert.equal(gpu.reason, 'nvidia-smi gave no memory figures for NVIDIA GB10 and its device query failed, '
+        + 'so its memory model is not known yet');
 });
 
 test('any memory figure that is not a number, on a GPU not known to share memory, makes it unknown', async () => {
