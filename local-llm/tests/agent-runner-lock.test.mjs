@@ -103,7 +103,7 @@ function detectScript() {
     return body.join('\n');
 }
 
-function needed(t, { event, changed, commits = 2 }) {
+function needed(t, { event, changed, commits = 2, filler = 0 }) {
     const repo = tempDir(t, 'detect');
     const git = (...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.org', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, stdio: 'pipe' });
     git('init', '-q');
@@ -115,6 +115,9 @@ function needed(t, { event, changed, commits = 2 }) {
             fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
             fs.writeFileSync(path.join(repo, file), 'changed\n');
         }
+        // `filler` more changed files, under x/ so that the names above sort before them: a list of names far bigger than a pipe's buffer.
+        if (filler > 0) fs.mkdirSync(path.join(repo, 'x', 'g'), { recursive: true });
+        for (let index = 0; index < filler; index += 1) fs.writeFileSync(path.join(repo, 'x', 'g', `${'f'.repeat(20)}${String(index).padStart(5, '0')}.md`), 'changed\n');
         git('add', '-A');
         git('commit', '-q', '-m', 'the change');
     }
@@ -127,7 +130,7 @@ function needed(t, { event, changed, commits = 2 }) {
 // The Detect script is bash and git; an image without them cannot run it.
 const hasTools = ['git', 'bash'].every((tool) => spawnSync(tool, ['--version'], { stdio: 'ignore' }).status === 0);
 
-test('the runner-lock check is needed for a change to a lock, the installer, the downloader or the registry code, and for nothing else', {
+test('the runner-lock check is needed for a change to a lock, the workflow, or anything the install check loads or launches, and for nothing else', {
     skip: (!repositoryRoot && 'the repository root is not mounted, so its .github directory is not here')
         || (!hasTools && 'git and bash are needed to run the Detect step\'s script'),
 }, (t) => {
@@ -135,15 +138,20 @@ test('the runner-lock check is needed for a change to a lock, the installer, the
         'local-llm/catalog/runners.lock.linux-arm64.json', 'local-llm/catalog/runners.lock.linux-amd64.json',
         'local-llm/src/controller/runnerInstaller.mjs', 'local-llm/src/controller/runnerLock.mjs',
         'local-llm/src/controller/downloader.mjs', 'local-llm/src/controller/ollamaStore.mjs',
-        'local-llm/tools/runner_install_check.mjs', '.github/workflows/runner-lock-check.yml',
+        'local-llm/src/controller/workspaceReuse.mjs', 'local-llm/src/controller/downloadError.mjs',
+        'local-llm/src/controller/deployments.mjs', 'local-llm/src/controller/sub/deeper.mjs',
+        'local-llm/src/runners/ollama.mjs', 'local-llm/src/runners/llamaServer.mjs', 'local-llm/src/errors.mjs',
+        'local-llm/tools/runner_install_check.mjs', 'local-llm/tools/local_llm_tool.mjs', '.github/workflows/runner-lock-check.yml',
     ]) {
         assert.equal(needed(t, { event: 'pull_request', changed: [file] }), 'needed=true', file);
     }
     // A change beside them, or only next to their names, reports success without the heavy jobs.
     for (const changed of [
-        ['README.md'], ['local-llm/src/controller/deployments.mjs'], ['local-llm/src/controller/weightStores.mjs'], ['local-llm/docs/specs/DS004-on-demand-runners.md'],
-        ['local-llm/catalog/models.json'], ['local-llm/catalog/runners.lock.linux-arm64.json.bak'], ['x/local-llm/src/controller/downloader.mjs'],
-        ['local-llm/src/controller/downloader.mjs.orig'], ['.github/workflows/other.yml'],
+        ['README.md'], ['local-llm/docs/specs/DS004-on-demand-runners.md'], ['local-llm/catalog/models.json'], ['local-llm/catalog/schema.json'],
+        ['local-llm/catalog/runners.lock.linux-arm64.json.bak'], ['local-llm/catalog/runners.lock.linux-.json'],
+        ['x/local-llm/src/controller/downloader.mjs'], ['local-llm/src/controller-old/downloader.mjs'], ['local-llm/src/main.mjs'],
+        ['local-llm/src/chatResponder.mjs'], ['local-llm/tests/agent-runner-lock.test.mjs'], ['local-llm/IDE-plugins/local-llm-settings/config.json'],
+        ['local-llm/manifest.json'], ['.github/workflows/other.yml'], ['.github/workflows/runner-lock-check.yml.bak'],
     ]) {
         assert.equal(needed(t, { event: 'pull_request', changed }), 'needed=false', changed.join());
     }
@@ -152,6 +160,44 @@ test('the runner-lock check is needed for a change to a lock, the installer, the
     assert.equal(needed(t, { event: 'workflow_dispatch', changed: ['README.md'] }), 'needed=true');
     assert.equal(needed(t, { event: 'pull_request', changed: [], commits: 1 }), 'needed=true');
 });
+
+test('every file the install check loads is one whose change runs it', {
+    skip: !repositoryRoot && 'the repository root is not mounted, so its .github directory is not here',
+}, () => {
+    const pattern = new RegExp(/grep -E '([^']+)' "\$list"/.exec(fs.readFileSync(WORKFLOW, 'utf8'))[1]);
+    // The static import closure of the tool, in the agent's own source.
+    const root = new URL('../', import.meta.url).pathname;
+    const seen = new Set();
+    const visit = (file) => {
+        if (seen.has(file)) return;
+        seen.add(file);
+        for (const match of fs.readFileSync(file, 'utf8').matchAll(/(?:import|export)[^'"]*?from\s+['"](\.[^'"]+)['"]|import\(\s*['"](\.[^'"]+)['"]\s*\)/g)) {
+            visit(path.resolve(path.dirname(file), match[1] ?? match[2]));
+        }
+    };
+    visit(path.join(root, 'tools', 'runner_install_check.mjs'));
+    assert.ok(seen.size >= 8, [...seen].join());
+    for (const file of seen) {
+        assert.ok(pattern.test(`local-llm/${path.relative(root, file)}`), `${path.relative(root, file)} is loaded by the install check and must run it`);
+    }
+    // And what the locks name as launch files is launched by the adapters.
+    for (const file of ['local-llm/src/runners/ollama.mjs', 'local-llm/src/runners/llamaServer.mjs', 'local-llm/src/runners/llamaCpp.mjs']) assert.ok(pattern.test(file), file);
+});
+
+test('a change list far bigger than a pipe buffer still runs the check when the name that matters sorts first', {
+    skip: (!repositoryRoot && 'the repository root is not mounted, so its .github directory is not here')
+        || (!hasTools && 'git and bash are needed to run the Detect step\'s script'),
+    timeout: 120_000,
+}, (t) => {
+    // 5,000 more names of about 32 bytes: 160 KB of them, well over the 64 KiB a pipe holds. `grep -q` stops at the first, a
+    // matching name that sorts before all the others, and a writer still feeding a pipe to it would die of SIGPIPE.
+    const filler = 5000;
+    assert.equal(needed(t, { event: 'pull_request', changed: ['local-llm/catalog/runners.lock.linux-arm64.json'], filler }), 'needed=true', 'a lock');
+    assert.equal(needed(t, { event: 'pull_request', changed: ['.github/workflows/runner-lock-check.yml'], filler }), 'needed=true', 'the workflow');
+    // A list that big with nothing in it that matters is, correctly, not needed.
+    assert.equal(needed(t, { event: 'pull_request', changed: ['README.md'], filler }), 'needed=false', 'nothing that matters');
+});
+
 
 // ---------------------------------------------------------------- the two locks
 

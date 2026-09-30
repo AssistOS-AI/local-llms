@@ -46,18 +46,27 @@ jobs:
 
       - name: Detect
         id: detect
-        # On demand, the check always runs. For a pull request it runs when the diff against the base touches the
-        # locks, the installer, the lock reader, the downloader (every file is fetched through it), the Ollama
-        # registry code or the install check itself, or this workflow. If the diff cannot be read, it runs.
+        # On demand, the check always runs. For a pull request it runs when the diff against the base touches a lock, the
+        # workflow itself, or any file the install check loads or launches: everything under src/controller/ (the
+        # installer, the lock reader, the downloader and what they import), src/runners/ (the adapters whose launch
+        # paths the locks name), src/errors.mjs and tools/. If the diff cannot be read, or grep fails, it runs: the
+        # only way to "not needed" is a diff that was read and had no such file.
+        # The names go to a file, never through a pipe: `grep -q` leaves at its first match, and a writer still
+        # feeding it dies of SIGPIPE, which `pipefail` turns into "no match" once the list is bigger than a pipe's
+        # buffer (about 64 KiB of names), and a change to a lock would pass as "not needed".
         run: |
           set -euo pipefail
           needed=true
           if [ "$EVENT" = pull_request ]; then
-            if changed="$(git diff --name-only HEAD^1 HEAD)"; then
-              needed=false
-              if printf '%s\n' "$changed" | grep -Eq '^(local-llm/catalog/runners\.lock\.linux-[a-z0-9]+\.json|local-llm/src/controller/(runnerInstaller|runnerLock|downloader|ollamaStore)\.mjs|local-llm/tools/runner_install_check\.mjs|\.github/workflows/runner-lock-check\.yml)$'; then
-                needed=true
-              fi
+            list="$(mktemp)"
+            trap 'rm -f "$list"' EXIT
+            if git diff --name-only HEAD^1 HEAD > "$list"; then
+              found=0
+              grep -E '^(local-llm/src/(controller|runners)/.+|local-llm/src/errors\.mjs|local-llm/tools/.+|local-llm/catalog/runners\.lock\.linux-[a-z0-9]+\.json|\.github/workflows/runner-lock-check\.yml)$' "$list" > /dev/null || found=$?
+              case "$found" in
+                1) needed=false ;;
+                *) needed=true ;;
+              esac
             fi
           fi
           echo "needed=$needed" | tee -a "$GITHUB_OUTPUT"
