@@ -4,7 +4,7 @@ Ploinky repository with one agent, [`local-llm`](local-llm/), which runs open-we
 
 - **x86 hosts with a GPU of their own:** llama.cpp, ik_llama.cpp and Ollama in the image; vLLM and TabbyAPI installed on demand; LM Studio for internal use only, behind an operator switch.
 - **NVIDIA DGX Spark** (arm64, GB10, memory shared with the system): llama.cpp for the listed models and models added at run time, sized by a labelled estimate against the shared memory pool, with a memory guard; no per-model benchmark is needed. vLLM is experimental there, installed on demand only after the operator sets `LOCAL_LLM_VLLM_UNIFIED=experimental`.
-- **Machines without a usable NVIDIA GPU** (a Mac through its Podman machine, servers without a GPU): llama.cpp on the CPU, chosen automatically and sized against the machine's memory; give a Mac's Podman machine more memory for models above about 1.5B parameters.
+- **Machines without a usable NVIDIA GPU** (a Mac through its Podman machine, servers without a GPU): llama.cpp on the CPU, chosen automatically and sized against the machine's memory, and Ollama (arm64) and llama.cpp's own CPU build installed on demand from the agent's runner lock; give a Mac's Podman machine more memory for models above about 1.5B parameters.
 
 Admins pick a model and a runner in Settings > Agents > Local LLMs, and can add a model at run time (a Hugging Face GGUF file or an Ollama tag). Weights download only when Run is pressed, pinned by commit, size and sha256. Admission says before anything downloads whether a model and its parameters fit.
 

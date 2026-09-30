@@ -16,7 +16,7 @@ One Ploinky agent, `local-llm/`. Its specifications (`local-llm/docs/specs/`, DS
 | DS001 | manifest, processes, tools, the chat endpoint, drain, LM Studio's switch |
 | DS002 | catalog v3, registry, downloads (split GGUF included), the deployment state machine |
 | DS003 | GPU access, dedicated-profile admission, runner isolation |
-| DS004 | on-demand runners from the image's runner lock |
+| DS004 | on-demand runners from the image's runner lock and the agent's own CI-gated lock |
 | DS005 | hardware profiles: dedicated, unified (DGX Spark) and cpu, envelopes, the memory guard |
 | DS006 | coding style |
 

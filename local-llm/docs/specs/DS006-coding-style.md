@@ -16,7 +16,7 @@ This specification is the coding-style authority for the local-llms repository, 
 
 ### Languages and runtimes
 
-- **Node.js 24, ES modules** (`.mjs`) for everything in the agent: the controller, the tools, the chat responder, the runner adapters and the IDE plugins' JavaScript. The agent's source is mounted at `/code` and runs unchanged on amd64 and arm64 (DS005); nothing branches on the CPU architecture.
+- **Node.js 24, ES modules** (`.mjs`) for everything in the agent: the controller, the tools, the chat responder, the runner adapters and the IDE plugins' JavaScript. The agent's source is mounted at `/code` and runs unchanged on amd64 and arm64 (DS005); nothing branches on the CPU architecture, except that the agent's runner lock for the running platform is chosen as data (DS004).
 - **No Python in the agent.** Runners that are Python programs (vLLM, TabbyAPI) are installed on demand from the image's runner lock (DS004) and never edited here.
 - **Shell** only where a script is unavoidable. Any shell script is POSIX `sh` with `set -e`, quotes every variable reference, writes errors to stderr with a `[component]` prefix, and produces JSON only through `jq`, never by string concatenation. The image's build steps live in `container-image-builds`, not here.
 
@@ -27,9 +27,11 @@ local-llms/
   CLAUDE.md / AGENTS.md / README.md
   fileSizesCheck.sh
   docs/handoff-local-llms.md
+  .github/workflows/runner-lock-check.yml       the CI install check of the agent's runner lock (DS004)
   local-llm/
     manifest.json, mcp-config.json, package.json
     catalog/models.json, catalog/schema.json      seed catalog (DS002)
+    catalog/runners.lock.linux-{amd64,arm64}.json the agent's own runner lock per platform (DS004)
     src/main.mjs                                  controller process and AgentServer (DS001)
     src/controlHandlers.mjs                       the control socket's operations on the controller (DS001)
     src/controller/                               state, admission, profiles, downloads, runner processes

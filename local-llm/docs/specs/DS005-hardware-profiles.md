@@ -57,7 +57,7 @@ On a CPU whose cores differ in capacity (sysfs `cpu_capacity`), `performanceCore
 
 ### Runner availability and the image's GPUs
 
-The image says what it contains: `/opt/local-llm/source.contract` (key=value lines). When it exists, a runner is available only if its executable is in the image (llama.cpp, ik_llama.cpp, Ollama) or the image's runner lock lists it (vLLM, TabbyAPI, LM Studio; DS004). An unavailable runner is `supported: false` in the overview with "not available on this platform: this image does not include it", and `local_llm_run` refuses it with `runner_unavailable` before anything downloads. Without a contract (tests, development) every runner counts as available. The arm64 image's contract names `gpu_compute_capabilities=12.1`, the GPUs its CUDA runners were built for; a GPU that reports another compute capability decides the `cpu` profile, and the Compute card and every CPU admission say why. This changes today's refusal on arm64 hosts with other NVIDIA GPUs, for example Thor or GH200. A GPU that does not report its capability counts as unreadable (Choosing the profile). The amd64 image names none and nothing is checked there.
+The image says what it contains: `/opt/local-llm/source.contract` (key=value lines). When it exists, a runner is available only if its executable is in the image (llama.cpp, ik_llama.cpp, Ollama) or the image's runner lock lists it (vLLM, TabbyAPI, LM Studio; DS004). An unavailable runner is `supported: false` in the overview with "not available on this platform: this image does not include it", and `local_llm_run` refuses it with `runner_unavailable` before anything downloads. Without a contract (tests, development) every runner counts as available. The arm64 image's contract names `gpu_compute_capabilities=12.1`, the GPUs its CUDA runners were built for; a GPU that reports another compute capability decides the `cpu` profile, and the Compute card and every CPU admission say why. This changes today's refusal on arm64 hosts with other NVIDIA GPUs, for example Thor or GH200. A GPU that does not report its capability counts as unreadable (Choosing the profile). The amd64 image names none and nothing is checked there. Phase 3: on the `cpu` profile the agent's runner lock (DS004) may also make a runner available, Ollama on arm64 and llama.cpp's CPU build on both architectures, when the runner has a CPU policy and the image does not already hold its executable. On the dedicated and unified profiles it makes none, so those profiles show the runners they always did, and a runner that names the profiles it serves (llama.cpp's CPU build serves `cpu`) is not listed on any other.
 
 ### Choosing the profile
 
@@ -96,7 +96,7 @@ llama.cpp has the unified-memory policy of this release, and vLLM an experimenta
 
 ### llama.cpp on the CPU
 
-llama.cpp has the CPU policy of this release. A runner without one is `incompatible` in the `cpu` profile ("… needs an NVIDIA GPU in this release"), and `local_llm_runner_install` refuses it with `runner_unavailable`. llama.cpp loads the best CPU backend for the CPU by itself (`libggml-cpu-armv8.2_2.so` on the M1's Podman machine, as `llama-server -lv 4 --list-devices` logs; a server run's log names only the device, `- CPU : CPU (…)` under `device_info:`, which is what the status reports). Its CUDA backend is skipped when the driver library is absent.
+llama.cpp has a CPU policy, and so do Ollama (below) and llama.cpp's CPU build, `llama.cpp-cpu`: ggml-org's own CPU release (`b11295`, its `ubuntu-arm64` or `ubuntu-x64` asset), installed on demand from the agent's runner lock (DS004) and run from its runnable copy on port 18085. It is one adapter with llama.cpp's, created with `profiles: ['cpu']`: it gets the CPU schema, launch and `admitCpu` below, no schema and no policy for the GPU profiles, and the controller leaves it out of the overview there. A runner without a CPU policy is `incompatible` in the `cpu` profile ("… needs an NVIDIA GPU in this release"), and `local_llm_runner_install` refuses it with `runner_unavailable`. llama.cpp loads the best CPU backend for the CPU by itself (`libggml-cpu-armv8.2_2.so` on the M1's Podman machine, as `llama-server -lv 4 --list-devices` logs; a server run's log names only the device, `- CPU : CPU (…)` under `device_info:`, which is what the status reports). Its CUDA backend is skipped when the driver library is absent.
 
 llama.cpp's CPU parameters (`paramSchemaFor('cpu')`):
 
@@ -137,6 +137,29 @@ The estimate reports the need as `ramBytes`, names every defaulted input and car
 | `ok` | otherwise, with warnings: the run is on the CPU and slower than on a GPU (with the decision's reason); the figure is an estimate; the guard stops the runner below the floor |
 
 Reserve and floor round up to whole bytes. On the 6 GiB Podman machine of a 16 GiB Mac (MemTotal 5.76 GiB) the reserve is 1.5 GiB and the floor 0.58 GiB. The constants are provisional, like the unified ones.
+
+### Ollama on the CPU
+
+Ollama's CPU parameters (`paramSchemaFor('cpu')`; the dedicated schema is unchanged, and unified memory has none):
+
+| Parameter | Values |
+| --- | --- |
+| `numCtx` | 512 to 131,072; default 4,096 |
+| `numThread` | an integer from 1 to 256, or empty for Ollama's default |
+| `keepAlive` | as in the dedicated schema |
+
+`numGpu` is fixed at 0, flash attention is Ollama's default, and the KV cache type is fixed at f16 (`OLLAMA_KV_CACHE_TYPE`). The CPU launch has no `LD_LIBRARY_PATH` and an empty `CUDA_VISIBLE_DEVICES`, and every load and chat request carries `num_gpu: 0` (`requestOptions` with the profile; `chatTarget` passes it). The adapter starts `<runnable copy>/bin/ollama` when the agent's lock installed it (the arm64 image has no Ollama; the archive unpacks with `strip: 0`) and the image's `/opt/ollama/bin/ollama` otherwise, and detection asks the image's binary first and the installer second.
+
+`admitCpuOllama` sizes a run from the tag's pinned size, never from a measurement. The need is the sum of:
+
+- the pinned `size` (config plus layers);
+- f16 KV for `numCtx`, `memory.kvBytesPerToken` × `numCtx` + `memory.fixedKvBytes` (64 KiB per token when the entry lacks it, named in the warnings);
+- compute buffers at llama.cpp's flash-attention formula and Ollama's default batch of 512 (216.92 MiB);
+- 768 MiB for the Ollama server and its runner process (provisional).
+
+It is checked against the same pool, reserve and floor as llama.cpp, and the memory guard stops the runner below that floor. A tag whose size is not pinned, such as an entry stored before tags were pinned, is `incompatible` with "The tag's size is not pinned; update the model entry so it is pinned." An Update that names the bare tag pins it (DS002). The size is also what the pull's disk check counts.
+
+That `num_gpu: 0` and the hidden device keep `size_vram` at 0 in Ollama 0.34.4 is an assumption until a live run shows `sizeVramBytes: 0` in the state file.
 
 ### Unified admission
 
@@ -190,7 +213,7 @@ In the `cpu` profile the dashboard shows three cards:
 - a Memory card: what is available of the pool, with a meter and the floor;
 - the disk card.
 
-The run form shows one memory estimate against what is available now (under a container memory limit, what the limit leaves). A runner with no CPU policy gets no Models column and no Install, and the Runners tab says why; its intro promises installs only while some runner can be installed under the profile, and the run form's parameter preview gives the same reason. The dedicated and unified profiles add no such refusal.
+The run form shows one memory estimate against what is available now (under a container memory limit, what the limit leaves). A runner with no CPU policy gets no Models column and no Install, and the Runners tab says why; its intro promises installs only while some runner can be installed under the profile, and the run form's parameter preview gives the same reason. The dedicated and unified profiles add no such refusal. A runner that serves only some profiles (llama.cpp's CPU build) is not listed at all on the others: not in the Runners tab, not as a Models column, and its Install and Run are refused before anything downloads.
 
 ## Decisions & Questions
 
@@ -225,6 +248,10 @@ Response: A container cannot gain a GPU without being recreated, so committing t
 ### Question #8: Why a smaller reserve, floor and prompt cache on the CPU?
 
 Response: The first CPU host has 5.76 GiB, where the unified values (16 GiB reserve, 8 GiB floor) would refuse everything. The proportional values converge to the unified ones on large hosts.
+
+### Question #9: Why is llama.cpp's CPU build hidden on the GPU profiles by its own declaration?
+
+Response: `profileUnsupportedReason` is set only on the `cpu` profile, on purpose: the dedicated and unified overviews must stay what they were, so a runner cannot be hidden there by a reason that only the new profile produces. A runner that serves one profile says so itself (`profiles`), and the overview, the table columns, the per-model rows, Run, preview and Install all read that one declaration. A test compares both GPU profiles' overviews with a golden file made before the runner existed.
 
 ## Conclusion
 

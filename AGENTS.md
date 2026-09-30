@@ -25,6 +25,7 @@ This repository provides one Ploinky agent, `local-llm/`: it runs open-weight LL
 - `local-llm/manifest.json` — the agent's manifest (image pin, GPU declaration, chat endpoint).
 - `local-llm/src/` — controller, runner adapters, chat responder.
 - `local-llm/catalog/models.json` — seed model catalog (schema `local-llm.catalog/v3`).
+- `local-llm/catalog/runners.lock.linux-{amd64,arm64}.json` — the agent's own runner lock per platform (DS004); `.github/workflows/runner-lock-check.yml` installs its entries in CI.
 - `local-llm/IDE-plugins/` — the Local LLMs dashboard and Settings.
 - `local-llm/tests/` — tests.
 - `local-llm/docs/specs/` — specifications.
