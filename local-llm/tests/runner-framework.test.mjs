@@ -57,7 +57,8 @@ function fakeRunner(record) {
         },
         chatModel: (deployment) => `fake/${deployment.modelId}`,
         admit({ model, source, params }) {
-            record.admitted = { model: model.id, file: source.file, params };
+            // The overview admits every model offered in the profile, so what the policy was given is kept per model.
+            record.admitted = { ...record.admitted, [model.id]: { model: model.id, file: source.file, params } };
             return admissionResult('ok', null, { gpuBytes: 1 * GIB, basis: 'fake policy' });
         },
         parseReport: () => ({ device: 'CUDA0 (fake)', totalMiB: 1 }),
@@ -124,7 +125,7 @@ test('a third runner registered as an adapter runs through the controller withou
     assert.equal(entry.admission.estimate.basis, 'fake policy');
     // It reads the same GGUF as llama.cpp: one artifact, one download state.
     assert.deepEqual(entry.download, overview.models[0].runners['llama.cpp'].download);
-    assert.equal(record.admitted.file, 'gpt-oss-20b-MXFP4.gguf');
+    assert.equal(record.admitted['gpt-oss-20b'].file, 'gpt-oss-20b-MXFP4.gguf');
 
     const accepted = await h.controller.run({ modelId: 'gpt-oss-20b', runnerId: 'fake-gguf', requestId: 'request-fake-01', params: { contextTokens: 8192 } });
     assert.equal(accepted.deployment.phase, 'downloading');

@@ -379,9 +379,11 @@ export function admit({ runner, model, source, params, snapshot, remainingDownlo
     const gpu = snapshot?.gpu;
     if (!gpu?.available) {
         const why = gpu?.reason || 'No GPU is available to this agent.';
-        // A GPU profile was committed and its GPU is gone or unreadable now: every Run is refused
-        // until local-llm restarts, which then decides the cpu profile (DS005).
-        const restart = profile === 'dedicated' || profile === 'unified'
+        // A GPU profile was committed and its GPU is gone now: every Run is refused until local-llm
+        // restarts, which then decides the cpu profile (DS005). The hint comes only with positive
+        // evidence (no nvidia-smi, or a GPU that cannot be used): a failed read may be transient, and
+        // a restart during one could lock a GPU host into the cpu profile.
+        const restart = (profile === 'dedicated' || profile === 'unified') && (gpu?.state === 'absent' || gpu?.state === 'unusable')
             ? ` This agent started with the ${profile} profile; restart local-llm to run on the CPU.` : '';
         return result('incompatible', restart ? `${String(why).replace(/\.$/, '')}.${restart}` : why, {});
     }

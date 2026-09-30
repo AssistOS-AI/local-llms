@@ -595,7 +595,7 @@ export class LocalLlmDashboard {
 
     renderEstimate(estimate = {}) {
         const region = this.runForm?.querySelector('[data-run-estimate]');
-        if (region) region.innerHTML = estimateHtml(estimate, this.overview?.hardware || {});
+        if (region) region.innerHTML = estimateHtml(estimate, this.overview?.hardware || {}, { limits: this.overview?.limits });
     }
 
     schedulePreview() {

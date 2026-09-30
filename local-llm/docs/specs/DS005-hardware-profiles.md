@@ -70,7 +70,7 @@ The controller decides the profile with `decideProfile` (`src/controller/profile
 | `absent` or `unusable` | `cpu`, at once |
 | `unreadable`, or a usable GPU that does not report its capability on an image that lists capabilities | undecided; `cpu` (cause `unreadable-timeout`) once 60 s have passed since the first such snapshot |
 
-A readable snapshot resets that wait. A cold nvidia-smi therefore never locks a GPU host into the CPU profile, and a GPU that stays unreadable does not stop the agent from running.
+A readable snapshot resets that wait. A cold nvidia-smi therefore never locks a GPU host into the CPU profile, and a GPU that stays unreadable does not stop the agent from running. A stop is not a missing GPU: a snapshot cut short because the agent is draining, or because a Run was stopped, counts as no snapshot at all. It neither advances the wait nor decides the profile, so a status or an install that meets a shutdown leaves the profile as it was.
 
 While the profile is undecided:
 
@@ -81,7 +81,7 @@ Nothing is recorded, so the same request can be sent again.
 
 A Run is normalized, admitted, launched and guarded under one committed profile, which the deployment records (`deployment.profile`). A later snapshot that disagrees is not acted on:
 
-- Under `dedicated` or `unified`, a GPU that is no longer usable refuses every Run as `incompatible`, saying to restart local-llm, which then decides `cpu`.
+- Under `dedicated` or `unified`, a GPU that is no longer usable refuses every Run as `incompatible`. When the snapshot shows positive evidence (no nvidia-smi at all, or a GPU that cannot be used) the refusal says to restart local-llm, which then decides `cpu`. When the GPU is merely unreadable the refusal gives the GPU's own reason and no hint: the failure may be transient, and a restart during it could lock a GPU host into `cpu`.
 - Under `cpu`, when the cause was `unreadable-timeout` and the GPU has since become usable, every admission warns that a restart would use it. Runs continue on the CPU.
 
 The catalog's `profiles` (DS002) decide which models are offered; `recommended` and `validated` are read for the current profile.
@@ -190,7 +190,7 @@ In the `cpu` profile the dashboard shows three cards:
 - a Memory card: what is available of the pool, with a meter and the floor;
 - the disk card.
 
-The run form shows one memory estimate against what is available now. A runner with no policy for the profile gets no Models column and no Install, and the Runners tab says why.
+The run form shows one memory estimate against what is available now (under a container memory limit, what the limit leaves). A runner with no CPU policy gets no Models column and no Install, and the Runners tab says why; its intro promises installs only while some runner can be installed under the profile, and the run form's parameter preview gives the same reason. The dedicated and unified profiles add no such refusal.
 
 ## Decisions & Questions
 

@@ -862,7 +862,9 @@ test('controller: a user entry that shares a seed id is reported, not silently h
     assert.equal(overview.models.find((model) => model.id === 'small-cpu').displayName, 'small-cpu');
     assert.ok(overview.models.some((model) => model.id === 'mine'));
     const reported = overview.unsupportedModels.find((entry) => entry.id === 'small-cpu');
-    assert.match(reported.reason, /its id is also the id of a model that ships with this agent, which is offered instead/);
+    assert.match(reported.reason, /its id is also the id of a model that ships with this agent, which takes the id, so this entry is not offered/);
+    // The text claims nothing about where the seed is offered: a seed is offered only in the profiles it lists.
+    assert.doesNotMatch(reported.reason, /offered instead/);
     assert.equal(overview.unsupportedModels.some((entry) => entry.id === 'mine'), false);
     assert.equal(overview.unsupportedModels.length, 2, 'the shadowed entry and the invalid one');
     assert.equal(h.logLines('model entry small-cpu is not supported by this catalog and is not offered').length, 1);
@@ -1085,19 +1087,34 @@ test('controller: the status report reads the CPU log lines of a cpu deployment'
 
 test('a committed GPU profile whose GPU is gone refuses every Run until local-llm restarts, and the restart decides cpu', async (t) => {
     const model = cpuModel('m', 380, { layers: 24, kv: 12288 });
-    const gone = { memory: M1_MEMORY, disk: DISK, gpu: unreadableGpu };
+    const refusal = (gpu, profile) => admit({ runner: getRunner('llama.cpp'), model, source: cpuSource(380), params: CPU_PARAMS,
+        snapshot: { memory: M1_MEMORY, disk: DISK, gpu }, profile });
     for (const profile of ['dedicated', 'unified']) {
-        const result = admit({ runner: getRunner('llama.cpp'), model, source: cpuSource(380), params: CPU_PARAMS, snapshot: gone, profile });
-        assert.equal(result.status, 'incompatible', profile);
-        assert.equal(result.reason, `nvidia-smi failed: timed out. This agent started with the ${profile} profile; restart local-llm to run on the CPU.`, profile);
+        // Positive evidence (no nvidia-smi, or a GPU that cannot be used): the refusal says to restart.
+        for (const gpu of [absentGpu, unusableGpu]) {
+            const result = refusal(gpu, profile);
+            assert.equal(result.status, 'incompatible', `${profile} ${gpu.state}`);
+            assert.equal(result.reason, `${gpu.reason}. This agent started with the ${profile} profile; restart local-llm to run on the CPU.`, `${profile} ${gpu.state}`);
+        }
+        // A failed read may be transient, and a restart during it could lock a GPU host into cpu: the GPU's own reason, with no hint.
+        for (const gpu of [unreadableGpu, { available: false, reason: 'a legacy snapshot without a state' }]) {
+            const result = refusal(gpu, profile);
+            assert.equal(result.status, 'incompatible', `${profile} ${gpu.state}`);
+            assert.equal(result.reason, gpu.reason, `${profile} ${gpu.state}`);
+        }
+        assert.equal(refusal(null, profile).reason, 'No GPU is available to this agent.', 'no GPU reading at all');
     }
     // Without a committed profile the GPU's own reason stands, as before.
-    assert.equal(admit({ runner: getRunner('llama.cpp'), model, source: cpuSource(380), params: CPU_PARAMS, snapshot: gone }).reason, unreadableGpu.reason);
+    assert.equal(refusal(absentGpu, undefined).reason, absentGpu.reason);
+    assert.equal(refusal(unreadableGpu, undefined).reason, unreadableGpu.reason);
     // Through the controller: unified is committed, the GPU is then lost, a Run is refused and nothing downloads.
-    let lost = false;
-    const h = harness(t, { snap: () => (lost ? cpuSnapshot({ gpu: absentGpu }) : { ...cpuSnapshot(), gpu: structuredClone(gb10) }), imageContract: null });
+    let lost = null;
+    const h = harness(t, { snap: () => (lost ? cpuSnapshot({ gpu: lost }) : { ...cpuSnapshot(), gpu: structuredClone(gb10) }), imageContract: null });
     assert.equal((await h.controller.overview()).profile, 'unified');
-    lost = true;
+    lost = unreadableGpu;
+    await assert.rejects(() => h.controller.run({ modelId: 'small-cpu', runnerId: 'llama.cpp', requestId: 'request-0002' }),
+        (error) => error.code === 'admission_incompatible' && error.message === unreadableGpu.reason);
+    lost = absentGpu;
     await assert.rejects(() => h.controller.run({ modelId: 'small-cpu', runnerId: 'llama.cpp', requestId: 'request-0001' }),
         (error) => error.code === 'admission_incompatible' && error.message.endsWith('This agent started with the unified profile; restart local-llm to run on the CPU.'));
     assert.equal(h.calls.download.length, 0);
@@ -1112,9 +1129,9 @@ test('the shipped CPU seeds are pinned, offered on cpu with CPU defaults, and fi
     const byId = Object.fromEntries(seeds.map((model) => [model.id, model]));
     const cpuIds = seeds.filter((model) => model.profiles.includes('cpu')).map((model) => model.id);
     assert.deepEqual(cpuIds, ['gpt-oss-20b', 'qwen2.5-0.5b-instruct-q4_k_m', 'qwen2.5-1.5b-instruct-q4_k_m', 'qwen3-4b-instruct-2507-q4_k_m']);
-    // gpt-oss-20b keeps its GPU profiles and gains cpu; the small seeds are offered on cpu only, so no GPU host's catalog changes.
+    // gpt-oss-20b keeps its GPU profiles and gains cpu; the small seeds are offered on every profile (SPEC D4).
     assert.deepEqual(byId['gpt-oss-20b'].profiles, ['dedicated', 'unified', 'cpu']);
-    for (const id of cpuIds.slice(1)) assert.deepEqual(byId[id].profiles, ['cpu'], id);
+    for (const id of cpuIds.slice(1)) assert.deepEqual(byId[id].profiles, ['cpu', 'dedicated', 'unified'], id);
     assert.deepEqual(byId['gpt-oss-20b'].recommended.cpu['llama.cpp'],
         { ctxSize: 8192, parallel: 1, loadMode: 'mmap', chatTemplateKwargs: { reasoning_effort: 'low' } });
     for (const id of cpuIds.slice(1)) {
@@ -1153,4 +1170,98 @@ test('the shipped CPU seeds are pinned, offered on cpu with CPU defaults, and fi
     near(mib(need('gpt-oss-20b', 8192)), 12743.5, 'gpt-oss-20b need MiB');
     // Every seed's id is unique and a seed never shadows another (a catalog error otherwise).
     assert.equal(new Set(seeds.map((model) => model.id)).size, seeds.length);
+});
+
+test('the small seeds are offered on GPU hosts too, and run there with the profile\'s own defaults', async (t) => {
+    const dedicatedGpu = { available: true, memoryModel: 'dedicated', name: 'RTX 3060', totalBytes: 6144 * MIB, usedBytes: 144 * MIB, freeBytes: 6000 * MIB,
+        processes: [], device: { computeCapability: '8.6' } };
+    const dedicated = harness(t, { seed: loadSeedCatalog(), imageContract: null,
+        snap: () => ({ ...cpuSnapshot({ memory: { totalBytes: 31 * GIB, availableBytes: 24 * GIB } }), gpu: structuredClone(dedicatedGpu) }) });
+    const unified = harness(t, { seed: loadSeedCatalog(), imageContract: null,
+        snap: () => ({ ...cpuSnapshot({ memory: { totalBytes: 125442396 * 1024, availableBytes: 108 * GIB } }), gpu: structuredClone(gb10) }) });
+    const small = ['qwen2.5-0.5b-instruct-q4_k_m', 'qwen2.5-1.5b-instruct-q4_k_m', 'qwen3-4b-instruct-2507-q4_k_m'];
+    for (const [profile, h] of [['dedicated', dedicated], ['unified', unified]]) {
+        const overview = await h.controller.overview();
+        assert.equal(overview.profile, profile);
+        for (const id of small) assert.ok(overview.models.some((model) => model.id === id), `${id} is offered on ${profile}`);
+        // The catalog asks for no per-profile defaults: the runner's own defaults apply.
+        for (const id of small.slice(0, 2)) {
+            const row = overview.models.find((model) => model.id === id).runners['llama.cpp'];
+            assert.equal(row.admission.status, 'ok', `${id} on ${profile}: ${row.admission.reason}`);
+        }
+        const row = overview.models.find((model) => model.id === small[0]).runners['llama.cpp'];
+        assert.equal(row.params.ctxSize, profile === 'dedicated' ? 16384 : 32768, profile);
+    }
+    // A Run of a small seed on a GPU host launches with the GPU flags, not the CPU ones.
+    await unified.controller.run({ modelId: small[0], runnerId: 'llama.cpp', requestId: 'request-0001' });
+    await until(() => unified.controller.state.deployment?.phase === 'ready');
+    assert.ok(unified.started[0].args.includes('999') && !unified.started[0].args.includes('--device'));
+    await unified.controller.stop();
+});
+
+test('controller: a shutdown is not a missing GPU, so a status or an install after the drain never decides the profile', async (t) => {
+    const unreadableSnapshot = () => cpuSnapshot({ gpu: unreadableGpu });
+    // Control: the same 61 s without a shutdown in between do decide cpu.
+    const clock = { ms: 1_000_000 };
+    const control = harness(t, { clock, snap: unreadableSnapshot });
+    assert.equal((await control.controller.status()).profile, null);
+    clock.ms += 61_000;
+    assert.equal((await control.controller.status()).profile, 'cpu');
+    // A status after the drain, 61 s after the first unreadable snapshot, leaves the profile undecided and logs nothing.
+    const first = harness(t, { clock, snap: unreadableSnapshot });
+    clock.ms = 2_000_000;
+    assert.equal((await first.controller.status()).profile, null, 'the window starts');
+    clock.ms += 30_000;
+    await first.controller.drain();
+    clock.ms += 31_000;
+    const after = await first.controller.status();
+    assert.deepEqual([after.profile, after.profileDecision, after.gpu], [null, null, null]);
+    assert.equal(first.logLines('hardware profile:').length, 0);
+    // A stop does not start the window either: two statuses after the drain, 61 s apart, decide nothing.
+    const second = harness(t, { clock, snap: unreadableSnapshot });
+    clock.ms = 3_000_000;
+    await second.controller.drain();
+    assert.equal((await second.controller.status()).profile, null);
+    clock.ms += 61_000;
+    assert.equal((await second.controller.status()).profile, null);
+    assert.equal(second.logLines('hardware profile:').length, 0);
+    // An install whose snapshot is cut short by the drain does not decide it either.
+    const installer = {
+        installable: (id) => id === 'vllm', describe: async () => ({ installed: false, runnable: false }),
+        entryFor: () => { throw new Error('an install must not get this far'); }, pathsFor: () => ({}),
+    };
+    clock.ms = 4_000_000;
+    // The second snapshot (the install's) never answers; the drain ends it.
+    const race = harness(t, { clock, imageContract: null, installer, snap: (n) => (n === 2 ? new Promise(() => {}) : unreadableSnapshot()) });
+    assert.equal((await race.controller.status()).profile, null, 'the window starts');
+    clock.ms += 61_000;
+    const install = race.controller.installRunner({ runnerId: 'vllm' }).then((value) => ({ value }), (error) => ({ error }));
+    await until(() => race.calls.snapshots >= 2);
+    await race.controller.drain();
+    assert.ok((await install).error, 'the install ends with an error');
+    assert.equal(race.logLines('hardware profile:').length, 0);
+});
+
+test('controller: the parameter preview of a runner with no cpu policy says why, not a parameter error', async (t) => {
+    const h = harness(t, { imageContract: null });
+    const refusal = (name) => `${name} needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.`;
+    const previewOf = async (runnerId) => (await h.controller.overview({ preview: { modelId: 'small-cpu', runnerId } })).preview;
+    const ik = await previewOf('ik_llama.cpp');
+    assert.equal(ik.error, undefined);
+    assert.deepEqual([ik.params, ik.context], [null, null]);
+    assert.deepEqual([ik.admission.status, ik.admission.reason], ['incompatible', refusal('ik_llama.cpp')]);
+    assert.doesNotMatch(JSON.stringify(ik), /Invalid parameter|no parameters for/);
+    // The same text the overview gives the runner.
+    const overview = await h.controller.overview();
+    assert.equal(ik.admission.reason, overview.runners.find((runner) => runner.id === 'ik_llama.cpp').profileUnsupportedReason);
+    // A runner that is switched off says so first, as in the overview's rows.
+    assert.match((await previewOf('lmstudio')).admission.reason, /LM Studio is not enabled on this deployment/);
+    // llama.cpp previews as usual.
+    const llama = await previewOf('llama.cpp');
+    assert.equal(llama.error, undefined);
+    assert.equal(llama.params.ctxSize, 4096);
+    assert.equal(llama.admission.status, 'ok');
+    // A parameter error of a runner that has a policy is still a parameter error.
+    const bad = (await h.controller.overview({ preview: { modelId: 'small-cpu', runnerId: 'llama.cpp', params: { ctxSize: 100 } } })).preview;
+    assert.match(bad.error, /Invalid parameter ctxSize/);
 });

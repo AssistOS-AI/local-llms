@@ -489,7 +489,9 @@
       "activeParams": "0.5B",
       "contextLength": 32768,
       "profiles": [
-        "cpu"
+        "cpu",
+        "dedicated",
+        "unified"
       ],
       "sources": {
         "gguf": {
@@ -525,7 +527,9 @@
       "activeParams": "1.5B",
       "contextLength": 32768,
       "profiles": [
-        "cpu"
+        "cpu",
+        "dedicated",
+        "unified"
       ],
       "sources": {
         "gguf": {
@@ -561,7 +565,9 @@
       "activeParams": "4B",
       "contextLength": 262144,
       "profiles": [
-        "cpu"
+        "cpu",
+        "dedicated",
+        "unified"
       ],
       "sources": {
         "gguf": {

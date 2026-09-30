@@ -563,6 +563,26 @@ test('on the cpu profile the cards show the CPU, memory with its floor and disk,
     const estimate = estimateHtml({ admission: { status: 'ok', estimate: { ramBytes: 1413 * CPU_MIB, floorBytes: 618099508 } } }, CPU_HARDWARE);
     assert.match(estimate, /RAM about 1,413 MiB of 3,049 MiB available, keeps 589 MiB free/);
     assert.doesNotMatch(estimateHtml({ admission: { status: 'ok', estimate: { ramBytes: 1413 * CPU_MIB } } }, CPU_HARDWARE), /keeps/);
+    // Under a container memory limit the estimate is compared with what the limit leaves, not with the host's figure.
+    const limited = { ...CPU_LIMITS, poolBytes: 4096 * CPU_MIB, availableBytes: 2048 * CPU_MIB };
+    const capped = estimateHtml({ admission: { status: 'ok', estimate: { ramBytes: 1413 * CPU_MIB, floorBytes: 618099508 } } }, CPU_HARDWARE, { limits: limited });
+    assert.match(capped, /RAM about 1,413 MiB of 2,048 MiB available, keeps 589 MiB free/);
+    assert.doesNotMatch(capped, /3,049 MiB/);
+    assert.match(capped, /<meter[^>]*max="2147483648"[^>]*aria-label="Estimated RAM"/);
+    // Without limits, or with limits that carry no figure (unified memory's), the host's figure stays.
+    const host = estimateHtml({ admission: { status: 'ok', estimate: { ramBytes: 1413 * CPU_MIB, floorBytes: 618099508 } } }, CPU_HARDWARE);
+    assert.equal(estimateHtml({ admission: { status: 'ok', estimate: { ramBytes: 1413 * CPU_MIB, floorBytes: 618099508 } } }, CPU_HARDWARE, { limits: { floorBytes: 1, hostReserveBytes: 2 } }), host);
+    assert.equal(estimateHtml({ admission: { status: 'ok', estimate: { ramBytes: 1413 * CPU_MIB, floorBytes: 618099508 } } }, CPU_HARDWARE, { limits: null }), host);
+    // The presenter hands the overview's limits to the run form's estimate.
+    const form = new dashboardModule.LocalLlmDashboard({ isConnected: true, querySelector: () => null, querySelectorAll: () => [] }, () => {});
+    const region = { innerHTML: '' };
+    form.runForm = { querySelector: (selector) => (selector === '[data-run-estimate]' ? region : null) };
+    form.overview = { hardware: CPU_HARDWARE, limits: limited };
+    form.renderEstimate({ admission: { status: 'ok', estimate: { ramBytes: 1413 * CPU_MIB, floorBytes: 618099508 } } });
+    assert.match(region.innerHTML, /of 2,048 MiB available/);
+    form.overview = { hardware: CPU_HARDWARE };
+    form.renderEstimate({ admission: { status: 'ok', estimate: { ramBytes: 1413 * CPU_MIB, floorBytes: 618099508 } } });
+    assert.match(region.innerHTML, /of 3,049 MiB available/);
     const running = (offloaded) => statusCardHtml({ phase: 'ready', deployment: { modelId: 'm', runnerId: 'llama.cpp', phase: 'ready' },
         runnerReport: { device: 'CPU (armv8.2_2)', offloaded, totalMiB: 634 } });
     assert.match(running({ layers: 0, of: 25 }), /device CPU \(armv8\.2_2\) · buffers 634 MiB/);
@@ -604,9 +624,24 @@ test('a runner with no policy for the profile gets no column and no Install; whi
     assert.doesNotMatch(lacking, /needs an NVIDIA GPU/);
     // The Runners intro names the runners that run models on the CPU.
     // (Tabby and vLLM are installed on demand, so they are not "in this image".)
-    assert.match(runnersIntroText(cpuRunners, { profile: 'cpu' }), /^In this image: llama\.cpp, Ollama\. On this machine models run on the CPU, with: llama\.cpp\. Other runners are installed here/);
-    assert.equal(runnersIntroText(cpuRunners), runnersIntroText(cpuRunners, { profile: 'dedicated' }));
-    assert.doesNotMatch(runnersIntroText(cpuRunners, { profile: 'dedicated' }), /run models on the CPU/);
+    // Install is offered only for a runner with a policy for the profile, and the intro promises it only then: here
+    // both on-demand runners are refused on the CPU, so it says nothing can be installed.
+    assert.equal(runnersIntroText(cpuRunners, { profile: 'cpu' }),
+        'In this image: llama.cpp, Ollama. On this machine models run on the CPU, with: llama.cpp. No other runner can be installed while models run on the CPU.');
+    assert.doesNotMatch(runnersIntroText(cpuRunners, { profile: 'cpu' }), /press Install/);
+    // The arm64 image on the CPU: llama.cpp in the image, the rest absent or refused.
+    const arm64 = [cpuRunners[0], { id: 'ik_llama.cpp', displayName: 'ik_llama.cpp', supported: false, unsupportedReason: 'not available on this platform', paramSchema: null }, cpuRunners[2]];
+    assert.equal(runnersIntroText(arm64, { profile: 'cpu' }),
+        'In this image: llama.cpp. On this machine models run on the CPU, with: llama.cpp. No other runner can be installed while models run on the CPU.');
+    // A runner that is installable and has a policy keeps the promise.
+    const { profileUnsupportedReason: _refused, ...installable } = cpuRunners[2];
+    assert.match(runnersIntroText([cpuRunners[0], installable], { profile: 'cpu' }), /^In this image: llama\.cpp\. On this machine models run on the CPU, with: llama\.cpp\. Other runners are installed here, only when you press Install/);
+    // With no on-demand runner at all, the SPEC's wording stands.
+    assert.match(runnersIntroText([cpuRunners[0]], { profile: 'cpu' }), /No other runner can be installed on this image\.$/);
+    // Other profiles carry no refusal, so their intro is what it was.
+    const noReasons = cpuRunners.map(({ profileUnsupportedReason: _reason, ...runner }) => runner);
+    assert.match(runnersIntroText(noReasons, { profile: 'dedicated' }), /Other runners are installed here, only when you press Install/);
+    assert.doesNotMatch(runnersIntroText(noReasons, { profile: 'dedicated' }), /run models on the CPU/);
     // The run form says why such a runner cannot run.
     const presenter = new dashboardModule.LocalLlmDashboard({ isConnected: true, querySelector: () => null, querySelectorAll: () => [] }, () => {});
     const noteFor = (runner) => {

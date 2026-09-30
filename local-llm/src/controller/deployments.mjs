@@ -380,12 +380,19 @@ export function createController({
         return snap;
     }
 
+    // A stop is not a missing GPU: a snapshot that ends because the agent drains
+    // or a Run is stopped must neither advance the unreadable window nor decide
+    // the profile (DS005).
+    const isStop = (error) => error?.code === 'shutting_down' || error?.code === 'aborted';
+
     async function currentProfile() {
         if (!profile) {
             let snap = null;
             try {
                 snap = await takeSnapshot();
-            } catch {}
+            } catch (error) {
+                if (isStop(error)) return profile;
+            }
             commitProfile(snap);
         }
         return profile;
@@ -399,8 +406,7 @@ export function createController({
         try {
             snap = await takeSnapshot(signal);
         } catch (error) {
-            // A stop is not a missing GPU.
-            if (error.code === 'shutting_down' || error.code === 'aborted') throw error;
+            if (isStop(error)) throw error;
         }
         if (commitProfile(snap)) return profile;
         const undecided = snap?.gpu?.reason || undecidedReason;
@@ -443,8 +449,10 @@ export function createController({
         return capabilityMismatch(snap?.gpu, capabilities);
     }
 
-    // Why a runner has no policy for the committed profile, or null (DS005): it
-    // has no parameter schema for it, as with every runner but llama.cpp on the CPU.
+    // Why a runner has no policy for the committed profile, or null (DS005): on
+    // the cpu profile, it has no parameter schema for it, as with every runner
+    // but llama.cpp. The dedicated and unified profiles have no such refusal:
+    // they refuse through admission and the runner's switch, as they always did.
     function profileRefusal(definition, selected = profile) {
         return selected ? runnerSummary(definition, selected).profileUnsupportedReason ?? null : null;
     }
@@ -606,6 +614,12 @@ export function createController({
         }
         const gate = gateOf(definition);
         if (!gate.enabled) return { modelId, runnerId, params: null, context: null, admission: disabledAdmission(gate) };
+        // A runner with no policy for the cpu profile has no parameters to preview: say why, not a ParamError.
+        const refusal = profileRefusal(definition);
+        if (refusal) {
+            return { modelId, runnerId, params: null, context: null,
+                admission: { status: 'incompatible', reason: refusal, estimate: { isEstimate: true }, warnings: [] } };
+        }
         let normalized;
         try {
             normalized = effectiveParams(model, runnerId, params && typeof params === 'object' ? params : undefined);
@@ -736,10 +750,13 @@ export function createController({
     async function status({ sinceSeq = 0 } = {}) {
         // One snapshot serves the profile decision and the GPU the status shows.
         let snap = null;
+        let stopped = false;
         try {
             snap = await takeSnapshot();
-        } catch {}
-        commitProfile(snap);
+        } catch (error) {
+            stopped = isStop(error);
+        }
+        if (!stopped) commitProfile(snap);
         const deployment = publicDeployment();
         const lines = log.since(Number(sinceSeq) || 0);
         const gpu = snap?.gpu ?? null;

@@ -290,6 +290,45 @@ test('a GPU the image\'s runners were not built for decides the cpu profile with
     assert.equal(h.calls.download.length, 0);
 });
 
+// GPU hosts stay as they were (the cpu profile's rule 3): on unified memory a runner with no unified policy is
+// refused exactly as before the cpu profile existed, never with the cpu profile's "needs an NVIDIA GPU" refusal.
+// The outcomes below were observed at the commit before the cpu profile (349f8b0).
+test('on unified memory a runner with no unified policy is refused exactly as before the cpu profile', async (t) => {
+    const h = harness(t);
+    const overview = await h.controller.overview();
+    assert.equal(overview.profile, 'unified');
+    for (const runner of overview.runners) assert.equal('profileUnsupportedReason' in runner, false, runner.id);
+    const run = (runnerId) => h.controller.run({ modelId: 'gpt-oss-20b', runnerId, requestId: `request-${runnerId.replace(/\W/g, '')}` });
+    // Ollama has no unified policy: admission refuses it, naming the GPU.
+    await assert.rejects(() => run('ollama'), (error) => error.code === 'admission_incompatible'
+        && error.message === 'Ollama is not available on a GPU that shares system memory (NVIDIA GB10) in this release.');
+    // LM Studio is off: the operator's switch text, not a profile refusal.
+    await assert.rejects(() => run('lmstudio'), (error) => error.code === 'runner_disabled'
+        && /LM Studio is not enabled on this deployment \(internal use only\)/.test(error.message)
+        && /ploinky var LOCAL_LLM_LMSTUDIO internal-use/.test(error.message));
+    // ik_llama.cpp has no unified parameters: a parameter error, as before.
+    await assert.rejects(() => run('ik_llama.cpp'), (error) => error.code === 'invalid_params'
+        && error.message === 'Invalid parameter (runner): ik_llama.cpp has no parameters for the unified profile');
+    assert.equal(h.calls.download.length, 0);
+    assert.deepEqual(h.controller.state.requests, {}, 'nothing recorded');
+    // The overview's rows and the parameter preview say the same things.
+    const rows = overview.models.find((model) => model.id === 'gpt-oss-20b').runners;
+    assert.equal(rows['ik_llama.cpp'].params, null);
+    assert.equal(rows['ik_llama.cpp'].admission.reason, 'Invalid parameter (runner): ik_llama.cpp has no parameters for the unified profile');
+    assert.notEqual(rows.ollama.params, null);
+    assert.equal(rows.ollama.admission.reason, 'Ollama is not available on a GPU that shares system memory (NVIDIA GB10) in this release.');
+    assert.match(rows.lmstudio.admission.reason, /LM Studio is not enabled on this deployment/);
+    const { preview } = await h.controller.overview({ preview: { modelId: 'gpt-oss-20b', runnerId: 'ik_llama.cpp' } });
+    assert.deepEqual(preview, { modelId: 'gpt-oss-20b', runnerId: 'ik_llama.cpp',
+        error: 'Invalid parameter (runner): ik_llama.cpp has no parameters for the unified profile', field: '(runner)' });
+    // A dedicated GPU has none either.
+    const dedicated = harness(t, { snap: { gpu: { available: true, memoryModel: 'dedicated', name: 'RTX', totalBytes: 6144 * MIB, usedBytes: 0, freeBytes: 6144 * MIB, processes: [] },
+        memory: { totalBytes: 31 * GIB, availableBytes: 24 * GIB }, disk: { freeBytes: 300 * GIB } } });
+    const ded = await dedicated.controller.overview();
+    assert.equal(ded.profile, 'dedicated');
+    assert.equal(ded.runners.some((runner) => 'profileUnsupportedReason' in runner), false);
+});
+
 test('a unified run downloads, drops the file from the page cache, launches with the unified flags and the container-local JIT cache', async (t) => {
     const h = harness(t);
     await h.controller.run({ modelId: 'big-moe', runnerId: 'llama.cpp', requestId: 'request-0001', params: { ctxSize: 65536, parallel: 2 } });

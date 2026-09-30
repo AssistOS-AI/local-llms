@@ -453,7 +453,8 @@ export function unsupportedRegistryEntries(registry = [], seed = []) {
             if (seedIds.has(model.id)) {
                 unsupported.push({
                     id: model.id,
-                    reason: 'its id is also the id of a model that ships with this agent, which is offered instead; remove this entry, or add the model again under another id',
+                    // A seed is offered only in the profiles it lists, so this says nothing about where it is offered.
+                    reason: 'its id is also the id of a model that ships with this agent, which takes the id, so this entry is not offered; remove it, or add the model again under another id',
                 });
             }
         } catch (error) {

@@ -341,9 +341,13 @@ export function runnersIntroText(runners = [], { profile = null } = {}) {
     // On the cpu profile only the runners with a CPU policy (a parameter schema for it) run models.
     const onCpu = list.filter((runner) => runner.supported !== false && runner.paramSchema).map((runner) => runner.displayName || runner.id);
     const first = profile === 'cpu' && onCpu.length ? `${inImageText} On this machine models run on the CPU, with: ${onCpu.join(', ')}.` : inImageText;
-    const second = list.some((runner) => runner.install)
+    // Install is offered only for a runner with a policy for the profile, so the intro says so only then.
+    const onDemand = list.filter((runner) => runner.install);
+    const second = onDemand.some((runner) => !runner.profileUnsupportedReason)
         ? 'Other runners are installed here, only when you press Install: their pinned files are downloaded, checked and set up on this workspace\'s disk.'
-        : 'No other runner can be installed on this image.';
+        : onDemand.length
+            ? 'No other runner can be installed while models run on the CPU.'
+            : 'No other runner can be installed on this image.';
     return `${first} ${second}`;
 }
 
@@ -420,12 +424,16 @@ export function installMessage(runner = {}) {
     return `${head}${terms} ${notice}${accepts}`.trimEnd();
 }
 
-/** GPU and RAM estimate meters for the run form. */
-export function estimateHtml({ admission = null, context = null, error = '' } = {}, hardware = {}) {
+/**
+ * GPU and RAM estimate meters for the run form. On the cpu profile the controller's pool `limits` say
+ * what is available under a container memory limit, which the host's figure does not.
+ */
+export function estimateHtml({ admission = null, context = null, error = '' } = {}, hardware = {}, { limits = null } = {}) {
     if (error) return `<div class="settings-status error">${escapeHtml(error)}</div>`;
     const estimate = admission?.estimate || {};
     const gpu = hardware.gpu || {};
-    const memory = hardware.memory || {};
+    const memory = { ...(hardware.memory || {}) };
+    if (Number.isFinite(limits?.availableBytes)) memory.availableBytes = limits.availableBytes;
     const parts = [];
     if (Number.isFinite(estimate.unifiedBytes) && Number.isFinite(memory.totalBytes)) {
         // Unified memory: one estimate against the shared pool (DS005).
