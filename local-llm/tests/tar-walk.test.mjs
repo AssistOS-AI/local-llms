@@ -100,7 +100,7 @@ test('a tar cut where a member whose data ends in zeros ends is refused: the tai
     }
     assert.deepEqual(accepted, [tar.length], 'only the whole tar');
     assert.deepEqual(await problemOf(t, tar.subarray(0, tar.length - BLOCK)), { cut: 'only one end-of-archive block' });
-    assert.deepEqual(await problemOf(t, Buffer.concat([tar.subarray(0, tar.length - 2 * BLOCK), zeros(BLOCK), noise(BLOCK)])), { cut: 'a block of zeros is not followed by a second one' });
+    assert.deepEqual(await problemOf(t, Buffer.concat([tar.subarray(0, tar.length - 2 * BLOCK), zeros(BLOCK), noise(BLOCK)])), { bad: 'a block of zeros is not followed by a second one' });
     assert.deepEqual(await problemOf(t, Buffer.alloc(0)), { cut: 'no end-of-archive blocks' });
     assert.deepEqual(await problemOf(t, zeros(BLOCK)), { cut: 'only one end-of-archive block' });
 });
@@ -113,13 +113,14 @@ test('a header with a wrong checksum, no ustar magic, a size that is not a numbe
     // One byte of the second header's name changed: its checksum no longer adds up.
     const corrupted = Buffer.from(good);
     corrupted[member('a.dat', noise(700)).length + 3] ^= 0x01;
-    assert.deepEqual(await problemOf(t, corrupted), { cut: `the header at byte ${member('a.dat', noise(700)).length}: its checksum is wrong` });
-    assert.deepEqual(await problemOf(t, Buffer.concat([member('a.dat', 'x', { magic: '\0\0\0\0\0\0' }), END])), { cut: 'the header at byte 0: the ustar magic is missing' });
-    assert.deepEqual(await problemOf(t, Buffer.concat([member('a.dat', 'x', { sizeText: 'zzzzzzzzzzz\0' }), END])), { cut: 'the header at byte 0: its size is not a number' });
-    assert.deepEqual(await problemOf(t, Buffer.concat([member('a.dat', 'x', { sizeText: '89abcdefghi\0' }), END])), { cut: 'the header at byte 0: its size is not a number' });
+    // What no cut of a whole tar can leave is `bad`, not `cut`: the file is not a tar the installer reads.
+    assert.deepEqual(await problemOf(t, corrupted), { bad: `the header at byte ${member('a.dat', noise(700)).length}: its checksum is wrong` });
+    assert.deepEqual(await problemOf(t, Buffer.concat([member('a.dat', 'x', { magic: '\0\0\0\0\0\0' }), END])), { bad: 'the header at byte 0: the ustar magic is missing' });
+    assert.deepEqual(await problemOf(t, Buffer.concat([member('a.dat', 'x', { sizeText: 'zzzzzzzzzzz\0' }), END])), { bad: 'the header at byte 0: its size is not a number' });
+    assert.deepEqual(await problemOf(t, Buffer.concat([member('a.dat', 'x', { sizeText: '89abcdefghi\0' }), END])), { bad: 'the header at byte 0: its size is not a number' });
     // Data where a header is due (a size that was too small) is no header.
     const small = Buffer.concat([header({ name: 'a.dat', size: 10 }), noise(2 * BLOCK), END]);
-    assert.match((await problemOf(t, small)).cut, /^the header at byte 1024: /);
+    assert.match((await problemOf(t, small)).bad, /^the header at byte 1024: /);
     // A size that runs past the end of the file, and a file that ends inside a header.
     assert.deepEqual(await problemOf(t, Buffer.concat([header({ name: 'a.dat', size: 100000 }), noise(BLOCK), END])), { cut: 'a member runs past the end of the file' });
     assert.deepEqual(await problemOf(t, Buffer.concat([header({ name: 'a.dat', size: 2 ** 40 }), END])), { cut: 'a member runs past the end of the file' });
@@ -143,8 +144,8 @@ test('a pax size override, a global one, and a malformed pax header are honoured
     assert.equal(await problemOf(t, Buffer.concat([pax({ size: 700 }, 'g'), member('a.bin', noise(700), { size: 0 }), pax({ size: 1200 }), member('b.bin', noise(1200), { size: 0 }), END])), null);
     // Other records (path, mtime, non-ASCII) are read past; a record that is not well formed is a fault.
     assert.equal(await problemOf(t, Buffer.concat([pax({ path: 'über/ünï.txt', mtime: '1.5' }), member('x', noise(10)), END])), null);
-    assert.deepEqual(await problemOf(t, Buffer.concat([member('PaxHeader/x', '99 size=5\n', { type: 'x' }), member('x', 'y'), END])), { cut: 'a pax header is malformed' });
-    assert.deepEqual(await problemOf(t, Buffer.concat([member('PaxHeader/x', '12 size=abc\n', { type: 'x' }), member('x', 'y'), END])), { cut: 'a pax size is not a number' });
+    assert.deepEqual(await problemOf(t, Buffer.concat([member('PaxHeader/x', '99 size=5\n', { type: 'x' }), member('x', 'y'), END])), { bad: 'a pax header is malformed' });
+    assert.deepEqual(await problemOf(t, Buffer.concat([member('PaxHeader/x', '12 size=abc\n', { type: 'x' }), member('x', 'y'), END])), { bad: 'a pax size is not a number' });
     // A pax header over the limit is refused without being read.
     const big = Buffer.concat([header({ name: 'PaxHeader/x', type: 'x', size: 1024 * 1024 + 1 }), zeros(roundUp(1024 * 1024 + 1)), END]);
     assert.deepEqual(await problemOf(t, big), { limit: 'a pax header is larger than 1048576 bytes' });
@@ -169,10 +170,14 @@ test('GNU long name and link headers are skipped by their size, and a number may
     }
 });
 
-test('more members than the limit is refused as such, not as a cut', async (t) => {
+test('more headers than the limit is refused as such, not as a cut, and pax headers count', async (t) => {
     const four = Buffer.concat([member('a', 'x'), member('b', 'x'), member('c', 'x'), member('d', 'x'), END]);
     assert.equal(await problemOf(t, four, { maxMembers: 4 }), null);
-    assert.deepEqual(await problemOf(t, four, { maxMembers: 3 }), { limit: 'it lists more than 3 members' });
+    assert.deepEqual(await problemOf(t, four, { maxMembers: 3 }), { limit: 'it has more than 3 headers' });
+    // Two members, each with a pax header before it (as Python's PAX_FORMAT and GNU tar --format=posix write): four headers.
+    const paxed = Buffer.concat([pax({ mtime: '1.5' }), member('a', 'x'), pax({ mtime: '2.5' }), member('b', 'x'), END]);
+    assert.equal(await problemOf(t, paxed, { maxMembers: 4 }), null);
+    assert.deepEqual(await problemOf(t, paxed, { maxMembers: 3 }), { limit: 'it has more than 3 headers' });
 });
 
 // ---------------------------------------------------------------- what real tar writers make

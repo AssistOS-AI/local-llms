@@ -66,7 +66,7 @@ jobs:
             trap 'rm -f "$list"' EXIT
             if git -c core.quotePath=false diff --name-only -z HEAD^1 HEAD > "$list"; then
               found=0
-              grep -z -E '^(local-llm/src/(controller|runners)/.+|local-llm/src/errors\.mjs|local-llm/tools/.+|local-llm/catalog/runners\.lock\.linux-[a-z0-9]+\.json|\.github/workflows/runner-lock-check\.yml)$' "$list" > /dev/null || found=$?
+              LC_ALL=C grep -z -E '^(local-llm/src/(controller|runners)/.+|local-llm/src/errors\.mjs|local-llm/tools/.+|local-llm/catalog/runners\.lock\.linux-[a-z0-9]+\.json|\.github/workflows/runner-lock-check\.yml)$' "$list" > /dev/null || found=$?
               case "$found" in
                 1) needed=false ;;
                 *) needed=true ;;
@@ -180,5 +180,5 @@ jobs:
           if [ "$NEEDED" = true ]; then
             [ "$INSTALLED" = success ] || { echo "the install check did not pass on every architecture"; exit 1; }
           else
-            echo "this change touches no runner lock, no workflow file and nothing the install check loads or launches: nothing to install"
+            echo "this change touches no runner lock, not this workflow and nothing the install check loads or launches: nothing to install"
           fi

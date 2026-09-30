@@ -228,7 +228,7 @@ test('an archive cut short does not install, whether the Node version reports th
     assert.ok(fs.existsSync(path.join(ok.runDir, 'lib', 'libggml-cpu.so')));
 });
 
-test('a tar cut inside a member of zeros is refused, though its last blocks are zeros: its size is not a multiple of 512', async (t) => {
+test('a tar cut inside a member of zeros is refused, though its last blocks are zeros: the member runs past the end', async (t) => {
     // The cut keeps a whole launch file and 2,500 bytes of a member that is all zeros, so the end looks like the marker and only the size gives it away.
     const tar = tarOf(t, { 'llama-server': {}, 'zeros.bin': { mode: 0o644, content: Buffer.alloc(10_000) } });
     const dataStart = memberEnd(tar, 'zeros.bin') - Math.ceil(10_000 / TAR_BLOCK) * TAR_BLOCK;
@@ -241,6 +241,36 @@ test('a tar cut inside a member of zeros is refused, though its last blocks are 
     assert.equal(fs.existsSync(h.runDir), false);
     // The whole archive is fine.
     assert.equal((await installerOver(t, zlib.zstdCompressSync(tar)).installer.ensureRunnable('testrunner')).rebuilt, true);
+});
+
+test('a whole tar in a format the installer does not read is refused as such, not as a cut', async (t) => {
+    // A V7 header (no ustar magic, checksum made to add up) and a header whose checksum is wrong: no cut of a whole tar leaves either.
+    const tar = tarOf(t, { 'llama-server': {} });
+    const withHeader = (edit) => {
+        const bytes = Buffer.from(tar);
+        edit(bytes);
+        return bytes;
+    };
+    const resum = (bytes) => {
+        bytes.fill(0x20, 148, 156);
+        const sum = bytes.subarray(0, TAR_BLOCK).reduce((total, byte) => total + byte, 0);
+        bytes.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 'latin1');
+    };
+    const v7 = withHeader((bytes) => { bytes.fill(0, 257, 265); resum(bytes); });
+    const badSum = withHeader((bytes) => { bytes[3] ^= 0x01; });
+    const cases = [
+        [v7, 'the header at byte 0: the ustar magic is missing'],
+        [badSum, 'the header at byte 0: its checksum is wrong'],
+    ];
+    for (const [bytes, reason] of cases) {
+        const calls = [];
+        const h = installerOver(t, zlib.zstdCompressSync(bytes), { run: async (options) => { calls.push(options.args); return tarRun(options); } });
+        await assert.rejects(() => h.installer.ensureRunnable('testrunner'), (error) => error.code === 'install_failed'
+            && error.message === `decompressing runner-1.0.0.tar.zst failed: it is not a ustar, pax or GNU tar this installer reads (${reason})`, reason);
+        assert.deepEqual(calls, [], 'tar never ran');
+        assert.equal(fs.existsSync(h.marker), false);
+        assert.equal(fs.existsSync(h.runDir), false);
+    }
 });
 
 // A decoder that hands on the first `keep` bytes it decoded, then either fails as Node 24 does or just ends as Node 25.8 does.

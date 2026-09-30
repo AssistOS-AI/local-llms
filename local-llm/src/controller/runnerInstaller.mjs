@@ -123,10 +123,13 @@ function paxSize(data) {
  * size: the size field (octal, or GNU base 256), or the `size=` record of a pax extended header (`x` for the
  * next member, `g` from there on); a GNU long name or link header (`L`, `K`) is skipped by its size too.
  * The tar is whole only when a block of zeros is found exactly where a header is due, followed by a second
- * one. The end of the file where a header is due, a member that runs past the end, one block of zeros, a
- * header that is not a header: each is `{ cut }` with what was found. More than `maxMembers` members or a
- * pax header over `maxPax` bytes is `{ limit }`. A whole tar is null. The tail of a tar is no test: a member
- * whose data ends in zeros, cut at its end, looks like the end of the archive.
+ * one. What a cut can leave (the end of the file where a header is due, a member or pax header that runs
+ * past the end, one block of zeros) is `{ cut }`. What no prefix of a whole tar can contain (a header without
+ * the magic or with a wrong checksum, a size that is not a number, a malformed pax record, a block of zeros
+ * followed by anything but a second one) is `{ bad }`: the file is not a tar this installer reads. More than
+ * `maxMembers` headers (every header counts, pax and GNU long-name ones too) or a pax header over `maxPax`
+ * bytes is `{ limit }`. A whole tar is null. The tail of a tar is no test: a member whose data ends in zeros,
+ * cut at its end, looks like the end of the archive.
  */
 export async function tarProblem(file, { maxMembers = TAR_MAX_MEMBERS, maxPax = TAR_MAX_PAX_BYTES } = {}) {
     const { size } = await fs.promises.stat(file);
@@ -145,22 +148,22 @@ export async function tarProblem(file, { maxMembers = TAR_MAX_MEMBERS, maxPax = 
                 if (at + 2 * TAR_BLOCK > size) return { cut: 'only one end-of-archive block' };
                 const second = Buffer.alloc(TAR_BLOCK);
                 await readAt(at + TAR_BLOCK, second);
-                return second.every((byte) => byte === 0) ? null : { cut: 'a block of zeros is not followed by a second one' };
+                return second.every((byte) => byte === 0) ? null : { bad: 'a block of zeros is not followed by a second one' };
             }
             const fault = headerFault(block);
-            if (fault) return { cut: `the header at byte ${at}: ${fault}` };
+            if (fault) return { bad: `the header at byte ${at}: ${fault}` };
             members += 1;
-            if (members > maxMembers) return { limit: `it lists more than ${maxMembers} members` };
+            if (members > maxMembers) return { limit: `it has more than ${maxMembers} headers` };
             const type = String.fromCharCode(block[156]);
             const stated = tarNumber(block.subarray(124, 136));
-            if (stated === null) return { cut: `the header at byte ${at}: its size is not a number` };
+            if (stated === null) return { bad: `the header at byte ${at}: its size is not a number` };
             if (PAX_TYPES.has(type)) {
                 if (stated > maxPax) return { limit: `a pax header is larger than ${maxPax} bytes` };
                 if (at + TAR_BLOCK + roundUp(stated) > size) return { cut: 'a pax header runs past the end of the file' };
                 const data = Buffer.alloc(stated);
                 await readAt(at + TAR_BLOCK, data);
                 const pax = paxSize(data);
-                if (pax.fault) return { cut: pax.fault };
+                if (pax.fault) return { bad: pax.fault };
                 if (pax.size !== null) { if (type === 'x') local = pax.size; else global = pax.size; }
                 at += TAR_BLOCK + roundUp(stated);
                 continue;
@@ -215,9 +218,12 @@ async function decompressZstd(source, destination, { signal, label, decoder }) {
     const problem = await tarProblem(destination);
     if (problem) {
         await fs.promises.rm(destination, { force: true });
-        // A stream of several zstd frames, which Node 25.8 decodes only the first of, looks like a cut one: the message says both.
-        throw new LocalLlmError('install_failed', `decompressing ${label} failed: ${problem.limit
-            ?? `it was cut short (${problem.cut}), or has more zstd frames than this Node decodes`}`);
+        // A stream of several zstd frames, which Node 25.8 decodes only the first of, looks like a cut one: that message says both.
+        // A header no cut can produce (V7, a wrong checksum, a malformed pax record) is named as a format the installer does not read.
+        const why = problem.limit
+            ?? (problem.bad ? `it is not a ustar, pax or GNU tar this installer reads (${problem.bad})`
+                : `it was cut short (${problem.cut}), or has more zstd frames than this Node decodes`);
+        throw new LocalLlmError('install_failed', `decompressing ${label} failed: ${why}`);
     }
 }
 
