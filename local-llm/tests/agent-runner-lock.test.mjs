@@ -180,10 +180,28 @@ test('a grep or a git that fails runs the check: the only way to "not needed" is
     assert.equal(needed(t, { event: 'pull_request', changed: ['README.md'], stub: { command: 'grep', status: 0 } }), 'needed=true');
 });
 
+test('a path with non-ASCII characters is matched by what it is, not by how git would quote it', {
+    skip: (!repositoryRoot && 'the repository root is not mounted, so its .github directory is not here')
+        || (!hasTools && 'git and bash are needed to run the Detect step\'s script'),
+}, (t) => {
+    // By default git writes such a path as "local-llm/tools/\303\274ber.mjs", in quotes, which no pattern anchored on the name matches.
+    for (const file of [
+        'local-llm/tools/über.mjs', 'local-llm/src/controller/ünï/cödé.mjs', 'local-llm/src/runners/日本語.mjs', 'local-llm/catalog/runners.lock.linux-arm64.json',
+        'local-llm/src/errors.mjs', 'local-llm/tools/with space.mjs', 'local-llm/tools/tab\there.mjs',
+    ]) {
+        assert.equal(needed(t, { event: 'pull_request', changed: [file] }), 'needed=true', file);
+    }
+    for (const file of ['docs/über.md', 'local-llm/docs/ünï.md', 'local-llm/src/ünï/x.mjs', 'wörld.txt']) {
+        assert.equal(needed(t, { event: 'pull_request', changed: [file] }), 'needed=false', file);
+    }
+    // Among many non-ASCII names, and with the one that matters last.
+    assert.equal(needed(t, { event: 'pull_request', changed: ['docs/ä.md', 'docs/ö.md', 'local-llm/tools/zzz-über.mjs'] }), 'needed=true');
+});
+
 test('every file the install check loads is one whose change runs it', {
     skip: !repositoryRoot && 'the repository root is not mounted, so its .github directory is not here',
 }, () => {
-    const pattern = new RegExp(/grep -E '([^']+)' "\$list"/.exec(fs.readFileSync(WORKFLOW, 'utf8'))[1]);
+    const pattern = new RegExp(/grep -z -E '([^']+)' "\$list"/.exec(fs.readFileSync(WORKFLOW, 'utf8'))[1]);
     // The static import closure of the tool, in the agent's own source.
     const root = new URL('../', import.meta.url).pathname;
     const seen = new Set();

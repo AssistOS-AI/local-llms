@@ -11,12 +11,14 @@
 # It runs for every pull request and on demand, and never on a push, so pushing
 # a branch starts nothing. It has no workflow-level path filter, so it can be a
 # required status check without blocking pull requests that touch none of this:
-# the first job looks at what the pull request changes and, when it is none of
-# the lock, the installer code, the downloader or the registry code, the
-# per-architecture jobs are skipped and the `runner-lock-check` job at the end
-# still reports success. THE GATE HOLDS ONLY ONCE `runner-lock-check` IS A
-# REQUIRED STATUS CHECK ON `main` (a repository setting, not something this file
-# can turn on); until then an entry is held back by review alone.
+# the first job looks at what the pull request changes and, when it touches no
+# lock, not this workflow and nothing the install check loads or launches (all of
+# local-llm/src/controller/, local-llm/src/runners/, local-llm/src/errors.mjs and
+# local-llm/tools/), the per-architecture jobs are skipped and the
+# `runner-lock-check` job at the end still reports success. THE GATE HOLDS ONLY
+# ONCE `runner-lock-check` IS A REQUIRED STATUS CHECK ON `main` (a repository
+# setting, not something this file can turn on); until then an entry is held back
+# by review alone.
 
 name: runner-lock-check
 
@@ -53,16 +55,18 @@ jobs:
         # only way to "not needed" is a diff that was read and had no such file.
         # The names go to a file, never through a pipe: `grep -q` leaves at its first match, and a writer still
         # feeding it dies of SIGPIPE, which `pipefail` turns into "no match" once the list is bigger than a pipe's
-        # buffer (about 64 KiB of names), and a change to a lock would pass as "not needed".
+        # buffer (about 64 KiB of names), and a change to a lock would pass as "not needed". They are NUL-separated
+        # and never quoted (`-z`, core.quotePath=false): by default git writes a path with non-ASCII characters
+        # as "local-llm/tools/\303\274ber.mjs", which no pattern anchored on a name would match.
         run: |
           set -euo pipefail
           needed=true
           if [ "$EVENT" = pull_request ]; then
             list="$(mktemp)"
             trap 'rm -f "$list"' EXIT
-            if git diff --name-only HEAD^1 HEAD > "$list"; then
+            if git -c core.quotePath=false diff --name-only -z HEAD^1 HEAD > "$list"; then
               found=0
-              grep -E '^(local-llm/src/(controller|runners)/.+|local-llm/src/errors\.mjs|local-llm/tools/.+|local-llm/catalog/runners\.lock\.linux-[a-z0-9]+\.json|\.github/workflows/runner-lock-check\.yml)$' "$list" > /dev/null || found=$?
+              grep -z -E '^(local-llm/src/(controller|runners)/.+|local-llm/src/errors\.mjs|local-llm/tools/.+|local-llm/catalog/runners\.lock\.linux-[a-z0-9]+\.json|\.github/workflows/runner-lock-check\.yml)$' "$list" > /dev/null || found=$?
               case "$found" in
                 1) needed=false ;;
                 *) needed=true ;;
@@ -176,5 +180,5 @@ jobs:
           if [ "$NEEDED" = true ]; then
             [ "$INSTALLED" = success ] || { echo "the install check did not pass on every architecture"; exit 1; }
           else
-            echo "this change touches no runner lock, installer, downloader or registry file: nothing to install"
+            echo "this change touches no runner lock, no workflow file and nothing the install check loads or launches: nothing to install"
           fi
