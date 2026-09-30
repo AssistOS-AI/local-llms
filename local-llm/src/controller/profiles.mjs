@@ -144,13 +144,33 @@ function userSizing(model, fields) {
 
 // llama-server's need grows with the KV and MTP terms; vLLM's need is its share
 // plus its runner RAM, so there these fields only decide whether the model is
-// judged to fit the share.
-function userSizingWarning(fields, runner = 'llama-server') {
-    const prefix = `Sized with ${fields.join(', ')} from the model entry added at run time. Nothing checks these against the weights: `;
-    return runner === 'vllm'
-        ? `${prefix}an understated value only loosens the check that the weights and KV cache fit vLLM's share, so vLLM may fail `
+// judged to fit the share. The warning names where the values came from
+// (`sizingSource`, DS002): typed by hand (or `manual`) is the original text;
+// a GGUF header read when the model was added is read again from the verified
+// file after the download, and once it was (`sizingVerified`, set on the
+// copy the controller admits with) the values are the file's own; a
+// snapshot's config.json was checked against its digest at lookup.
+function userSizingWarning(fields, runner = 'llama-server', model = {}) {
+    const vllm = runner === 'vllm';
+    const tail = vllm
+        ? `an understated value only loosens the check that the weights and KV cache fit vLLM's share, so vLLM may fail `
             + 'to start; its memory need (the share plus its runner RAM) does not depend on it.'
-        : `${prefix}an understated value makes the estimate too small, and then only the memory guard stands behind the run.`;
+        : 'an understated value makes the estimate too small, and then only the memory guard stands behind the run.';
+    if (model.sizingSource === 'gguf-header' && model.sizingVerified === true && !vllm) {
+        return `Sized with ${fields.join(', ')} from the GGUF header of the downloaded file, which was checked against its sha256; `
+            + 'the header read when the model was added was read again from it.';
+    }
+    if (model.sizingSource === 'gguf-header') {
+        const later = vllm
+            ? 'vLLM loads the snapshot, not that file, so nothing reads it again: '
+            : 'the header is read again from the verified file after the download, and the last admissions use the values it gives; until then ';
+        return `Sized with ${fields.join(', ')} from the GGUF header read when the model was added; ${later}${tail}`;
+    }
+    if (model.sizingSource === 'config.json') {
+        return `Sized with ${fields.join(', ')} from the config.json of the model's pinned snapshot, checked against its digest when the model `
+            + `was looked up. Nothing checks these against the weights: ${tail}`;
+    }
+    return `Sized with ${fields.join(', ')} from the model entry added at run time. Nothing checks these against the weights: ${tail}`;
 }
 
 // Honest about what a default can miss (the defaults are DS003's).
@@ -261,7 +281,7 @@ export function admitUnifiedLlamaServer({ runnerId, model, source, params, memor
         warnings.push(`Not measured on unified memory: about ${gib(estimate.unifiedBytes)} is an estimate. The memory guard stops `
             + `the runner at once if available memory falls below ${gib(UNIFIED.floorBytes)}.`);
         if (estimate.defaulted.length) warnings.push(defaultedWarning(estimate.defaulted));
-        if (estimate.userSizing.length) warnings.push(userSizingWarning(estimate.userSizing));
+        if (estimate.userSizing.length) warnings.push(userSizingWarning(estimate.userSizing, 'llama-server', model));
     }
     if (unreadable(memory)) return result('incompatible', MEMORY_UNREADABLE, estimate, warnings);
     return poolVerdict({
@@ -293,7 +313,7 @@ export function admitUnifiedVllm({ model, source, params, memory, disk, remainin
     const warnings = ['Experimental: vLLM has not been measured on unified memory. Its share and its RAM beyond it are estimates, '
         + `and the memory guard stops it at once if available memory falls below ${gib(UNIFIED.floorBytes)}.`];
     if (defaulted.length) warnings.push(defaultedWarning(defaulted));
-    if (sizing.length) warnings.push(userSizingWarning(sizing, 'vllm'));
+    if (sizing.length) warnings.push(userSizingWarning(sizing, 'vllm', model));
     const base = {
         weightsBytes, kvBytes, overheadBytes: VLLM_OVERHEAD_BYTES, runnerRamBytes: VLLM_RUNNER_RAM_BYTES, floorBytes: UNIFIED.floorBytes,
         hostReserveBytes: UNIFIED.hostReserveBytes, poolBytes: memory.totalBytes ?? null, envelope: null, measured: false,
@@ -505,7 +525,7 @@ export function admitCpuLlamaServer({ model, source, params, memory = {}, cgroup
             + `if available memory falls below ${amount(estimate.floorBytes)}.`);
     }
     if (estimate.defaulted.length) warnings.push(defaultedWarning(estimate.defaulted));
-    if (estimate.userSizing.length) warnings.push(userSizingWarning(estimate.userSizing));
+    if (estimate.userSizing.length) warnings.push(userSizingWarning(estimate.userSizing, 'llama-server', model));
     if (pool.capped) warnings.push(`A container memory limit of ${amount(cgroupMemory.maxBytes)} applies.`);
     if (decision?.cause === 'unreadable-timeout' && decision.gpuRecovered && gpu?.available) {
         warnings.push(`The NVIDIA GPU is readable now (${gpu.name}); restart local-llm to use it.`);

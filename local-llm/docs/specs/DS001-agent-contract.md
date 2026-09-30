@@ -59,6 +59,7 @@ Every tool is declared in `mcp-config.json` with `command: "node"`, `args: ["/co
 | `local_llm_download_cancel` | `cancelDownload`: keeps the partial file; also cancels every Run submitted before it that has not started its job (below), and then succeeds; `not_downloading` when nothing is transferring and no Run was cancelled |
 | `local_llm_weights_delete` | `deleteWeights` |
 | `local_llm_model_add` / `_update` / `_remove` | registry edits; seed entries are read-only; an entry that carries a unified envelope (`unified`) or any `validated` label is refused with `invalid_model`, because only the trusted seed catalog may certify measurements (DS005) |
+| `local_llm_model_lookup` | `lookupModel`: `repo`, `revision`, `format` (`gguf`, `hf`, `exl3`), optional `file`; Hugging Face metadata only, plus up to 32 MiB from the start of one GGUF file for its header (DS002). Runs outside the command queue; downloads no weights |
 | `local_llm_test_prompt` | an admin smoke chat against the active runner on loopback; the one inference-routing exception (Question #3) |
 | `local_llm_runner_install` | `installRunner`: `runnerId`, `acceptLicence`; installs an on-demand runner from the image's runner lock (DS004). Who accepted a licence comes from the Router-signed invocation, never from tool input. |
 | `local_llm_runner_uninstall` | `uninstallRunner`: `runnerId`; refused while that runner runs a model |

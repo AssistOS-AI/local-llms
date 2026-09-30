@@ -8,6 +8,7 @@ import {
     estimateHtml,
     hardwareCardsHtml,
     installMessage,
+    lookupResultsHtml,
     modelsTableHtml,
     runnersIntroText,
     runnersPanelHtml,
@@ -659,3 +660,343 @@ test('a runner with no policy for the profile gets no column and no Install; whi
         assert.match(probe.note.textContent, /Ollama needs an NVIDIA GPU in this release/);
     })();
 });
+
+// ------------------------------------------------------------ the Add model lookup
+
+const SHA = 'a'.repeat(64);
+const GGUF_LOOKUP = {
+    provider: 'huggingface', repo: 'Qwen/Qwen2.5-0.5B-Instruct-GGUF', revision: 'main', commit: 'c'.repeat(40), format: 'gguf',
+    gated: false, license: 'apache-2.0', truncated: false, sizing: null,
+    files: [
+        { file: 'qwen2.5-0.5b-instruct-q4_k_m.gguf', size: 491_400_032, sha256: SHA, gitOid: null, quantization: 'Q4_K_M', shards: null },
+        { file: 'Q6_K/qwen-big-00001-of-00002.gguf', size: 1_100_000_000, sha256: null, gitOid: null, quantization: 'Q6_K',
+            shards: [{ file: 'Q6_K/qwen-big-00001-of-00002.gguf', size: 600_000_000, sha256: SHA }, { file: 'Q6_K/qwen-big-00002-of-00002.gguf', size: 500_000_000, sha256: SHA }] },
+        { file: 'mystery.gguf', size: 12_000, sha256: SHA, gitOid: null, quantization: null, shards: null },
+    ],
+};
+const SIZING = { contextLength: 32768, architecture: 'dense', memory: { layers: 24, kvBytesPerToken: 12288 }, source: 'gguf-header', readBytes: 4096, notes: [] };
+const tagsOf = (html) => [...html.matchAll(/<\/?([a-zA-Z][a-zA-Z0-9-]*)/g)].map((match) => match[1]);
+// The attribute names of every tag; a quoted value is consumed whole, so text inside one is never read as a name.
+const attributesOf = (html) => [...html.matchAll(/<[a-zA-Z][a-zA-Z0-9-]*((?:\s+[a-zA-Z_:][-a-zA-Z0-9_:.]*(?:="[^"]*")?)*)\s*>/g)]
+    .flatMap((match) => [...match[1].matchAll(/\s+([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:="[^"]*")?/g)].map((attribute) => attribute[1]));
+
+test('the lookup results list one row per GGUF file or split set, with size, quantization and gated status', () => {
+    const html = lookupResultsHtml(GGUF_LOOKUP, { selectedFile: 'Q6_K/qwen-big-00001-of-00002.gguf' });
+    const rows = html.split('<li class="local-llm-lookup-row">').slice(1);
+    assert.equal(rows.length, 3, 'one row per file or split set, never one per shard');
+    const rowText = (row) => row.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    assert.equal(rowText(rows[0]), 'qwen2.5-0.5b-instruct-q4_k_m.gguf Q4_K_M · 491 MB');
+    assert.equal(rowText(rows[1]), 'Q6_K/qwen-big-00001-of-00002.gguf Q6_K · 1.1 GB · 2 parts');
+    assert.equal(rowText(rows[2]), 'mystery.gguf quantization unknown · 12.0 KB');
+    // One radio per row, named by its index, checked only for the selected file.
+    assert.deepEqual([...html.matchAll(/data-local-action="pickLookupFile (\d+)"/g)].map((match) => match[1]), ['0', '1', '2']);
+    assert.deepEqual([...html.matchAll(/<input type="radio" name="lookupFile" value="(\d)"[^>]*?( checked)?>/g)].map((match) => [match[1], Boolean(match[2])]),
+        [['0', false], ['1', true], ['2', false]]);
+    // The repository's status and licence, and the commit the files are at.
+    assert.match(html, /Qwen\/Qwen2\.5-0\.5B-Instruct-GGUF at commit ccccccccccc/);
+    assert.match(html, /<span class="status-badge">Not gated<\/span>/);
+    assert.match(html, /<span class="status-badge">Licence apache-2\.0<\/span>/);
+    assert.doesNotMatch(html, />gated<\/span>/, 'no per-row marker when the repository is open');
+    assert.doesNotMatch(html, /HF_TOKEN/);
+    // A gated repository says so on the summary and on every row, and says how to set the token.
+    for (const [gated, label] of [['auto', 'Gated \\(access is granted automatically\\)'], ['manual', 'Gated \\(access needs approval\\)']]) {
+        const locked = lookupResultsHtml({ ...GGUF_LOOKUP, gated });
+        assert.match(locked, new RegExp(`<span class="status-badge">${label}</span>`));
+        assert.equal((locked.match(/<span class="status-badge">gated<\/span>/g) || []).length, 3, gated);
+        assert.match(locked, /ploinky var HF_TOKEN &lt;token&gt;/);
+    }
+    assert.match(lookupResultsHtml({ ...GGUF_LOOKUP, gated: null }), /Gated status unknown/);
+    assert.match(lookupResultsHtml({ ...GGUF_LOOKUP, license: null }), /^(?![\s\S]*Licence )/);
+    // The sizing read for the picked file, a cut-short list, an empty one, and a snapshot's summary.
+    const sized = lookupResultsHtml({ ...GGUF_LOOKUP, sizing: SIZING, truncated: true });
+    assert.match(sized, /Read from the GGUF header: 24 layers · context 32,768 tokens · KV cache 12,288 bytes per token \(f16\) · dense/);
+    assert.match(sized, /The list is cut short/);
+    assert.match(lookupResultsHtml({ ...GGUF_LOOKUP, sizing: { ...SIZING, memory: { layers: 24, kvBytesPerToken: null }, notes: ['x.ssm.state_size marks a hybrid model'] } }),
+        /KV cache size not read, so the estimate uses its default[^<]*\(x\.ssm\.state_size marks a hybrid model\)/);
+    assert.match(lookupResultsHtml({ ...GGUF_LOOKUP, files: [] }), /No GGUF file in this repository can be added/);
+    assert.doesNotMatch(lookupResultsHtml({ ...GGUF_LOOKUP, files: [] }), /<input/);
+    const snapshot = lookupResultsHtml({
+        ...GGUF_LOOKUP, format: 'hf', sizing: { ...SIZING, source: 'config.json' },
+        files: [{ file: 'config.json', size: 700, sha256: null, gitOid: '1'.repeat(40), quantization: null, shards: null },
+            { file: 'model.safetensors', size: 1_000_000_000, sha256: SHA, gitOid: null, quantization: null, shards: null }],
+    });
+    assert.match(snapshot, /2 files, 1 of them safetensors · 1\.0 GB in all/);
+    assert.match(snapshot, /Read from config\.json: 24 layers/);
+    assert.doesNotMatch(snapshot, /<input|pickLookupFile/);
+    assert.match(lookupResultsHtml({ ...GGUF_LOOKUP, format: 'exl3', sizing: null, files: [] }), /No config\.json to size the model from/);
+    // A message and an error are plain text.
+    assert.equal(lookupResultsHtml({ message: 'Looking up…' }).trim(), '<div class="settings-card-meta">Looking up…</div>');
+    assert.equal(lookupResultsHtml({ error: 'not_found: nothing' }).trim(), '<div class="settings-status error">not_found: nothing</div>');
+});
+
+test('text from Hugging Face or from a model file cannot add markup or attributes to the lookup results', () => {
+    const evil = '"><img src=x onerror=alert(1)><script>alert(2)</script>';
+    const hostile = lookupResultsHtml({
+        repo: `${evil}/r`, commit: evil, format: 'gguf', gated: evil, license: evil, truncated: true,
+        files: [
+            { file: `${evil}.gguf`, size: evil, quantization: evil, shards: [evil, evil] },
+            { file: "x' onclick='alert(3).gguf", size: Number.NaN, quantization: '<b>Q4</b>', shards: null },
+        ],
+        sizing: { source: evil, architecture: evil, contextLength: evil, memory: { layers: evil, kvBytesPerToken: evil }, notes: [evil, 7, { toString: () => evil }] },
+    }, { selectedFile: `${evil}.gguf` });
+    const allowed = new Set(['div', 'span', 'ul', 'li', 'label', 'input']);
+    assert.deepEqual([...new Set(tagsOf(hostile))].filter((tag) => !allowed.has(tag)), [], 'no element beyond the ones the view writes');
+    const attributes = new Set(['class', 'role', 'aria-label', 'type', 'name', 'value', 'data-local-action', 'checked']);
+    assert.deepEqual([...new Set(attributesOf(hostile))].filter((name) => !attributes.has(name)), [], 'no attribute beyond the ones the view writes');
+    assert.doesNotMatch(hostile, /<img|<script|<b>/);
+    // The only attribute values that come from data are numbers (the row index).
+    assert.deepEqual([...hostile.matchAll(/data-local-action="([^"]*)"/g)].map((match) => match[1]), ['pickLookupFile 0', 'pickLookupFile 1']);
+    // An error and a message are escaped too, and so are snapshot results.
+    assert.equal(lookupResultsHtml({ error: evil }).trim(), `<div class="settings-status error">${evil.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')}</div>`);
+    assert.doesNotMatch(lookupResultsHtml({ message: evil }), /<img|<script/);
+    const snapshot = lookupResultsHtml({ repo: evil, commit: evil, format: 'hf', gated: evil, license: evil, files: [{ file: evil, size: evil }], sizing: { source: evil, notes: [evil] } });
+    assert.deepEqual([...new Set(tagsOf(snapshot))].filter((tag) => !allowed.has(tag)), []);
+    assert.doesNotMatch(snapshot, /<img|<script/);
+    // A result with no data at all still renders, with no "undefined" or "null" in it.
+    for (const empty of [undefined, {}, { files: null }, { files: [null, {}] }]) {
+        const html = lookupResultsHtml(empty);
+        assert.doesNotMatch(html, /undefined|null|NaN/, JSON.stringify(empty));
+    }
+});
+
+test('the Add model form offers the four sources, a Look up button, a results region and a sizing label', () => {
+    const html = readText(new URL('local-llm-dashboard.html', DASHBOARD));
+    const form = /<form class="local-llm-add-form"[\s\S]*?<\/form>/.exec(html)[0];
+    const fieldsOf = (kind) => [...form.matchAll(/data-source-field="([^"]*)"[\s\S]*?<\/(?:label|div)>/g)]
+        .filter((match) => match[1].split(/\s+/).includes(kind))
+        .map((match) => /name="([^"]+)"/.exec(match[0])?.[1] ?? (/data-llm-lookup-button/.test(match[0]) ? 'lookup' : '?'));
+    assert.deepEqual(fieldsOf('huggingface'), ['repo', 'revision', 'lookup', 'file', 'quantization']);
+    assert.deepEqual(fieldsOf('hf'), ['repo', 'revision', 'lookup']);
+    assert.deepEqual(fieldsOf('exl3'), ['repo', 'revision', 'lookup']);
+    assert.deepEqual(fieldsOf('ollama'), ['tag']);
+    for (const token of [...form.matchAll(/data-source-field="([^"]*)"/g)].flatMap((match) => match[1].split(/\s+/))) {
+        assert.ok(['huggingface', 'hf', 'exl3', 'ollama'].includes(token), token);
+    }
+    assert.match(form, /<button type="button" class="gray-button" data-llm-lookup-button data-local-action="lookupModel">Look up<\/button>/);
+    assert.match(form, /<div class="local-llm-lookup" data-llm-lookup aria-live="polite"><\/div>/);
+    assert.match(form, /<p class="settings-card-meta" data-llm-sizing-label hidden><\/p>/);
+    // The presenter has the two actions and the table the page wires them to.
+    const presenter = readText(new URL('local-llm-dashboard.js', DASHBOARD));
+    for (const action of ['lookupModel', 'pickLookupFile']) assert.match(presenter, new RegExp(`\\n    (?:async )?${action}\\(`));
+    assert.equal(typeof dashboardModule.LocalLlmDashboard.prototype.lookupModel, 'function');
+    assert.equal(typeof dashboardModule.LocalLlmDashboard.prototype.pickLookupFile, 'function');
+});
+
+// An Add model form made of plain objects: each control keeps a value, the lookup region and label keep their text.
+function addFormHarness(t, callTool, { kind = 'huggingface', values = {} } = {}) {
+    const h = pollingHarness(t, callTool);
+    const p = h.presenter;
+    const names = ['id', 'displayName', 'license', 'repo', 'revision', 'file', 'quantization', 'contextLength', 'layers', 'kvBytesPerToken'];
+    const controls = Object.fromEntries(names.map((name) => [name, { name, value: values[name] ?? '' }]));
+    const attributes = { 'data-options': encodeURIComponent(JSON.stringify([{ value: 'dense', label: 'Dense' }, { value: 'moe', label: 'Mixture of experts' }])) };
+    const architecture = {
+        value: 'dense', presenterReadyPromise: Promise.resolve(), getAttribute: (name) => attributes[name], setAttribute: (name, value) => { attributes[name] = value; },
+    };
+    const region = { innerHTML: '' };
+    const label = { textContent: '', hidden: true };
+    const button = { disabled: false };
+    p.addForm = { elements: controls, reportValidity: () => true, reset() { for (const control of Object.values(controls)) control.value = ''; } };
+    p.lookupRegion = region;
+    p.lookupButton = button;
+    p.sizingLabel = label;
+    p.sourceKind = { value: kind };
+    p.element = { querySelector: (selector) => (selector === '#localLlmArchitecture' ? architecture : null), querySelectorAll: () => [] };
+    p.readAddForm = () => Object.fromEntries(Object.entries(controls).map(([name, control]) => [name, control.value]));
+    p.loadOverview = async () => {};
+    p.selectModel = async () => {};
+    return { ...h, p, controls, region, label, button, architecture };
+}
+const asTool = (value) => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
+
+test('Look up lists a repository, picking a file fills the form from its header, and Add records the sizing source', async (t) => {
+    const calls = [];
+    let busyDuring = null;
+    const h = addFormHarness(t, async (tool, args) => {
+        calls.push([tool, args]);
+        if (tool === 'local_llm_model_lookup') {
+            busyDuring = h.p.busy;
+            return asTool(args.file ? { ...GGUF_LOOKUP, sizing: SIZING } : GGUF_LOOKUP);
+        }
+        return asTool({ model: { id: 'x' } });
+    });
+    const { p, controls } = h;
+    controls.repo.value = ' Qwen/Qwen2.5-0.5B-Instruct-GGUF ';
+    await p.lookupModel();
+    assert.deepEqual(calls, [['local_llm_model_lookup', { repo: 'Qwen/Qwen2.5-0.5B-Instruct-GGUF', format: 'gguf' }]], 'the revision is left out when empty');
+    assert.equal(busyDuring, false, 'a lookup never makes the dashboard busy, so Stop and Cancel stay usable');
+    assert.equal((h.region.innerHTML.match(/<li class="local-llm-lookup-row">/g) || []).length, 3);
+    assert.equal(controls.file.value, '', 'nothing is picked yet');
+    assert.equal(h.label.hidden, true);
+    assert.equal(h.button.disabled, false);
+    // Picking the first row reads that file's header and fills the form.
+    await p.pickLookupFile(null, '0');
+    assert.deepEqual(calls[1], ['local_llm_model_lookup', { repo: 'Qwen/Qwen2.5-0.5B-Instruct-GGUF', format: 'gguf', file: 'qwen2.5-0.5b-instruct-q4_k_m.gguf' }]);
+    assert.deepEqual(
+        Object.fromEntries(['id', 'displayName', 'license', 'file', 'quantization', 'contextLength', 'layers', 'kvBytesPerToken'].map((name) => [name, controls[name].value])),
+        {
+            id: 'qwen2.5-0.5b-instruct-gguf-q4_k_m', displayName: 'Qwen2.5-0.5B-Instruct-GGUF Q4_K_M', license: 'apache-2.0', file: 'qwen2.5-0.5b-instruct-q4_k_m.gguf',
+            quantization: 'Q4_K_M', contextLength: '32768', layers: '24', kvBytesPerToken: '12288',
+        },
+    );
+    assert.equal(h.architecture.value, 'dense');
+    assert.equal(h.label.textContent, 'Sizing read from the GGUF header; checked again after download.');
+    assert.equal(h.label.hidden, false);
+    assert.match(h.region.innerHTML, /value="0"[^>]*checked/, 'the picked row stays selected');
+    assert.match(h.region.innerHTML, /Read from the GGUF header: 24 layers/);
+    // An id, name or licence the admin already typed is kept.
+    controls.id.value = 'my-own-id';
+    controls.displayName.value = 'Mine';
+    controls.license.value = 'Custom';
+    await p.pickLookupFile(null, '2');
+    assert.deepEqual([controls.id.value, controls.displayName.value, controls.license.value, controls.file.value, controls.quantization.value],
+        ['my-own-id', 'Mine', 'Custom', 'mystery.gguf', '']);
+    await p.pickLookupFile(null, '0');
+    // Add sends the looked-up sizing as such.
+    await p.submitAddModel({ preventDefault() {} });
+    const add = calls.filter(([tool]) => tool === 'local_llm_model_add').at(-1)[1].model;
+    assert.equal(add.sizingSource, 'gguf-header');
+    assert.deepEqual([add.contextLength, add.memory, add.sources.gguf.file, add.sources.gguf.revision], [32768, { layers: 24, kvBytesPerToken: 12288 }, 'qwen2.5-0.5b-instruct-q4_k_m.gguf', 'main']);
+    assert.equal(p.lookupSizing, null, 'the form starts again after Add');
+    assert.equal(h.region.innerHTML, '');
+    assert.equal(h.label.hidden, true);
+
+    // A value changed by hand after the lookup is recorded as manual; so is a repository changed after it.
+    const afterLookup = async (change) => {
+        const sent = [];
+        const form = addFormHarness(t, async (tool, args) => {
+            sent.push([tool, args]);
+            return asTool(tool === 'local_llm_model_lookup' ? { ...GGUF_LOOKUP, sizing: SIZING } : { model: {} });
+        });
+        form.controls.repo.value = GGUF_LOOKUP.repo;
+        await form.p.lookupModel();
+        await form.p.pickLookupFile(null, '0');
+        change(form.controls);
+        await form.p.submitAddModel({ preventDefault() {} });
+        return sent.filter(([tool]) => tool === 'local_llm_model_add').at(-1)[1].model;
+    };
+    const edited = await afterLookup((controls) => { controls.layers.value = '28'; });
+    assert.deepEqual([edited.sizingSource, edited.memory.layers], ['manual', 28]);
+    assert.equal((await afterLookup((controls) => { controls.repo.value = 'someone/else'; })).sizingSource, 'manual');
+    assert.equal((await afterLookup((controls) => { controls.file.value = 'other.gguf'; })).sizingSource, 'manual');
+    assert.equal((await afterLookup(() => {})).sizingSource, 'gguf-header', 'control: untouched');
+    // Typed from scratch with no lookup: today's entry, with no sizingSource.
+    const typed = [];
+    const scratch = addFormHarness(t, async (tool, args) => { typed.push([tool, args]); return asTool({ model: {} }); }, { values: { id: 'typed', repo: 'a/b', file: 'm.gguf', layers: '12' } });
+    await scratch.p.submitAddModel({ preventDefault() {} });
+    assert.equal('sizingSource' in typed.at(-1)[1].model, false);
+    assert.deepEqual(typed.at(-1)[1].model.memory, { layers: 12 });
+});
+
+test('Look up for a safetensors or EXL3 repository sizes it from config.json; an empty repository, a failure and a stale answer are handled', async (t) => {
+    const snapshot = {
+        ...GGUF_LOOKUP, format: 'hf', license: 'mit', sizing: { ...SIZING, source: 'config.json' },
+        files: [{ file: 'config.json', size: 700, sha256: null, gitOid: '1'.repeat(40), quantization: null, shards: null }, { file: 'model.safetensors', size: 1e9, sha256: SHA, gitOid: null, quantization: null, shards: null }],
+    };
+    for (const kind of ['hf', 'exl3']) {
+        const calls = [];
+        const h = addFormHarness(t, async (tool, args) => { calls.push([tool, args]); return asTool(tool === 'local_llm_model_lookup' ? { ...snapshot, format: kind, repo: args.repo, revision: args.revision } : { model: {} }); }, { kind });
+        h.controls.repo.value = 'owner/repo';
+        h.controls.revision.value = 'dev';
+        await h.p.lookupModel();
+        assert.deepEqual(calls, [['local_llm_model_lookup', { repo: 'owner/repo', format: kind, revision: 'dev' }]]);
+        // The sizing arrives with the list: no file to pick.
+        assert.deepEqual([h.controls.contextLength.value, h.controls.layers.value, h.controls.kvBytesPerToken.value, h.controls.license.value], ['32768', '24', '12288', 'mit']);
+        assert.equal(h.label.textContent, 'Sizing read from config.json, checked against its pinned digest.');
+        assert.equal(h.controls.file.value, '');
+        await h.p.submitAddModel({ preventDefault() {} });
+        const { model } = calls.at(-1)[1];
+        assert.deepEqual(Object.keys(model.sources), [kind]);
+        assert.equal(model.sources[kind].type, 'hf-snapshot');
+        assert.deepEqual([model.sizingSource, model.contextLength, model.memory], ['config.json', 32768, { layers: 24, kvBytesPerToken: 12288 }]);
+    }
+    // No config.json in the repository: the label says the defaults apply, and no sizing source is recorded.
+    const bare = addFormHarness(t, async () => asTool({ ...snapshot, sizing: null }), { kind: 'hf' });
+    bare.controls.repo.value = 'owner/repo';
+    await bare.p.lookupModel();
+    assert.match(bare.label.textContent, /No config\.json was found/);
+    assert.equal(bare.p.lookupSizing, null);
+    // An Ollama tag has no lookup, and an empty repository is asked for before any request.
+    const calls = [];
+    const none = addFormHarness(t, async (tool, args) => { calls.push(tool); return asTool({}); }, { kind: 'ollama' });
+    await none.p.lookupModel();
+    assert.deepEqual(calls, []);
+    const empty = addFormHarness(t, async (tool) => { calls.push(tool); return asTool({}); });
+    await empty.p.lookupModel();
+    assert.deepEqual(calls, []);
+    assert.match(empty.region.innerHTML, /Enter a repository such as owner\/name first\./);
+    // A failure is shown as text, leaves the form alone, and the button works again.
+    const failing = addFormHarness(t, async () => { throw new Error('access_denied: <img src=x onerror=1> set HF_TOKEN'); });
+    failing.controls.repo.value = 'owner/private';
+    await failing.p.lookupModel();
+    assert.match(failing.region.innerHTML, /^<div class="settings-status error">access_denied: &lt;img src=x onerror=1&gt; set HF_TOKEN<\/div>$/);
+    assert.equal(failing.button.disabled, false);
+    assert.equal(failing.p.lookupPending, false);
+    // A failure while a file's header is read keeps the list, and reports through the status line.
+    let phase = 0;
+    const partial = addFormHarness(t, async (tool, args) => { phase += 1; if (args.file) throw new Error('invalid_gguf: bad header'); return asTool(GGUF_LOOKUP); });
+    partial.controls.repo.value = 'owner/repo';
+    await partial.p.lookupModel();
+    await partial.p.pickLookupFile(null, '0');
+    assert.equal(phase, 2);
+    assert.equal((partial.region.innerHTML.match(/<li class="local-llm-lookup-row">/g) || []).length, 3, 'the list is still there');
+    assert.equal(partial.controls.file.value, '', 'nothing was filled in');
+    assert.equal(partial.label.hidden, true);
+    // Two lookups in flight: the answer of the older one is ignored.
+    const waiting = [];
+    const racing = addFormHarness(t, (tool, args) => new Promise((resolve) => waiting.push({ args, resolve })));
+    racing.controls.repo.value = 'owner/first';
+    const first = racing.p.lookupModel();
+    racing.p.resetLookup();
+    racing.controls.repo.value = 'owner/second';
+    const second = racing.p.lookupModel();
+    waiting[0].resolve(asTool({ ...GGUF_LOOKUP, repo: 'owner/first' }));
+    await first;
+    assert.equal(racing.region.innerHTML.includes('owner/first'), false, 'a superseded answer is dropped');
+    waiting[1].resolve(asTool({ ...GGUF_LOOKUP, repo: 'owner/second' }));
+    await second;
+    assert.equal(racing.region.innerHTML.includes('owner/second'), true);
+    // While one lookup is pending another is not started.
+    const pending = [];
+    const once = addFormHarness(t, (tool, args) => new Promise((resolve) => pending.push(resolve)));
+    once.controls.repo.value = 'owner/repo';
+    const running = once.p.lookupModel();
+    await once.p.lookupModel();
+    assert.equal(pending.length, 1);
+    assert.equal(once.button.disabled, true, 'the button is disabled while it waits');
+    pending[0](asTool(GGUF_LOOKUP));
+    await running;
+    assert.equal(once.button.disabled, false);
+});
+
+test('the source fields follow the four kinds, and the lookup is forgotten when the source changes', () => {
+    const fields = [
+        { dataset: { sourceField: 'huggingface hf exl3' }, hidden: false, querySelector: () => ({ name: 'repo', required: false }) },
+        { dataset: { sourceField: 'huggingface' }, hidden: false, querySelector: () => ({ name: 'file', required: false }) },
+        { dataset: { sourceField: 'ollama' }, hidden: false, querySelector: () => ({ name: 'tag', required: false }) },
+    ];
+    const inputs = fields.map((field) => field.querySelector());
+    fields.forEach((field, index) => { field.querySelector = () => inputs[index]; });
+    const presenter = new dashboardModule.LocalLlmDashboard({ isConnected: true, querySelector: () => null, querySelectorAll: () => fields }, () => {});
+    const state = () => fields.map((field, index) => [field.hidden, inputs[index].required]);
+    for (const [kind, expected] of [
+        ['huggingface', [[false, true], [false, true], [true, false]]],
+        ['hf', [[false, true], [true, false], [true, false]]],
+        ['exl3', [[false, true], [true, false], [true, false]]],
+        ['ollama', [[true, false], [true, false], [false, true]]],
+        ['anything else', [[false, true], [false, true], [true, false]]],
+    ]) {
+        presenter.sourceKind = { value: kind };
+        presenter.updateSourceFields();
+        assert.deepEqual(state(), expected, kind);
+    }
+    presenter.lookup = { args: {}, result: {} };
+    presenter.lookupSizing = { source: 'gguf-header' };
+    presenter.lookupRegion = { innerHTML: 'x' };
+    presenter.sizingLabel = { textContent: 'y', hidden: false };
+    presenter.resetLookup();
+    assert.deepEqual([presenter.lookup, presenter.lookupRegion.innerHTML, presenter.sizingLabel.textContent, presenter.sizingLabel.hidden], [null, '', '', true]);
+    assert.deepEqual(presenter.lookupSizing, { source: 'gguf-header' }, 'what was filled in is kept for the sizing source, unless the form is cancelled or added');
+    presenter.resetLookup({ forget: true });
+    assert.equal(presenter.lookupSizing, null);
+});
+

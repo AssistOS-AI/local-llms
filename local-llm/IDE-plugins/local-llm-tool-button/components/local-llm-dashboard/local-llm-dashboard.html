@@ -104,7 +104,7 @@
             <form class="local-llm-add-form" id="localLlmAddForm" data-llm-form="add" hidden>
                 <div>
                     <h3 class="settings-section-title">Add model</h3>
-                    <p class="settings-section-description">One GGUF file from a Hugging Face repository (read by every GGUF runner, such as llama.cpp) or one Ollama library tag. The source is pinned to a commit when you add it; nothing is downloaded.</p>
+                    <p class="settings-section-description">A model from Hugging Face (one GGUF file, read by every GGUF runner such as llama.cpp; a safetensors snapshot for vLLM; or an EXL3 snapshot for TabbyAPI) or one Ollama library tag. Look up a repository to pick a file and fill in its sizing. The source is pinned to a commit when you add it; nothing is downloaded until you press Run.</p>
                 </div>
                 <label class="local-llm-field">
                     <span class="form-label">Id</span>
@@ -134,19 +134,23 @@
                                    aria-label="Source"
                                    data-name="sourceKind"
                                    data-selected="huggingface"
-                                   data-options="%5B%7B%22value%22%3A%22huggingface%22%2C%22label%22%3A%22Hugging%20Face%20GGUF%20file%22%7D%2C%7B%22value%22%3A%22ollama%22%2C%22label%22%3A%22Ollama%20library%20tag%22%7D%5D"></custom-select>
+                                   data-options="%5B%7B%22value%22%3A%22huggingface%22%2C%22label%22%3A%22Hugging%20Face%20GGUF%20file%22%7D%2C%7B%22value%22%3A%22hf%22%2C%22label%22%3A%22Hugging%20Face%20safetensors%20%28vLLM%29%22%7D%2C%7B%22value%22%3A%22exl3%22%2C%22label%22%3A%22Hugging%20Face%20EXL3%20%28TabbyAPI%29%22%7D%2C%7B%22value%22%3A%22ollama%22%2C%22label%22%3A%22Ollama%20library%20tag%22%7D%5D"></custom-select>
                 </label>
-                <label class="local-llm-field" data-source-field="huggingface">
+                <label class="local-llm-field" data-source-field="huggingface hf exl3">
                     <span class="form-label">Repository</span>
                     <input class="form-input" name="repo" placeholder="unsloth/Qwen3.6-35B-A3B-GGUF">
                 </label>
+                <label class="local-llm-field" data-source-field="huggingface hf exl3">
+                    <span class="form-label">Revision</span>
+                    <input class="form-input" name="revision" placeholder="main">
+                </label>
+                <div class="local-llm-field" data-source-field="huggingface hf exl3">
+                    <button type="button" class="gray-button" data-llm-lookup-button data-local-action="lookupModel">Look up</button>
+                    <div class="local-llm-lookup" data-llm-lookup aria-live="polite"></div>
+                </div>
                 <label class="local-llm-field" data-source-field="huggingface">
                     <span class="form-label">GGUF file</span>
                     <input class="form-input" name="file" placeholder="Qwen3.6-35B-A3B-UD-Q3_K_M.gguf">
-                </label>
-                <label class="local-llm-field" data-source-field="huggingface">
-                    <span class="form-label">Revision</span>
-                    <input class="form-input" name="revision" placeholder="main">
                 </label>
                 <label class="local-llm-field" data-source-field="huggingface">
                     <span class="form-label">Quantization</span>
@@ -156,7 +160,8 @@
                     <span class="form-label">Ollama tag</span>
                     <input class="form-input" name="tag" placeholder="granite4:tiny-h">
                 </label>
-                <p class="settings-card-meta">Optional sizing data from the model card or GGUF metadata. Without it the memory estimate uses defaults and says which.</p>
+                <p class="settings-card-meta">Sizing data for the memory estimate. A lookup fills it in; without it the estimate uses defaults and says which.</p>
+                <p class="settings-card-meta" data-llm-sizing-label hidden></p>
                 <label class="local-llm-field">
                     <span class="form-label">Context length (tokens)</span>
                     <input class="form-input" name="contextLength" type="number" min="512" step="1" placeholder="262144">

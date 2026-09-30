@@ -466,3 +466,81 @@ export function estimateHtml({ admission = null, context = null, error = '' } = 
         ${context ? `<div class="settings-card-meta">Context: ${escapeHtml(contextLabel(context))}</div>` : ''}
         ${summary ? `<div class="settings-card-meta">${escapeHtml(summary)}</div>` : ''}`;
 }
+
+const GATED_LABELS = Object.freeze({
+    auto: 'Gated (access is granted automatically)',
+    manual: 'Gated (access needs approval)',
+});
+
+function gatedLabel(gated) {
+    if (gated === false) return 'Not gated';
+    if (Object.hasOwn(GATED_LABELS, gated)) return GATED_LABELS[gated];
+    return typeof gated === 'string' && gated ? `Gated (${gated})` : 'Gated status unknown';
+}
+
+const count = (value) => (Number.isFinite(value) ? value.toLocaleString('en-US') : '—');
+
+// What was read for the sizing, in one line; every value is data from Hugging Face or from a file, so it is escaped.
+function sizingLine(sizing) {
+    if (!sizing || typeof sizing !== 'object') return '';
+    const from = sizing.source === 'gguf-header' ? 'the GGUF header' : sizing.source === 'config.json' ? 'config.json' : 'the model files';
+    const memory = sizing.memory || {};
+    const parts = [
+        `${count(memory.layers)} layers`,
+        `context ${count(sizing.contextLength)} tokens`,
+        Number.isFinite(memory.kvBytesPerToken) ? `KV cache ${count(memory.kvBytesPerToken)} bytes per token (f16)` : 'KV cache size not read, so the estimate uses its default',
+        String(sizing.architecture) === 'moe' ? 'mixture of experts' : 'dense',
+    ];
+    const notes = Array.isArray(sizing.notes) ? sizing.notes.filter((note) => typeof note === 'string' && note) : [];
+    return `<div class="settings-card-meta">Read from ${escapeHtml(from)}: ${escapeHtml(parts.join(' · '))}${notes.length ? escapeHtml(` (${notes.join('; ')})`) : ''}</div>`;
+}
+
+/**
+ * The Add model form's lookup results (DS002): what `local_llm_model_lookup`
+ * returned, or its error. A GGUF lookup lists one radio row per file or split
+ * set, `file · quantization · size`, with the repository's gated status; a
+ * snapshot lookup lists a summary. Everything in `result` is text from Hugging
+ * Face or from a model file, so every value is escaped; a row's action names
+ * its index in `result.files`, never a file name.
+ */
+export function lookupResultsHtml(result = {}, { selectedFile = '' } = {}) {
+    if (result?.error) return `<div class="settings-status error">${escapeHtml(result.error)}</div>`;
+    if (result?.message) return `<div class="settings-card-meta">${escapeHtml(result.message)}</div>`;
+    const files = Array.isArray(result?.files) ? result.files : [];
+    const gated = result?.gated === 'auto' || result?.gated === 'manual' || (typeof result?.gated === 'string' && result.gated !== '');
+    const badges = [
+        `<span class="status-badge">${escapeHtml(gatedLabel(result?.gated))}</span>`,
+        result?.license ? `<span class="status-badge">Licence ${escapeHtml(result.license)}</span>` : '',
+    ].filter(Boolean).join('');
+    const head = `
+        <div class="settings-card-meta">${escapeHtml(result?.repo ?? '')} at commit ${escapeHtml(String(result?.commit ?? '').slice(0, 12))}</div>
+        <div class="local-llm-lookup-badges">${badges}</div>
+        ${gated ? '<div class="settings-card-meta">Downloading a gated model needs a token: run `ploinky var HF_TOKEN &lt;token&gt;` on the host, then restart local-llm.</div>' : ''}`;
+    const cut = result?.truncated
+        ? '<div class="settings-card-meta">The list is cut short: the repository has more files or folders than a lookup reads.</div>' : '';
+    if (result?.format === 'hf' || result?.format === 'exl3') {
+        const weights = files.filter((entry) => String(entry?.file).endsWith('.safetensors'));
+        const total = files.reduce((sum, entry) => sum + (Number.isFinite(entry?.size) ? entry.size : 0), 0);
+        return `${head}
+        <div class="settings-card-meta">${escapeHtml(`${files.length} files, ${weights.length} of them safetensors · ${formatBytes(total)} in all`)}</div>
+        ${sizingLine(result.sizing) || '<div class="settings-card-meta">No config.json to size the model from: the estimate uses its defaults.</div>'}${cut}`;
+    }
+    if (files.length === 0) {
+        return `${head}
+        <div class="settings-card-meta">No GGUF file in this repository can be added (a file must be stored with Git LFS, and a split file needs all of its parts).</div>${cut}`;
+    }
+    const rows = files.map((entry, index) => {
+        const shards = Array.isArray(entry?.shards) ? `${entry.shards.length} parts` : '';
+        const text = [entry?.quantization || 'quantization unknown', formatBytes(entry?.size), shards].filter(Boolean).join(' · ');
+        return `
+            <li class="local-llm-lookup-row">
+                <label>
+                    <input type="radio" name="lookupFile" value="${index}" data-local-action="pickLookupFile ${index}"${entry?.file === selectedFile ? ' checked' : ''}>
+                    <span class="local-llm-lookup-file">${escapeHtml(entry?.file ?? '')}</span>
+                    <span class="settings-card-meta">${escapeHtml(text)}${gated ? '<span class="status-badge">gated</span>' : ''}</span>
+                </label>
+            </li>`;
+    }).join('');
+    return `${head}
+        <ul class="local-llm-lookup-files" role="radiogroup" aria-label="GGUF files">${rows}</ul>${sizingLine(result.sizing)}${cut}`;
+}

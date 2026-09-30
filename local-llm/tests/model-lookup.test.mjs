@@ -12,10 +12,12 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { controllerHandlers } from '../src/controlHandlers.mjs';
+import { admissionResult } from '../src/controller/admission.mjs';
 import { HF_FILE_SEGMENT_RE, HF_REPO_RE, HF_REVISION_RE, validateModel } from '../src/controller/catalog.mjs';
 import { createController } from '../src/controller/deployments.mjs';
 import { DownloadError } from '../src/controller/downloader.mjs';
 import { lookupHuggingFaceModel, normalizeLookupInput, quantizationOf, sizingFromConfig } from '../src/controller/modelLookup.mjs';
+import { admitCpuLlamaServer, admitUnifiedLlamaServer, admitUnifiedVllm } from '../src/controller/profiles.mjs';
 import { createStateStore } from '../src/controller/stateStore.mjs';
 import { DRAIN_QUEUE_WAIT_MS } from '../src/drainBudget.mjs';
 import { TOOL_OPERATIONS, handleTool } from '../tools/local_llm_tool.mjs';
@@ -556,6 +558,61 @@ test('the quantization is read from the file name', () => {
     for (const [file, quantization] of Object.entries(cases)) assert.equal(quantizationOf(file), quantization, file);
 });
 
+test('the user-sizing warning names where the values came from, and keeps its text for values typed by hand', () => {
+    const GIB = 1024 * MIB;
+    const typedLlama = 'Sized with memory.kvBytesPerToken from the model entry added at run time. Nothing checks these against the weights: '
+        + 'an understated value makes the estimate too small, and then only the memory guard stands behind the run.';
+    const typedVllm = 'Sized with memory.kvBytesPerToken from the model entry added at run time. Nothing checks these against the weights: '
+        + 'an understated value only loosens the check that the weights and KV cache fit vLLM\'s share, so vLLM may fail to start; '
+        + 'its memory need (the share plus its runner RAM) does not depend on it.';
+    const entry = (extra) => ({ id: 'u', displayName: 'u', seed: false, architecture: 'dense', contextLength: 32768, memory: { kvBytesPerToken: 12288 }, ...extra });
+    const source = { type: 'huggingface', size: 400 * MIB };
+    const disk = { freeBytes: 100_000 * MIB };
+    const warningsOf = {
+        cpu: (model) => admitCpuLlamaServer({
+            model, source, params: { ctxSize: 4096, parallel: 1 }, memory: { totalBytes: 6036128 * 1024, availableBytes: 3122576 * 1024 }, disk,
+            gpu: { available: false }, decision: { cause: 'absent', reason: 'No GPU' },
+        }, admissionResult).warnings,
+        unified: (model) => admitUnifiedLlamaServer({
+            runnerId: 'llama.cpp', model, source, params: { ctxSize: 4096, parallel: 1, loadMode: 'mmap', mtp: false },
+            memory: { totalBytes: 128 * GIB, availableBytes: 100 * GIB }, disk,
+        }, admissionResult).warnings,
+        vllm: (model) => admitUnifiedVllm({
+            model, source, params: { maxModelLen: 4096, kvCacheDtype: 'auto', gpuMemoryUtilization: null },
+            memory: { totalBytes: 128 * GIB, availableBytes: 100 * GIB }, disk,
+        }, admissionResult).warnings,
+    };
+    const sizedWith = (runner, extra) => warningsOf[runner](entry(extra)).find((warning) => warning.startsWith('Sized with'));
+    // Typed by hand, or marked manual: the text that was always there, word for word.
+    for (const extra of [{}, { sizingSource: 'manual' }]) {
+        assert.equal(sizedWith('cpu', extra), typedLlama, JSON.stringify(extra));
+        assert.equal(sizedWith('unified', extra), typedLlama, JSON.stringify(extra));
+        assert.equal(sizedWith('vllm', extra), typedVllm, JSON.stringify(extra));
+    }
+    // A GGUF header read at lookup: says it will be read again, and what happens until then.
+    for (const runner of ['cpu', 'unified']) {
+        assert.equal(sizedWith(runner, { sizingSource: 'gguf-header' }),
+            'Sized with memory.kvBytesPerToken from the GGUF header read when the model was added; the header is read again from the verified file '
+            + 'after the download, and the last admissions use the values it gives; until then an understated value makes the estimate too small, '
+            + 'and then only the memory guard stands behind the run.', runner);
+        // The copy the controller admits with after the download says the values are the file's own.
+        assert.equal(sizedWith(runner, { sizingSource: 'gguf-header', sizingVerified: true }),
+            'Sized with memory.kvBytesPerToken from the GGUF header of the downloaded file, which was checked against its sha256; '
+            + 'the header read when the model was added was read again from it.', runner);
+        assert.match(sizedWith(runner, { sizingSource: 'config.json' }),
+            /^Sized with memory\.kvBytesPerToken from the config\.json of the model's pinned snapshot, checked against its digest when the model was looked up\. Nothing checks these against the weights: an understated value makes the estimate too small/, runner);
+    }
+    // vLLM loads a snapshot, not the GGUF file, so nothing reads that header again for its run.
+    assert.match(sizedWith('vllm', { sizingSource: 'gguf-header' }), /^Sized with memory\.kvBytesPerToken from the GGUF header read when the model was added; vLLM loads the snapshot, not that file, so nothing reads it again: an understated value only loosens/);
+    assert.match(sizedWith('vllm', { sizingSource: 'gguf-header', sizingVerified: true }), /nothing reads it again/);
+    assert.match(sizedWith('vllm', { sizingSource: 'config.json' }), /^Sized with memory\.kvBytesPerToken from the config\.json of the model's pinned snapshot/);
+    // A catalog entry carries no user-sizing warning whatever it says, and an entry with no user sizing has none.
+    for (const runner of ['cpu', 'unified', 'vllm']) {
+        assert.equal(sizedWith(runner, { seed: true, sizingSource: 'gguf-header' }), undefined, runner);
+        assert.equal(sizedWith(runner, { memory: {}, sizingSource: 'gguf-header' }), undefined, runner);
+    }
+});
+
 // ------------------------------------------------------------------ the controller
 
 const GIB = 1024 * MIB;
@@ -653,6 +710,10 @@ test('the header is read again from the verified file and the last admission use
     // The file on disk says 12288 KV bytes per token; the entry was added with 1000 (what an older or different file said).
     const h = harness(t, { hf, weights: pad(QWEN_HEADER, 65536) });
     await h.controller.addModel(entryFor('understated', { sizingSource: 'gguf-header', contextLength: 32768, memory: { layers: 24, kvBytesPerToken: 1000 } }));
+    // Before the download the offer says its sizing is from a header that is still to be checked.
+    const offered = (await h.controller.overview()).models.find((model) => model.id === 'understated').runners['llama.cpp'].admission;
+    assert.ok(offered.warnings.some((warning) => /^Sized with memory\.kvBytesPerToken from the GGUF header read when the model was added; the header is read again from the verified file/.test(warning)),
+        offered.warnings.join(' | '));
     await runOn(h, 'understated', 'request-0001');
     await until(() => h.controller.state.deployment?.phase === 'ready');
     const { deployment } = h.controller.state;
@@ -662,6 +723,8 @@ test('the header is read again from the verified file and the last admission use
     assert.equal(deployment.admission.estimate.kvBytes, 12288 * ctx, 'the estimate uses the verified 12288, not the stored 1000');
     assert.equal(deployment.admission.status, 'ok');
     assert.deepEqual(deployment.admission.estimate.defaulted, []);
+    assert.ok(deployment.admission.warnings.some((warning) => /^Sized with memory\.kvBytesPerToken from the GGUF header of the downloaded file, which was checked against its sha256/.test(warning)),
+        'the warning says the values are the verified file\'s own');
     assert.equal(h.started.length, 1);
     // The difference is named, with both values, once.
     const lines = h.logLines('differs from the sizing stored');
@@ -719,8 +782,12 @@ test('a downloaded file whose header cannot be read is not sized, and fails the 
 test('a looked-up entry is added with its sizing source, and added twice is duplicate_model', async (t) => {
     const hf = await fakeHf(t, modelRepo());
     const h = harness(t, { hf });
+    const tree = () => fs.readdirSync(h.dir, { recursive: true }).sort();
+    const before = tree();
     const looked = await h.controller.lookupModel({ repo: REPO, file: 'small-Q4_K_M.gguf' });
     assert.deepEqual(looked.files.map((row) => row.file), ['small-Q4_K_M.gguf']);
+    assert.deepEqual(tree(), before, 'a lookup writes nothing under /data');
+    assert.deepEqual(h.stored().registry, [], 'and records no model');
     assert.ok(hf.requests.every((request) => request.authorization === `Bearer ${TOKEN}`), 'the controller sends its HF_TOKEN to the lookup');
     const entry = entryFor('looked-up', {
         license: looked.license, sizingSource: 'gguf-header', architecture: looked.sizing.architecture,

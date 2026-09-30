@@ -5,6 +5,7 @@ import {
     escapeHtml,
     fieldsFromSchema,
     formatBytes,
+    lookupFormatFor,
     mergeLogs,
     modelEntryFromForm,
     newRequestId,
@@ -15,6 +16,8 @@ import {
     runnerLabel,
     runnerOptions,
     shouldPoll,
+    sizingSourceFor,
+    suggestModelId,
 } from '../../../local-llm-settings/local-llm-settings-model.js';
 import {
     ACTIVE_PHASES,
@@ -23,6 +26,7 @@ import {
     hasWeightsOnDisk,
     hardwareCardsHtml,
     installMessage,
+    lookupResultsHtml,
     modelsTableHtml,
     runnersIntroText,
     runnersPanelHtml,
@@ -65,6 +69,12 @@ export class LocalLlmDashboard {
         this.previewTimer = null;
         this.previewSerial = 0;
         this.overviewTimer = null;
+        // The Add model form's lookup: its last result and request, what it filled in (to tell hand-edited values from
+        // looked-up ones), and which request is current. A lookup never makes the dashboard busy, so Stop and Cancel stay usable.
+        this.lookup = null;
+        this.lookupSizing = null;
+        this.lookupSerial = 0;
+        this.lookupPending = false;
         this.rendered = {};
         this.closed = false;
         this.onVisibilityChange = () => {
@@ -88,6 +98,9 @@ export class LocalLlmDashboard {
         this.detailInfo = find('[data-llm-detail-info]');
         this.addForm = find('[data-llm-form="add"]');
         this.addButton = find('[data-llm-add]');
+        this.lookupRegion = find('[data-llm-lookup]');
+        this.lookupButton = find('[data-llm-lookup-button]');
+        this.sizingLabel = find('[data-llm-sizing-label]');
         this.sourceKind = find('#localLlmSourceKind');
         this.runForm = find('[data-llm-form="run"]');
         this.runnerSelect = find('#localLlmRunner');
@@ -104,7 +117,11 @@ export class LocalLlmDashboard {
         this.addForm?.addEventListener('submit', (event) => this.submitAddModel(event));
         this.runForm?.addEventListener('submit', (event) => this.submitRun(event));
         this.promptForm?.addEventListener('submit', (event) => this.submitPrompt(event));
-        this.sourceKind?.addEventListener('change', () => this.updateSourceFields());
+        this.sourceKind?.addEventListener('change', () => { this.resetLookup(); this.updateSourceFields(); });
+        // A results list for another repository or revision would mislead.
+        this.addForm?.addEventListener('input', (event) => {
+            if (['repo', 'revision'].includes(event.target?.name)) this.resetLookup();
+        });
         this.runnerSelect?.addEventListener('change', () => { void this.renderRunFields(); });
         for (const type of ['input', 'change']) {
             this.runForm?.addEventListener(type, (event) => {
@@ -404,27 +421,169 @@ export class LocalLlmDashboard {
     cancelAddModel() {
         if (!this.addForm) return;
         this.addForm.reset();
+        this.resetLookup({ forget: true });
         this.detailMode = this.selectedModelId ? 'model' : 'empty';
         this.updateDetailMode();
         this.updateSourceFields();
     }
 
     updateSourceFields() {
-        const kind = this.sourceKind?.value === 'ollama' ? 'ollama' : 'huggingface';
+        const kind = ['ollama', 'hf', 'exl3'].includes(this.sourceKind?.value) ? this.sourceKind.value : 'huggingface';
         for (const field of this.element.querySelectorAll('[data-source-field]')) {
-            const active = field.dataset.sourceField === kind;
+            // A field names every kind it belongs to, separated by spaces.
+            const active = String(field.dataset.sourceField || '').split(/\s+/).includes(kind);
             field.hidden = !active;
             const input = field.querySelector('input');
             if (input) input.required = active && ['repo', 'file', 'tag'].includes(input.name);
         }
     }
 
+    // ------------------------------------------------------------ lookup
+
+    readAddForm() {
+        return Object.fromEntries(new FormData(this.addForm));
+    }
+
+    setFormValue(name, value) {
+        const control = this.addForm?.elements?.[name];
+        if (control) control.value = value;
+    }
+
+    async setArchitecture(value) {
+        const select = this.element.querySelector('#localLlmArchitecture');
+        if (!select) return;
+        const options = JSON.parse(decodeURIComponent(select.getAttribute('data-options') || '%5B%5D'));
+        await this.setSelectOptions(select, options, value === 'moe' ? 'moe' : 'dense');
+    }
+
+    renderLookup(result, options = {}) {
+        if (this.lookupRegion) this.lookupRegion.innerHTML = result ? lookupResultsHtml(result, options) : '';
+    }
+
+    setSizingLabel(text = '') {
+        if (!this.sizingLabel) return;
+        this.sizingLabel.textContent = text;
+        this.sizingLabel.hidden = !text;
+    }
+
+    // Clears the lookup's list and label (another repository, revision or source kind). `forget` also forgets what it filled in.
+    resetLookup({ forget = false } = {}) {
+        this.lookupSerial += 1;
+        this.lookupPending = false;
+        this.lookup = null;
+        if (forget) this.lookupSizing = null;
+        this.renderLookup(null);
+        this.setSizingLabel('');
+        if (this.lookupButton) this.lookupButton.disabled = false;
+    }
+
+    // One lookup request; null when a newer request or a reset replaced it, or when it failed (the error is shown).
+    async requestLookup(args) {
+        const serial = ++this.lookupSerial;
+        this.lookupPending = true;
+        if (this.lookupButton) this.lookupButton.disabled = true;
+        // A file's header is read with the list still showing; only a list request replaces it.
+        if (args.file) this.setSizingLabel(`Reading the GGUF header of ${args.file}…`);
+        else this.renderLookup({ message: 'Looking up the repository…' });
+        try {
+            const result = await callLocalLlm('local_llm_model_lookup', args);
+            if (serial !== this.lookupSerial || this.closed) return null;
+            this.lookup = { args, result };
+            return result;
+        } catch (error) {
+            if (serial === this.lookupSerial && !this.closed) {
+                const message = error?.message || 'The lookup failed.';
+                if (args.file && this.lookup) {
+                    this.renderLookup(this.lookup.result, { selectedFile: args.file });
+                    this.setSizingLabel('');
+                    this.setStatus(message, 'error');
+                } else {
+                    this.renderLookup({ error: message });
+                }
+            }
+            return null;
+        } finally {
+            if (serial === this.lookupSerial) {
+                this.lookupPending = false;
+                if (this.lookupButton) this.lookupButton.disabled = false;
+            }
+        }
+    }
+
+    async lookupModel() {
+        if (this.lookupPending || !this.addForm) return;
+        const format = lookupFormatFor(this.sourceKind?.value || 'huggingface');
+        const repo = String(this.addForm.elements?.repo?.value || '').trim();
+        const revision = String(this.addForm.elements?.revision?.value || '').trim();
+        if (!format) return;
+        if (!repo) {
+            this.renderLookup({ error: 'Enter a repository such as owner/name first.' });
+            return;
+        }
+        const result = await this.requestLookup({ repo, format, ...(revision ? { revision } : {}) });
+        if (!result) return;
+        const selected = String(this.addForm.elements?.file?.value || '').trim();
+        this.renderLookup(result, { selectedFile: selected });
+        // A snapshot is sized from its config.json; a GGUF file is sized once it is picked.
+        if (format !== 'gguf') await this.fillFromLookup({ result });
+    }
+
+    async pickLookupFile(_target, indexText) {
+        const row = this.lookup?.result?.files?.[Number(indexText)];
+        if (!row || this.lookupPending) return;
+        this.renderLookup(this.lookup.result, { selectedFile: row.file });
+        const result = await this.requestLookup({ ...this.lookup.args, file: row.file });
+        if (!result) return;
+        this.renderLookup(result, { selectedFile: row.file });
+        await this.fillFromLookup({ result, row });
+    }
+
+    // Fills the form from a lookup: the file, its quantization, sizing, and an id, name and licence when those are
+    // empty. The looked-up values are remembered, so a value changed by hand afterwards is recorded as manual.
+    async fillFromLookup({ result, row = null }) {
+        const sizing = result.sizing;
+        const text = (value) => (Number.isFinite(value) ? String(value) : '');
+        if (row) {
+            this.setFormValue('file', row.file);
+            this.setFormValue('quantization', row.quantization || '');
+        }
+        const name = String(result.repo || '').split('/').pop();
+        if (!String(this.addForm.elements?.id?.value || '').trim()) this.setFormValue('id', suggestModelId(result.repo, row?.quantization || ''));
+        if (!String(this.addForm.elements?.displayName?.value || '').trim()) this.setFormValue('displayName', [name, row?.quantization].filter(Boolean).join(' '));
+        if (!String(this.addForm.elements?.license?.value || '').trim() && typeof result.license === 'string') this.setFormValue('license', result.license);
+        if (!sizing) {
+            this.lookupSizing = null;
+            this.setSizingLabel(row ? '' : 'No config.json was found, so the memory estimate uses its defaults.');
+            return;
+        }
+        const values = {
+            contextLength: text(sizing.contextLength),
+            layers: text(sizing.memory?.layers),
+            kvBytesPerToken: text(sizing.memory?.kvBytesPerToken),
+        };
+        for (const [field, value] of Object.entries(values)) this.setFormValue(field, value);
+        await this.setArchitecture(sizing.architecture);
+        this.lookupSizing = {
+            source: sizing.source,
+            repo: result.repo,
+            revision: result.revision || 'main',
+            ...(row ? { file: row.file } : {}),
+            architecture: sizing.architecture === 'moe' ? 'moe' : 'dense',
+            values,
+        };
+        const notes = Array.isArray(sizing.notes) && sizing.notes.length ? ` ${sizing.notes.join('; ')}.` : '';
+        this.setSizingLabel(sizing.source === 'gguf-header'
+            ? `Sizing read from the GGUF header; checked again after download.${notes}`
+            : `Sizing read from config.json, checked against its pinned digest.${notes}`);
+    }
+
     async submitAddModel(event) {
         event.preventDefault();
         if (this.busy || !this.addForm?.reportValidity()) return;
-        const raw = Object.fromEntries(new FormData(this.addForm));
+        const raw = this.readAddForm();
         raw.sourceKind = this.sourceKind?.value || 'huggingface';
         raw.architecture = this.element.querySelector('#localLlmArchitecture')?.value || 'dense';
+        raw.sizingSource = sizingSourceFor(raw, this.lookupSizing);
         const entry = modelEntryFromForm(raw);
         const added = await this.withBusy(`Adding ${entry.id} and pinning its source…`, async () => {
             await callLocalLlm('local_llm_model_add', { model: entry });
@@ -433,6 +592,7 @@ export class LocalLlmDashboard {
         });
         if (!added) return;
         this.addForm.reset();
+        this.resetLookup({ forget: true });
         this.updateSourceFields();
         this.setStatus(`${entry.id} was added. Nothing was downloaded.`, 'success');
         await this.selectModel(null, entry.id);

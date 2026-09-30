@@ -1137,12 +1137,14 @@ export function createController({
             architecture: sizing.architecture,
         };
         const changed = Object.keys(verified).filter((key) => verified[key] !== stored[key]);
-        if (changed.length === 0) return model;
+        if (changed.length === 0) return Object.freeze({ ...model, sizingVerified: true });
         const say = (value) => (value === null ? 'none' : String(value));
         log.append('controller', `${model.id}: the GGUF header of the verified file differs from the sizing stored when the model was added `
             + `(${changed.map((key) => `${key} ${say(stored[key])} -> ${say(verified[key])}`).join(', ')}); the verified values are used`);
         return Object.freeze({
             ...model,
+            // The admission warnings say the values are the verified file's own.
+            sizingVerified: true,
             architecture: verified.architecture,
             contextLength: verified.contextLength ?? undefined,
             memory: Object.freeze({ ...model.memory, layers: verified.layers ?? undefined, kvBytesPerToken: verified.kvBytesPerToken ?? undefined }),
