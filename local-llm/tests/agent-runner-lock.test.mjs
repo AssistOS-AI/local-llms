@@ -103,7 +103,7 @@ function detectScript() {
     return body.join('\n');
 }
 
-function needed(t, { event, changed, commits = 2, filler = 0 }) {
+function needed(t, { event, changed, commits = 2, filler = 0, stub = null }) {
     const repo = tempDir(t, 'detect');
     const git = (...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.org', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, stdio: 'pipe' });
     git('init', '-q');
@@ -123,7 +123,14 @@ function needed(t, { event, changed, commits = 2, filler = 0 }) {
     }
     const output = path.join(repo, '..', `${path.basename(repo)}.out`);
     t.after(() => fs.rmSync(output, { force: true }));
-    execFileSync('bash', ['-c', detectScript()], { cwd: repo, env: { PATH: process.env.PATH, EVENT: event, GITHUB_OUTPUT: output }, stdio: 'pipe' });
+    // `stub` puts a command of that name first on the PATH that answers with the given status: a grep or a git that fails.
+    let bin = '';
+    if (stub) {
+        const dir = tempDir(t, 'detect-bin');
+        fs.writeFileSync(path.join(dir, stub.command), `#!/bin/sh\nexit ${stub.status}\n`, { mode: 0o755 });
+        bin = `${dir}${path.delimiter}`;
+    }
+    execFileSync('bash', ['-c', detectScript()], { cwd: repo, env: { PATH: `${bin}${process.env.PATH}`, EVENT: event, GITHUB_OUTPUT: output }, stdio: 'pipe' });
     return fs.readFileSync(output, 'utf8').trim();
 }
 
@@ -159,6 +166,18 @@ test('the runner-lock check is needed for a change to a lock, the workflow, or a
     assert.equal(needed(t, { event: 'pull_request', changed: ['README.md', 'local-llm/src/controller/downloader.mjs'] }), 'needed=true');
     assert.equal(needed(t, { event: 'workflow_dispatch', changed: ['README.md'] }), 'needed=true');
     assert.equal(needed(t, { event: 'pull_request', changed: [], commits: 1 }), 'needed=true');
+});
+
+test('a grep or a git that fails runs the check: the only way to "not needed" is a diff that was read with no such file in it', {
+    skip: (!repositoryRoot && 'the repository root is not mounted, so its .github directory is not here')
+        || (!hasTools && 'git and bash are needed to run the Detect step\'s script'),
+}, (t) => {
+    for (const stub of [{ command: 'grep', status: 2 }, { command: 'grep', status: 127 }, { command: 'grep', status: 141 }, { command: 'git', status: 1 }, { command: 'git', status: 128 }]) {
+        assert.equal(needed(t, { event: 'pull_request', changed: ['README.md'], stub }), 'needed=true', JSON.stringify(stub));
+    }
+    // Only grep's "no match" (1) on a list that was read is "not needed"; a match (0) is needed.
+    assert.equal(needed(t, { event: 'pull_request', changed: ['README.md'], stub: { command: 'grep', status: 1 } }), 'needed=false');
+    assert.equal(needed(t, { event: 'pull_request', changed: ['README.md'], stub: { command: 'grep', status: 0 } }), 'needed=true');
 });
 
 test('every file the install check loads is one whose change runs it', {
