@@ -452,7 +452,8 @@ export function createController({
     // Why a runner has no policy for the committed profile, or null (DS005): on
     // the cpu profile, it has no parameter schema for it, as with every runner
     // but llama.cpp. The dedicated and unified profiles have no such refusal:
-    // they refuse through admission and the runner's switch, as they always did.
+    // they refuse through parameter validation, admission and the runner's
+    // switch, as they always did.
     function profileRefusal(definition, selected = profile) {
         return selected ? runnerSummary(definition, selected).profileUnsupportedReason ?? null : null;
     }

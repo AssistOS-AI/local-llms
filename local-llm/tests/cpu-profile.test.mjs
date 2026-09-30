@@ -1226,9 +1226,10 @@ test('controller: a shutdown is not a missing GPU, so a status or an install aft
     assert.equal((await second.controller.status()).profile, null);
     assert.equal(second.logLines('hardware profile:').length, 0);
     // An install whose snapshot is cut short by the drain does not decide it either.
+    const reached = [];
     const installer = {
         installable: (id) => id === 'vllm', describe: async () => ({ installed: false, runnable: false }),
-        entryFor: () => { throw new Error('an install must not get this far'); }, pathsFor: () => ({}),
+        entryFor: () => { reached.push('entryFor'); throw new Error('an install must not get this far'); }, pathsFor: () => ({}),
     };
     clock.ms = 4_000_000;
     // The second snapshot (the install's) never answers; the drain ends it.
@@ -1238,7 +1239,10 @@ test('controller: a shutdown is not a missing GPU, so a status or an install aft
     const install = race.controller.installRunner({ runnerId: 'vllm' }).then((value) => ({ value }), (error) => ({ error }));
     await until(() => race.calls.snapshots >= 2);
     await race.controller.drain();
-    assert.ok((await install).error, 'the install ends with an error');
+    // vLLM's switch stays closed while the profile is undecided, so the install is refused before its lock entry is read.
+    const { error } = await install;
+    assert.ok(['runner_disabled', 'shutting_down'].includes(error?.code), `the install ends refused, got ${error?.code}: ${error?.message}`);
+    assert.deepEqual(reached, [], 'the install never reached its lock entry');
     assert.equal(race.logLines('hardware profile:').length, 0);
 });
 
