@@ -11,6 +11,7 @@ import path from 'node:path';
 import test from 'node:test';
 import zlib from 'node:zlib';
 
+import { installMessage, runnersPanelHtml } from '../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-view.js';
 import { validateModel } from '../src/controller/catalog.mjs';
 import { createController } from '../src/controller/deployments.mjs';
 import { DownloadError, downloadFile } from '../src/controller/downloader.mjs';
@@ -18,6 +19,7 @@ import { fetchOllamaRegistryManifest, manifestPath, readOllamaManifest } from '.
 import { createRunnerInstaller } from '../src/controller/runnerInstaller.mjs';
 import { agentRunnerLockFile, archiveCompression, loadRunnerLock, loadRunnerLocks, validateRunnerLock } from '../src/controller/runnerLock.mjs';
 import { createStateStore } from '../src/controller/stateStore.mjs';
+import { RUNNERS } from '../src/runners/index.mjs';
 import { manifestBytes, registry, sha256 } from './ollama-fixture.mjs';
 
 const SHA = (buffer) => crypto.createHash('sha256').update(buffer).digest('hex');
@@ -402,12 +404,19 @@ function controllerOn(t, { snap = () => snapshotOf(ABSENT_GPU), seed, imageContr
     }
     const started = [];
     const calls = [];
+    const downloads = [];
+    const weights = path.join(dir, 'weights.gguf');
+    fs.writeFileSync(weights, 'x');
     const controller = createController({
         dataDir: dir,
         env: { PATH: '/usr/bin' },
         seedCatalog: seed,
         stateStore: createStateStore({ dataDir: dir }),
         snapshot: async () => snap(),
+        // Model weights: nothing is downloaded, and a Run that got as far as asking is on record.
+        download: async ({ artifact }) => { downloads.push(artifact); return { status: 'complete', path: weights, bytesTransferred: 0 }; },
+        inspect: async () => ({ state: 'absent', bytes: 0 }),
+        remove: async () => 0,
         startRunner({ command, args, env }) {
             let running = true;
             let resolveExit;
@@ -445,7 +454,7 @@ function controllerOn(t, { snap = () => snapshotOf(ABSENT_GPU), seed, imageContr
         ...(resolveOllama ? { resolveOllama } : {}),
     });
     t.after(() => controller.drain());
-    return { controller, started, calls, dataDir: dir };
+    return { controller, started, calls, downloads, dataDir: dir };
 }
 
 // The agent's lock with Ollama in it (a small .tar.zst stands in for the 1.5 GB archive), an installer over it whose
@@ -614,4 +623,201 @@ test('an Ollama tag is pinned at add with the manifest digest and the size of it
     assert.notEqual(sha256(reformatted), sha256(manifest));
     const other = await registry(t, { '/v2/library/qwen2.5/manifests/0.5b': { body: reformatted } });
     assert.equal((await fetchOllamaRegistryManifest(TAG, { baseUrl: other.base })).manifestDigest, `sha256:${sha256(reformatted)}`);
+});
+
+// ---------------------------------------------------------------- llama.cpp's CPU build
+
+const X86 = {
+    available: true, name: 'NVIDIA GeForce RTX 3060 Laptop GPU', driverVersion: '595.91.07', memoryModel: 'dedicated',
+    totalBytes: 6144 * MIB, usedBytes: 144 * MIB, freeBytes: 6000 * MIB, processes: [],
+    device: { pciDeviceId: '0x252010DE', computeCapability: '8.6', addressingMode: 'None' },
+};
+const AMD64_CONTRACT = Object.freeze({ architecture: 'amd64', llama_cpp: 'b11159', ik_llama_cpp: '20f7a72' });
+const GGUF_SOURCE = { type: 'huggingface', repo: 'acme/models', file: 'small.gguf', revision: 'main', commit: 'a'.repeat(40), size: 400 * MIB, sha256: 'b'.repeat(64) };
+const SMALL = validateModel({ id: 'small-cpu', displayName: 'Small', profiles: ['cpu', 'dedicated', 'unified'], contextLength: 32768,
+    memory: { layers: 24, kvBytesPerToken: 12288 }, sources: { gguf: GGUF_SOURCE } }, { seed: true });
+
+// The agent's lock with llama.cpp's CPU build in it (a small .tar.gz stands in for the release asset), an
+// installer over it whose download and unpack are stand-ins, and what they were asked to do.
+function cpuBuildInstaller(t) {
+    const root = tempDir(t, 'cpu-build');
+    const archive = Buffer.from('a release archive, in spirit');
+    const agent = path.join(root, 'agent.json');
+    fs.writeFileSync(agent, JSON.stringify(lockDocument({
+        'llama.cpp-cpu': { version: 'b11295', kind: 'archive', licence: { name: 'MIT', url: 'https://github.com/ggml-org/llama.cpp/blob/b11295/LICENSE' },
+            files: [{ name: 'llama-b11295-bin-ubuntu-arm64.tar.gz', url: 'https://github.com/ggml-org/llama.cpp/releases/download/b11295/llama-b11295-bin-ubuntu-arm64.tar.gz',
+                size: archive.length, sha256: SHA(archive) }] },
+    })));
+    const imageFile = path.join(root, 'image.json');
+    fs.writeFileSync(imageFile, JSON.stringify(lockDocument({})));
+    const downloads = [];
+    const unpacked = [];
+    const runRoot = path.join(root, 'opt', 'runners');
+    const installer = createRunnerInstaller({
+        lock: loadRunnerLocks({ image: imageFile, agent }), cacheRoot: path.join(root, 'data', 'runners'), runRoot,
+        download: async ({ url, target }) => {
+            downloads.push(url);
+            fs.mkdirSync(path.dirname(target), { recursive: true });
+            fs.writeFileSync(target, archive);
+            return { bytesTransferred: archive.length };
+        },
+        inspect: async ({ target }) => (fs.existsSync(target) ? { state: 'complete', bytes: fs.statSync(target).size } : { state: 'absent', bytes: 0 }),
+        statfs: async () => ({ bavail: 1e12, bsize: 1 }),
+        run: async ({ args }) => {
+            unpacked.push(args);
+            const into = args[args.indexOf('-C') + 1];
+            fs.mkdirSync(into, { recursive: true });
+            fs.writeFileSync(path.join(into, 'llama-server'), '#!/bin/sh\n', { mode: 0o755 });
+            return { code: 0, output: '' };
+        },
+    });
+    return { installer, downloads, unpacked, runDir: path.join(runRoot, 'llama.cpp-cpu', 'b11295') };
+}
+
+test('llama.cpp-cpu is offered only on the cpu profile and runs from its runnable copy', async (t) => {
+    const lock = cpuBuildInstaller(t);
+    const cpu = controllerOn(t, { installer: lock.installer, seed: [SMALL] });
+    const { controller, started } = cpu;
+    // On cpu: a runner of its own, with the CPU parameters, an Install, and a column of rows beside llama.cpp's.
+    const before = await controller.overview();
+    const build = before.runners.find((runner) => runner.id === 'llama.cpp-cpu');
+    assert.deepEqual(before.runners.map((runner) => runner.id), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi', 'lmstudio', 'llama.cpp-cpu']);
+    assert.deepEqual([build.displayName, build.pinnedVersion, build.supported, build.installed], ['llama.cpp (CPU build)', 'b11295', true, false]);
+    assert.deepEqual(Object.keys(build.paramSchema.properties), ['ctxSize', 'parallel', 'loadMode', 'threads', 'chatTemplateKwargs']);
+    assert.equal('profileUnsupportedReason' in build, false);
+    assert.equal(build.install.version, 'b11295');
+    assert.equal(build.install.licence.name, 'MIT');
+    assert.deepEqual(before.models[0].weights.gguf.runners, ['llama.cpp', 'llama.cpp-cpu']);
+    assert.equal(before.models[0].runners['llama.cpp-cpu'].admission.status, 'ok');
+    assert.equal(before.models[0].runners['llama.cpp-cpu'].params.ctxSize, 4096);
+    // Not installed yet: refused before anything is downloaded.
+    await assert.rejects(() => controller.run({ modelId: 'small-cpu', runnerId: 'llama.cpp-cpu', requestId: 'request-before1' }), { code: 'runner_not_installed' });
+    assert.deepEqual(cpu.downloads, []);
+    await controller.installRunner({ runnerId: 'llama.cpp-cpu' });
+    await until(() => controller.state.runnerInstalls?.['llama.cpp-cpu']?.phase === 'installed');
+    assert.deepEqual(lock.downloads, ['https://github.com/ggml-org/llama.cpp/releases/download/b11295/llama-b11295-bin-ubuntu-arm64.tar.gz']);
+    assert.ok(lock.unpacked[0].includes('--strip-components=1'), 'the default strip of one leading directory');
+    assert.equal((await controller.overview()).runners.find((runner) => runner.id === 'llama.cpp-cpu').installed, true);
+    // Run: the runnable copy's llama-server, on its own port, with the CPU flags, no driver path and no device visible.
+    await controller.run({ modelId: 'small-cpu', runnerId: 'llama.cpp-cpu', requestId: 'request-cpubuild1' });
+    await until(() => controller.state.deployment?.phase === 'ready');
+    const [process] = started;
+    assert.equal(process.command, path.join(lock.runDir, 'llama-server'));
+    const flags = process.args.join(' ');
+    for (const expected of ['--port 18085', '--device none', '--n-gpu-layers 0', '--fit off', '--flash-attn on', '--ctx-size 4096', '--load-mode mmap']) {
+        assert.ok(flags.includes(expected), expected);
+    }
+    assert.equal(process.env.CUDA_VISIBLE_DEVICES, '');
+    assert.equal(Object.hasOwn(process.env, 'LD_LIBRARY_PATH'), false);
+    assert.deepEqual([controller.state.deployment.profile, controller.state.deployment.runnerId], ['cpu', 'llama.cpp-cpu']);
+    assert.equal(controller.chatTarget().baseUrl, 'http://127.0.0.1:18085');
+    assert.equal(controller.chatTarget().profile, 'cpu');
+    await controller.stop();
+    // On the GPU profiles it is not offered at all, and Run, preview and Install refuse it before anything downloads.
+    for (const [label, gpu, contract] of [['dedicated', X86, null], ['dedicated', X86, AMD64_CONTRACT], ['unified', GB10, ARM64_CONTRACT], ['unified', GB10, null]]) {
+        const h = controllerOn(t, { installer: lock.installer, seed: [SMALL], snap: () => snapshotOf(gpu), imageContract: contract });
+        const overview = await h.controller.overview();
+        assert.equal(overview.profile, label);
+        assert.equal(overview.runners.some((runner) => runner.id === 'llama.cpp-cpu'), false, label);
+        assert.equal('llama.cpp-cpu' in overview.models[0].runners, false, label);
+        assert.equal(overview.models[0].weights.gguf.runners.includes('llama.cpp-cpu'), false, label);
+        const why = new RegExp(`^llama\\.cpp \\(CPU build\\) runs only on the cpu profile; this machine uses the ${label} profile\\.$`);
+        await assert.rejects(() => h.controller.run({ modelId: 'small-cpu', runnerId: 'llama.cpp-cpu', requestId: `request-${label}-${contract ? 'c' : 'n'}` }),
+            (error) => error.code === 'runner_unavailable' && why.test(error.message), label);
+        await assert.rejects(() => h.controller.installRunner({ runnerId: 'llama.cpp-cpu' }),
+            (error) => error.code === 'runner_unavailable' && why.test(error.message), label);
+        const preview = (await h.controller.overview({ preview: { modelId: 'small-cpu', runnerId: 'llama.cpp-cpu' } })).preview;
+        assert.equal(preview.admission.status, 'incompatible', label);
+        assert.match(preview.admission.reason, why, label);
+        assert.deepEqual(h.downloads, [], label);
+        assert.equal(h.controller.state.deployment, null, label);
+    }
+    assert.deepEqual(lock.downloads.length, 1, 'only the install on the cpu profile fetched anything');
+});
+
+// ---------------------------------------------------------------- the shipped locks
+
+const CATALOG = new URL('../catalog/', import.meta.url);
+
+// What the release metadata on GitHub gave for each asset (gh release view --json assets), 2026-09-30.
+const PINS = Object.freeze({
+    arm64: {
+        ollama: {
+            version: '0.34.4', licence: 'https://github.com/ollama/ollama/blob/v0.34.4/LICENSE',
+            file: { name: 'ollama-linux-arm64.tar.zst', url: 'https://github.com/ollama/ollama/releases/download/v0.34.4/ollama-linux-arm64.tar.zst',
+                size: 1549684612, sha256: '96f50a1192133028cf4e010d8c333f8af14b1505db6be7b2034c11487e7fd7e6', strip: 0 },
+        },
+        'llama.cpp-cpu': {
+            version: 'b11295', licence: 'https://github.com/ggml-org/llama.cpp/blob/b11295/LICENSE',
+            file: { name: 'llama-b11295-bin-ubuntu-arm64.tar.gz', url: 'https://github.com/ggml-org/llama.cpp/releases/download/b11295/llama-b11295-bin-ubuntu-arm64.tar.gz',
+                size: 13577862, sha256: '439dff1fdb5d223f1d1e1adacd6845abff12aa518b746e2a2f4f01d55d57aae9' },
+        },
+    },
+    amd64: {
+        'llama.cpp-cpu': {
+            version: 'b11295', licence: 'https://github.com/ggml-org/llama.cpp/blob/b11295/LICENSE',
+            file: { name: 'llama-b11295-bin-ubuntu-x64.tar.gz', url: 'https://github.com/ggml-org/llama.cpp/releases/download/b11295/llama-b11295-bin-ubuntu-x64.tar.gz',
+                size: 17531126, sha256: 'cd54d7dcf8818acc69c54dfc559b36da5f693d30b223e8dde87b4da4570664ed' },
+        },
+    },
+});
+
+test('the shipped agent locks pin exactly what the release metadata gave: Ollama on arm64 and the CPU build on both', () => {
+    for (const [arch, expected] of Object.entries(PINS)) {
+        const file = new URL(`runners.lock.linux-${arch}.json`, CATALOG);
+        const text = fs.readFileSync(file, 'utf8');
+        // JSON in two-space indentation (DS006), and a lock the loader accepts as it is.
+        assert.equal(text, `${JSON.stringify(JSON.parse(text), null, 2)}\n`, arch);
+        const lock = loadRunnerLock(file.pathname);
+        assert.deepEqual(Object.keys(lock.runners).sort(), Object.keys(expected).sort(), arch);
+        for (const [id, pin] of Object.entries(expected)) {
+            const entry = lock.runners[id];
+            assert.deepEqual([entry.version, entry.kind, entry.licence.url, entry.licence.name], [pin.version, 'archive', pin.licence, 'MIT'], `${arch} ${id}`);
+            assert.deepEqual([entry.licence.requiresAcceptance, entry.licence.proprietary], [false, false], `${arch} ${id}`);
+            assert.equal(entry.files.length, 1);
+            assert.deepEqual({ ...entry.files[0] }, pin.file, `${arch} ${id}`);
+            assert.equal(entry.totalBytes, pin.file.size);
+            // Every file is on an allowed host, is the asset of the tag it names, and the runner has an adapter that pins the same version.
+            assert.equal(new URL(entry.files[0].url).hostname, 'github.com');
+            assert.ok(entry.files[0].url.includes(`/download/${entry.version === '0.34.4' ? 'v0.34.4' : entry.version}/`), `${arch} ${id}`);
+            assert.ok(Object.hasOwn(RUNNERS, id), `${arch} ${id} has an adapter`);
+            assert.equal(RUNNERS[id].pinnedVersion, entry.version, `${arch} ${id}`);
+        }
+    }
+    // The amd64 image has Ollama in it, so its agent lock does not list it: the image's binary is the one that runs.
+    assert.equal(Object.hasOwn(loadRunnerLock(new URL('runners.lock.linux-amd64.json', CATALOG).pathname).runners, 'ollama'), false);
+    // Each of the workflow's architectures has its lock, and every lock file has its job.
+    if (repositoryRoot) {
+        const workflow = fs.readFileSync(WORKFLOW, 'utf8');
+        const arches = [...workflow.matchAll(/- arch: (\w+)/g)].map((match) => match[1]).sort();
+        const locks = fs.readdirSync(CATALOG).map((name) => /^runners\.lock\.linux-(\w+)\.json$/.exec(name)?.[1]).filter(Boolean).sort();
+        assert.deepEqual(arches, locks);
+    }
+});
+
+test('a licence link must be https, and every string an agent lock or a registry supplies is escaped in the dashboard', () => {
+    const one = (licence) => () => validateRunnerLock(lockDocument({ r: { ...lockRunner('r.tar.gz'), licence: { name: 'MIT', ...licence } } }));
+    assert.ok(one({ url: 'https://example.org/LICENSE', source: 'https://example.org/src' })());
+    for (const url of ['javascript:alert(1)', 'data:text/html,<script>', 'http://example.org/LICENSE', 'example.org/LICENSE', '//example.org', 'file:///etc/passwd']) {
+        assert.throws(one({ url }), /licence\.url must be an https URL/, url);
+        assert.throws(one({ url: 'https://example.org/LICENSE', source: url }), /licence\.source must be an https URL/, url);
+    }
+    // What a lock, a registry or a manifest puts in a runner's name, version, reason and licence reaches the page only escaped.
+    const hostile = '<img src=x onerror=alert(1)>"\'&';
+    const runner = {
+        id: 'llama.cpp-cpu', displayName: hostile, supported: true, installed: false, version: hostile, reason: hostile, enabled: true,
+        install: {
+            version: hostile, totalBytes: 10, installed: false, installing: false, files: 1,
+            licence: { name: hostile, url: `https://example.org/${hostile}`, source: `https://example.org/s/${hostile}`, notice: hostile, requiresAcceptance: false },
+            state: { phase: 'error', error: hostile, pausedReason: hostile, licence: { acceptedBy: hostile, acceptedAt: hostile } },
+        },
+    };
+    const lacking = { id: 'ollama', displayName: hostile, supported: false, unsupportedReason: hostile, profileUnsupportedReason: hostile };
+    const html = runnersPanelHtml([runner, lacking]);
+    assert.doesNotMatch(html, /<img/);
+    assert.doesNotMatch(html, /onerror=alert\(1\)>/);
+    assert.doesNotMatch(html, /"><img|'><img/);
+    assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39;&amp;/);
+    // The dialog text is plain text, not markup, so it carries the strings as they are.
+    assert.ok(installMessage(runner).includes(hostile));
 });

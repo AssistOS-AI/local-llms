@@ -116,6 +116,20 @@ export function validateLockUrl(value, field) {
     return url.href;
 }
 
+// A licence link is shown in the dashboard as a link: only a plain https URL is taken, never javascript: or data:.
+function link(value, field, { required = false } = {}) {
+    const url = text(value, field, { required, max: 400 });
+    if (url === null) return null;
+    let parsed;
+    try {
+        parsed = new URL(url);
+    } catch {
+        throw invalid(`${field} must be an https URL`);
+    }
+    if (parsed.protocol !== 'https:') throw invalid(`${field} must be an https URL`);
+    return url;
+}
+
 function validateFile(value, field, kind) {
     if (!plainObject(value)) throw invalid(`${field} must be an object`);
     onlyKeys(value, ['name', 'url', 'size', 'sha256', 'extract', 'into', 'strip'], field);
@@ -214,8 +228,8 @@ function validateRunner(id, value) {
     if (![undefined, true, false].includes(value.licence.proprietary)) throw invalid(`${field}.licence.proprietary must be true or false`);
     const licence = Object.freeze({
         name: text(value.licence.name, `${field}.licence.name`, { required: true, max: 80 }),
-        url: text(value.licence.url, `${field}.licence.url`, { required: true, max: 400 }),
-        source: text(value.licence.source, `${field}.licence.source`, { max: 400 }),
+        url: link(value.licence.url, `${field}.licence.url`, { required: true }),
+        source: link(value.licence.source, `${field}.licence.source`),
         notice: text(value.licence.notice, `${field}.licence.notice`),
         requiresAcceptance: value.licence.requiresAcceptance === true,
         proprietary: value.licence.proprietary === true,

@@ -19,6 +19,24 @@
           "strip": 0
         }
       ]
+    },
+    "llama.cpp-cpu": {
+      "version": "b11295",
+      "kind": "archive",
+      "licence": {
+        "name": "MIT",
+        "url": "https://github.com/ggml-org/llama.cpp/blob/b11295/LICENSE",
+        "source": "https://github.com/ggml-org/llama.cpp",
+        "requiresAcceptance": false
+      },
+      "files": [
+        {
+          "name": "llama-b11295-bin-ubuntu-arm64.tar.gz",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11295/llama-b11295-bin-ubuntu-arm64.tar.gz",
+          "size": 13577862,
+          "sha256": "439dff1fdb5d223f1d1e1adacd6845abff12aa518b746e2a2f4f01d55d57aae9"
+        }
+      ]
     }
   }
 }

@@ -1,6 +1,6 @@
 import { codedError } from './params.mjs';
 import { ikLlamaCppRunner } from './ikLlamaCpp.mjs';
-import { llamaCppRunner } from './llamaCpp.mjs';
+import { llamaCppCpuRunner, llamaCppRunner } from './llamaCpp.mjs';
 import { lmStudioRunner } from './lmStudio.mjs';
 import { ollamaRunner } from './ollama.mjs';
 import { tabbyApiRunner } from './tabbyApi.mjs';
@@ -19,7 +19,9 @@ export const RUNNERS = Object.freeze({
     ollama: ollamaRunner,
     vllm: vllmRunner,
     tabbyapi: tabbyApiRunner,
-    lmstudio: lmStudioRunner
+    lmstudio: lmStudioRunner,
+    // Installed from the agent's lock, for the cpu profile only (DS004, DS005).
+    'llama.cpp-cpu': llamaCppCpuRunner
 });
 
 export function getRunner(id) {
@@ -51,6 +53,15 @@ export function schemaOf(runner, profile = 'dedicated') {
     return profile === 'dedicated' ? runner.paramSchema : null;
 }
 
+/**
+ * Whether a runner is offered on a profile. A runner that declares the profiles it serves
+ * (`profiles`) is offered on those alone; every other runner is offered on all of them. An
+ * undecided profile (null) is shown as dedicated, like the rest of the overview.
+ */
+export function offeredIn(runner, profile) {
+    return !Array.isArray(runner.profiles) || runner.profiles.includes(profile ?? 'dedicated');
+}
+
 /** Why a runner without parameters for the cpu profile cannot run there (DS005). */
 function cpuRefusal(displayName) {
     return `${displayName} needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.`;
@@ -77,5 +88,5 @@ export function runnerSummary(runner, profile = 'dedicated') {
 }
 
 export function runnerSummaries(runners = RUNNERS, profile = 'dedicated') {
-    return Object.values(runners).map((runner) => runnerSummary(runner, profile));
+    return Object.values(runners).filter((runner) => offeredIn(runner, profile)).map((runner) => runnerSummary(runner, profile));
 }

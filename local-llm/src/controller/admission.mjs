@@ -360,7 +360,9 @@ export function admitTabbyApi({ model, source, params, gpu, memory, disk, remain
  * @returns {{ status: 'ok'|'incompatible'|'insufficient-now', reason, estimate, warnings }}
  */
 export function admit({ runner, model, source, params, snapshot, remainingDownloadBytes = 0, profile = undefined, decision = undefined }) {
-    if (!runner.supported || typeof runner.admit !== 'function') {
+    // A runner that is for some profiles only (llama.cpp's CPU build) has no GPU policy, only `admitCpu`.
+    const policy = profile === 'cpu' ? typeof runner.admitCpu === 'function' || typeof runner.admit === 'function' : typeof runner.admit === 'function';
+    if (!runner.supported || !policy) {
         return result('incompatible', runner.unsupportedReason || `${runner.displayName} is not supported in this release.`, {});
     }
     if (!source) {

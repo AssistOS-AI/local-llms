@@ -177,15 +177,16 @@ test('a runner that dies right after its readiness probes ends in error, never i
 });
 
 test('ports come from the adapters, one per supported runner, all distinct', () => {
-    assert.deepEqual(defaultPorts(), { 'llama.cpp': 18080, 'ik_llama.cpp': 18081, ollama: 18434, vllm: 18082, tabbyapi: 18083, lmstudio: 18084 });
+    assert.deepEqual(defaultPorts(), { 'llama.cpp': 18080, 'ik_llama.cpp': 18081, ollama: 18434, vllm: 18082, tabbyapi: 18083, lmstudio: 18084, 'llama.cpp-cpu': 18085 });
     assert.throws(() => defaultPorts({ a: { id: 'a', supported: true, port: 18080 }, b: { id: 'b', supported: true, port: 18080 } }),
         /port 18080/);
 });
 
 // Intended change (runners plan I9, 2026-09-25): LM Studio is a runner again,
 // installed on demand for internal use only (R5 changed from b to a).
-test('the registry has llama.cpp, ik_llama.cpp, Ollama, vLLM, TabbyAPI and LM Studio', () => {
-    assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi', 'lmstudio']);
+// Intended change (Phase 3, DS004): llama.cpp's CPU build is a runner too, installed from the agent's lock and offered on the cpu profile only.
+test('the registry has llama.cpp, ik_llama.cpp, Ollama, vLLM, TabbyAPI, LM Studio and llama.cpp\'s CPU build', () => {
+    assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi', 'lmstudio', 'llama.cpp-cpu']);
     assert.equal(fs.existsSync(new URL('../src/runners/lmStudio.mjs', import.meta.url)), true);
     assert.equal(RUNNERS.lmstudio.supported, true);
     const summaries = runnerSummaries();

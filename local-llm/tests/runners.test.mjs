@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { admit } from '../src/controller/admission.mjs';
 import { cpuFloorBytes, cpuHostReserveBytes } from '../src/controller/profiles.mjs';
 import { ParamError, validateParams } from '../src/runners/params.mjs';
-import { RUNNERS, getRunner, runnerSummaries } from '../src/runners/index.mjs';
+import { RUNNERS, getRunner, offeredIn, runnerSummaries, runnerSummary } from '../src/runners/index.mjs';
 import { ikLlamaCppRunner } from '../src/runners/ikLlamaCpp.mjs';
-import { llamaCppRunner } from '../src/runners/llamaCpp.mjs';
+import { llamaCppCpuRunner, llamaCppRunner } from '../src/runners/llamaCpp.mjs';
+import { createLlamaServerRunner } from '../src/runners/llamaServer.mjs';
 import { parseRunnerReport } from '../src/controller/runnerProcess.mjs';
 import { defaultThreads, physicalCoreCount } from '../src/controller/hardware.mjs';
 import { loadSeedCatalog } from '../src/controller/catalog.mjs';
@@ -461,7 +462,8 @@ describe('vLLM runner', () => {
 
 describe('runner registry', () => {
     it('resolves known runners and rejects others', () => {
-        assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi', 'lmstudio']);
+        // Intended change (Phase 3): llama.cpp's CPU build is registered, and offered on the cpu profile only.
+        assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi', 'lmstudio', 'llama.cpp-cpu']);
         assert.equal(getRunner('llama.cpp'), llamaCppRunner);
         assert.equal(getRunner('ollama'), ollamaRunner);
         for (const id of ['toString', 'constructor', 'llamacpp', undefined, null]) {
@@ -664,5 +666,101 @@ describe('Ollama on the cpu profile: parameters, launch and requests', () => {
         const absent = await ollamaRunner.detect({ ...missing, installer: installer(false) });
         assert.equal(absent.installed, false);
         assert.match(absent.reason, /Install it under Runners/);
+    });
+});
+
+// ---------------------------------------------------------------- llama.cpp's CPU build (DS004, DS005)
+
+describe('llama.cpp (CPU build)', () => {
+    const cpuLaunch = (runner, extra = {}) => runner.buildLaunch({
+        artifactPath: '/data/models/gguf/model.gguf', params: {}, port: 18080, apiKey: API_KEY, model: { id: 'm', contextLength: 32768 }, profile: 'cpu', ...extra,
+    });
+
+    it('is for the cpu profile alone: a schema and a policy there, none elsewhere', () => {
+        assert.equal(getRunner('llama.cpp-cpu'), llamaCppCpuRunner);
+        assert.deepEqual([llamaCppCpuRunner.id, llamaCppCpuRunner.displayName, llamaCppCpuRunner.port, llamaCppCpuRunner.weightFormat], ['llama.cpp-cpu', 'llama.cpp (CPU build)', 18085, 'gguf']);
+        assert.deepEqual(llamaCppCpuRunner.profiles, ['cpu']);
+        assert.equal(llamaCppCpuRunner.executable, null);
+        assert.ok(llamaCppCpuRunner.paramSchemaFor('cpu'));
+        for (const profile of ['dedicated', 'unified', null, 'gpu']) assert.equal(llamaCppCpuRunner.paramSchemaFor(profile), null, String(profile));
+        assert.equal(llamaCppCpuRunner.paramSchema, null);
+        // No GPU policy at all; only admitCpu.
+        assert.equal(typeof llamaCppCpuRunner.admitCpu, 'function');
+        assert.equal('admit' in llamaCppCpuRunner, false);
+        assert.equal('admitUnified' in llamaCppCpuRunner, false);
+        for (const profile of ['dedicated', 'unified']) {
+            assertParamError(() => llamaCppCpuRunner.normalizeParams({}, { profile }));
+            assert.throws(() => llamaCppCpuRunner.normalizeParams({}, { profile }), /llama\.cpp \(CPU build\) has no parameters for the /);
+        }
+        assert.equal(llamaCppCpuRunner.normalizeParams({}, { profile: 'cpu', model: { id: 'm', contextLength: 32768 } }).ctxSize, 4096);
+        // Admission: sized on cpu like llama.cpp, and never on a GPU profile.
+        const model = { id: 'm', displayName: 'M', seed: true, contextLength: 32768, memory: { layers: 24, kvBytesPerToken: 12288 } };
+        const source = { type: 'huggingface', size: 400 * MIB };
+        const snapshot = { gpu: { available: false, state: 'absent' }, memory: { totalBytes: M1_TOTAL, availableBytes: M1_AVAILABLE }, disk: { freeBytes: 100 * GIB } };
+        const params = llamaCppCpuRunner.normalizeParams({}, { model, profile: 'cpu' });
+        assert.equal(admit({ runner: llamaCppCpuRunner, model, source, params, snapshot, profile: 'cpu', decision: CPU_DECISION }).status, 'ok');
+        const same = admit({ runner: llamaCppRunner, model, source, params, snapshot, profile: 'cpu', decision: CPU_DECISION });
+        assert.deepEqual(admit({ runner: llamaCppCpuRunner, model, source, params, snapshot, profile: 'cpu', decision: CPU_DECISION }).estimate, same.estimate);
+        const gpuSnapshot = { ...snapshot, gpu: { available: true, name: 'GPU', memoryModel: 'dedicated', totalBytes: 6 * GIB, freeBytes: 6 * GIB } };
+        for (const profile of ['dedicated', 'unified']) {
+            const refused = admit({ runner: llamaCppCpuRunner, model, source, params, snapshot: gpuSnapshot, profile });
+            assert.equal(refused.status, 'incompatible', profile);
+            assert.equal(refused.reason, 'llama.cpp (CPU build) is not supported in this release.', profile);
+        }
+    });
+
+    it('launches the runnable copy\'s llama-server with exactly llama.cpp\'s CPU arguments and environment', () => {
+        const build = cpuLaunch(llamaCppCpuRunner, { runnerDir: '/opt/runners/llama.cpp-cpu/b11295' });
+        const image = cpuLaunch(llamaCppRunner);
+        assert.equal(build.command, '/opt/runners/llama.cpp-cpu/b11295/llama-server');
+        assert.equal(image.command, '/opt/llama.cpp/llama-server');
+        assert.deepEqual(build.args, image.args);
+        assert.ok(hasPair(build.args, '--device', 'none') && hasPair(build.args, '--n-gpu-layers', '0'));
+        assert.deepEqual(build.env, { CUDA_VISIBLE_DEVICES: '' });
+        // The copy's path must be given and absolute: there is no binary of its own to fall back to.
+        assertCode(() => cpuLaunch(llamaCppCpuRunner), 'invalid_launch');
+        assertCode(() => cpuLaunch(llamaCppCpuRunner, { runnerDir: 'opt/runners/llama.cpp-cpu' }), 'invalid_launch');
+        // llama.cpp ignores a runnable copy: its binary is the image's.
+        assert.equal(cpuLaunch(llamaCppRunner, { runnerDir: '/opt/runners/x' }).command, '/opt/llama.cpp/llama-server');
+    });
+
+    it('is shown on the cpu profile only', () => {
+        assert.equal(offeredIn(llamaCppCpuRunner, 'cpu'), true);
+        for (const profile of ['dedicated', 'unified', null, undefined]) assert.equal(offeredIn(llamaCppCpuRunner, profile), false, String(profile));
+        for (const runner of Object.values(RUNNERS).filter((candidate) => candidate !== llamaCppCpuRunner)) {
+            for (const profile of ['cpu', 'dedicated', 'unified', null]) assert.equal(offeredIn(runner, profile), true, `${runner.id} ${profile}`);
+        }
+        assert.equal(runnerSummaries().some((summary) => summary.id === 'llama.cpp-cpu'), false);
+        assert.equal(runnerSummaries(RUNNERS, 'unified').some((summary) => summary.id === 'llama.cpp-cpu'), false);
+        assert.equal(runnerSummaries(RUNNERS, 'cpu').at(-1).id, 'llama.cpp-cpu');
+        assert.ok(runnerSummary(llamaCppCpuRunner, 'cpu').paramSchema);
+    });
+
+    it('is detected from the installer, never by starting it', async () => {
+        const spawnSync = () => assert.fail('the binary is not started to be detected');
+        const installer = (installed) => ({ installable: (id) => id === 'llama.cpp-cpu', describe: async () => ({ installed, version: 'b11295' }) });
+        assert.deepEqual(await llamaCppCpuRunner.detect({ spawnSync, installer: installer(true) }), { installed: true, version: 'b11295', reason: null });
+        const absent = await llamaCppCpuRunner.detect({ spawnSync, installer: installer(false) });
+        assert.equal(absent.installed, false);
+        assert.match(absent.reason, /Install it under Runners/);
+        assert.match((await llamaCppCpuRunner.detect({ spawnSync, installer: { installable: () => false } })).reason, /no llama\.cpp \(CPU build\) entry/);
+        assert.equal((await llamaCppCpuRunner.detect({ spawnSync })).installed, false);
+        // A runner in the image is still probed, synchronously.
+        assert.equal(llamaCppRunner.detect(fakeSpawn({ status: 0, stdout: 'version: 1 (x)\nbuild 11159\n' })).installed, true);
+    });
+
+    it('needs an executable or a runnable name, and leaves the image\'s runners as they were', () => {
+        const dialect = { quietArgs: [], loadArgs: () => [], jinja: () => false, parseVersion: () => null, cpu: true };
+        assert.throws(() => createLlamaServerRunner({ id: 'x', displayName: 'X', executable: null, pinnedVersion: '1', port: 18999, dialect }), /needs an executable or a runnable name/);
+        assert.ok(createLlamaServerRunner({ id: 'x', displayName: 'X', executable: '/opt/x/server', pinnedVersion: '1', port: 18999, dialect }));
+        // llama.cpp and ik_llama.cpp keep every policy and their dedicated schema.
+        for (const runner of [llamaCppRunner, ikLlamaCppRunner]) {
+            assert.equal(runner.paramSchema, runner.paramSchemaFor('dedicated'));
+            assert.equal(typeof runner.admit, 'function');
+            assert.equal('profiles' in runner, false);
+        }
+        assert.equal(typeof llamaCppRunner.admitUnified, 'function');
+        assert.equal(typeof llamaCppRunner.admitCpu, 'function');
+        assert.equal('admitUnified' in ikLlamaCppRunner || 'admitCpu' in ikLlamaCppRunner, false);
     });
 });

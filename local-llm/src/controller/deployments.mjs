@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { LocalLlmError } from '../errors.mjs';
-import { RUNNERS, defaultPorts, runnerSummary, schemaOf } from '../runners/index.mjs';
+import { RUNNERS, defaultPorts, offeredIn, runnerSummary, schemaOf } from '../runners/index.mjs';
 import { admit } from './admission.mjs';
 import { WEIGHT_FORMATS, loadSeedCatalog, mergeCatalog, unsupportedRegistryEntries, validateModel } from './catalog.mjs';
 import { createCommandQueue } from './commandQueue.mjs';
@@ -463,6 +463,9 @@ export function createController({
     // the image, or a runner lock lists it. Without a source.contract
     // (tests, development) every runner counts as available.
     function availabilityOf(definition) {
+        // A runner that is for some profiles only is not available on the others, whatever the image holds.
+        const unoffered = unofferedReason(definition);
+        if (unoffered) return { available: false, reason: unoffered };
         if (!imageContract) return { available: true, reason: null };
         // The runner's executable is in the image, or a lock offers it (for an agent-lock entry, where it has a policy).
         const present = definition.executable
@@ -492,7 +495,16 @@ export function createController({
     // they refuse through parameter validation, admission and the runner's
     // switch, as they always did.
     function profileRefusal(definition, selected = profile) {
-        return selected ? runnerSummary(definition, selected).profileUnsupportedReason ?? null : null;
+        return unofferedReason(definition, selected)
+            ?? (selected ? runnerSummary(definition, selected).profileUnsupportedReason ?? null : null);
+    }
+
+    // Why a runner that declares the profiles it serves (llama.cpp's CPU build) is not offered here, or
+    // null. The overview leaves such a runner out, and Run and Install refuse it before anything downloads.
+    function unofferedReason(definition, selected = profile) {
+        if (offeredIn(definition, selected)) return null;
+        return `${definition.displayName} runs only on the ${definition.profiles.join(' or ')} profile`
+            + `${selected ? `; this machine uses the ${selected} profile` : ''}.`;
     }
 
     // Admission with the checks the controller owns (availability, the image's
@@ -685,6 +697,8 @@ export function createController({
         // Why each runner has no policy for the decided profile (null while undecided).
         const refusals = {};
         for (const definition of Object.values(runners)) {
+            // A runner for other profiles is not shown: a GPU host sees exactly the runners it always did.
+            if (!offeredIn(definition, profile)) continue;
             const gate = gateOf(definition);
             const availability = availabilityOf(definition);
             // A runner the image lacks is not probed: the probe would only say
@@ -720,7 +734,7 @@ export function createController({
                     acquisition: await acquisitionOf(source, index),
                     // The runners that can read them here: not one this deployment's operator left off.
                     runners: Object.values(runners)
-                        .filter((definition) => definition.supported && availabilityOf(definition).available
+                        .filter((definition) => offeredIn(definition, profile) && definition.supported && availabilityOf(definition).available
                             && gateOf(definition).enabled && definition.weightFormat === format)
                         .map((definition) => definition.id),
                 };
@@ -728,7 +742,7 @@ export function createController({
             const perRunner = {};
             for (const definition of Object.values(runners)) {
                 const source = sourceFor(model, definition);
-                if (!source) continue;
+                if (!source || !offeredIn(definition, profile)) continue;
                 let params = null;
                 let paramError = null;
                 const usable = definition.supported && availabilityOf(definition).available;

@@ -4,6 +4,7 @@
 // else, the readiness probes included, is shared.
 
 import { spawnSync as realSpawnSync } from 'node:child_process';
+import path from 'node:path';
 
 import { admitLlamaServer, admissionResult } from '../controller/admission.mjs';
 import { cpuDefaultThreads, defaultThreads, performanceCoreCount, physicalCoreCount } from '../controller/hardware.mjs';
@@ -204,14 +205,23 @@ function assertModelId(model) {
  * dialect.unified        whether the runner has a unified-memory policy (DS005)
  * dialect.cpu            whether the runner has a CPU policy (DS005): a schema, a launch and admitCpu
  *
+ * profiles  the profiles the runner is offered on, when it is for some of them only (llama.cpp's
+ *           CPU build, installed from the agent's lock: ['cpu']). It gets a schema and a policy
+ *           for those alone, and the controller offers it nowhere else. Without it, the
+ *           dialect decides, as it always did.
+ * runnable  the executable's name inside the runnable copy (`runnerDir`) of a runner the
+ *           agent's lock installs, when `executable` is null.
+ *
  * cpuCores() counts the physical cores for the dedicated default --threads,
  * perfCores() the high-performance cores for the unified and CPU ones; each is
  * read once, on the first launch that needs it.
  */
 export function createLlamaServerRunner({
-    id, displayName, executable, pinnedVersion, port, dialect,
+    id, displayName, executable, runnable = null, pinnedVersion, port, dialect, profiles = null,
     cpuCores = physicalCoreCount, perfCores = performanceCoreCount,
 }) {
+    if (!executable && !runnable) throw new Error(`Runner ${id} needs an executable or a runnable name`);
+    const offeredOn = (profile) => profiles === null || profiles.includes(profile);
     const loadModes = dialect.loadModes || LOAD_MODES;
     const paramSchema = deepFreeze({
         ...LLAMA_SERVER_PARAM_SCHEMA,
@@ -221,9 +231,9 @@ export function createLlamaServerRunner({
         },
     });
     const schemas = Object.freeze({
-        dedicated: paramSchema,
-        unified: dialect.unified ? LLAMA_SERVER_UNIFIED_PARAM_SCHEMA : null,
-        cpu: dialect.cpu ? LLAMA_SERVER_CPU_PARAM_SCHEMA : null,
+        dedicated: offeredOn('dedicated') ? paramSchema : null,
+        unified: offeredOn('unified') && dialect.unified ? LLAMA_SERVER_UNIFIED_PARAM_SCHEMA : null,
+        cpu: offeredOn('cpu') && dialect.cpu ? LLAMA_SERVER_CPU_PARAM_SCHEMA : null,
     });
     let autoThreads = null;
     let unifiedThreads = null;
@@ -281,15 +291,26 @@ export function createLlamaServerRunner({
         return { totalContext: ctxSize, perRequestContext, parallel, kvUnified: dialect.unifiedKv && parallel > 1 };
     }
 
-    function detect({ spawnSync = realSpawnSync } = {}) {
-        return probeVersion({
-            spawnSync,
-            executable,
-            args: ['--version'],
-            env: probeEnv({ LD_LIBRARY_PATH: NVIDIA_LIB_DIR }),
-            parse: dialect.parseVersion,
-            pinnedVersion
-        });
+    // A runner in the image is probed for its version. One the agent's lock installs (DS004) is asked of
+    // the installer, which reads the cache and its install record; it never starts the binary.
+    function detect({ spawnSync = realSpawnSync, installer } = {}) {
+        if (executable) {
+            return probeVersion({
+                spawnSync,
+                executable,
+                args: ['--version'],
+                env: probeEnv({ LD_LIBRARY_PATH: NVIDIA_LIB_DIR }),
+                parse: dialect.parseVersion,
+                pinnedVersion
+            });
+        }
+        return (async () => {
+            if (!installer?.installable(id)) return { installed: false, version: null, reason: `This image's runner locks have no ${displayName} entry.` };
+            const info = await installer.describe(id);
+            return info.installed
+                ? { installed: true, version: info.version, reason: null }
+                : { installed: false, version: null, reason: 'Not installed. An admin can Install it under Runners.' };
+        })();
     }
 
     function tuningArgs(values, profile) {
@@ -334,8 +355,9 @@ export function createLlamaServerRunner({
         return args;
     }
 
-    function buildLaunch({ artifactPath, params, port: launchPort, apiKey, model, profile = 'dedicated' } = {}) {
+    function buildLaunch({ artifactPath, params, port: launchPort, apiKey, model, profile = 'dedicated', runnerDir } = {}) {
         const values = normalizeParams(params, { model, profile });
+        const command = executable ?? path.join(assertAbsolutePath(runnerDir, 'runnerDir'), runnable);
         const args = [
             '-m', assertAbsolutePath(artifactPath, 'artifactPath'),
             '--host', '127.0.0.1',
@@ -349,7 +371,7 @@ export function createLlamaServerRunner({
         // The CPU launch never loads the CUDA driver library, even where a GPU is
         // attached but unusable: no library path, and no device is visible (DS003).
         const launchEnv = profile === 'cpu' ? { CUDA_VISIBLE_DEVICES: '' } : { LD_LIBRARY_PATH: NVIDIA_LIB_DIR };
-        return { command: executable, args: args.map(String), env: launchEnv };
+        return { command, args: args.map(String), env: launchEnv };
     }
 
     // /health answers once the model is loaded (llama.cpp returns 503 while it
@@ -375,7 +397,7 @@ export function createLlamaServerRunner({
         executable,
         port,
         apiKey: true,
-        paramSchema,
+        paramSchema: schemas.dedicated,
         paramSchemaFor,
         // Shown outside "Advanced" in the Run form; nCpuMoe only for MoE models.
         basicParams: Object.freeze(['ctxSize', 'nCpuMoe']),
@@ -387,13 +409,15 @@ export function createLlamaServerRunner({
         start,
         // --alias makes the model id the name the server answers to.
         chatModel: (deployment) => deployment.modelId,
-        admit: admitLlamaServer,
-        ...(dialect.unified ? {
+        // A policy for a profile the runner is not offered on is left out: admission refuses it there.
+        ...(offeredOn('dedicated') ? { admit: admitLlamaServer } : {}),
+        ...(schemas.unified ? {
             admitUnified: (input) => admitUnifiedLlamaServer({ ...input, runnerId: id, displayName }, admissionResult),
         } : {}),
-        ...(dialect.cpu ? {
+        ...(schemas.cpu ? {
             admitCpu: (input) => admitCpuLlamaServer({ ...input, runnerId: id, displayName }, admissionResult),
         } : {}),
+        ...(profiles ? { profiles: Object.freeze([...profiles]) } : {}),
         parseReport: parseRunnerReport
     });
 }

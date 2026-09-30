@@ -31,7 +31,8 @@
                   "ollama",
                   "vllm",
                   "tabbyapi",
-                  "lmstudio"
+                  "lmstudio",
+                  "llama.cpp-cpu"
                 ]
               },
               "params": {
@@ -112,7 +113,8 @@
               "ollama",
               "vllm",
               "tabbyapi",
-              "lmstudio"
+              "lmstudio",
+              "llama.cpp-cpu"
             ]
           },
           "params": {
@@ -207,7 +209,8 @@
               "ollama",
               "vllm",
               "tabbyapi",
-              "lmstudio"
+              "lmstudio",
+              "llama.cpp-cpu"
             ]
           },
           "format": {
@@ -375,7 +378,7 @@
           "runnerId": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$",
-            "description": "A runner listed in this image's runner lock (local_llm_overview shows which runners can be installed)."
+            "description": "A runner listed in this image's runner lock or in the agent's own lock (local_llm_overview shows which runners can be installed here)."
           },
           "acceptLicence": {
             "type": "boolean",
@@ -410,7 +413,7 @@
           "runnerId": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$",
-            "description": "A runner listed in this image's runner lock (local_llm_overview shows which runners can be installed)."
+            "description": "A runner listed in this image's runner lock or in the agent's own lock (local_llm_overview shows which runners can be installed here)."
           }
         },
         "required": [
