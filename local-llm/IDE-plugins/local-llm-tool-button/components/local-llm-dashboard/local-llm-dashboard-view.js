@@ -93,13 +93,25 @@ function cpuCardsHtml(hardware, decision, limits) {
     ].join('');
 }
 
+// The container budget Ploinky set, shown only when the overview carries one.
+function budgetCardHtml(budget) {
+    if (!budget || typeof budget !== 'object') return '';
+    const parts = [];
+    if (Number.isFinite(budget.cpus) && budget.cpus > 0) parts.push(`${budget.cpus} ${budget.cpus === 1 ? 'CPU' : 'CPUs'}`);
+    if (Number.isFinite(budget.memoryBytes)) parts.push(`${formatMiB(budget.memoryBytes)} RAM`);
+    if (!parts.length) return '';
+    return statCard('budget', 'Limits from Ploinky', parts.join(' · '),
+        'Models are sized against this container budget; a temporary shortage clears when memory is released.');
+}
+
 /**
  * The GPU, RAM and disk cards; on a GPU that shares system memory, one unified-memory card and disk; on the
  * cpu profile (`profile`, with the controller's `decision` and pool `limits`), the Compute, Memory and disk
  * cards. `gpu` may come from a fresher status poll.
  */
 export function hardwareCardsHtml(hardware = {}, gpuOverride = null, { profile = null, decision = null, limits = null } = {}) {
-    if (profile === 'cpu') return cpuCardsHtml(hardware, decision, limits);
+    const budget = budgetCardHtml(limits?.budget);
+    if (profile === 'cpu') return cpuCardsHtml(hardware, decision, limits) + budget;
     const gpu = gpuOverride?.available ? { ...(hardware.gpu || {}), ...gpuOverride } : (hardware.gpu || {});
     const cards = [];
     const memory = hardware.memory || {};
@@ -117,7 +129,7 @@ export function hardwareCardsHtml(hardware = {}, gpuOverride = null, { profile =
         const disk = hardware.disk || {};
         cards.push(statCard('disk', 'Disk free', formatBytes(disk.freeBytes),
             Number.isFinite(disk.totalBytes) ? `of ${formatBytes(disk.totalBytes)}, for model weights` : 'for model weights'));
-        return cards.join('');
+        return cards.join('') + budget;
     }
     if (gpu.available) {
         const users = Array.isArray(gpu.processes) && gpu.processes.length
@@ -134,7 +146,7 @@ export function hardwareCardsHtml(hardware = {}, gpuOverride = null, { profile =
     const disk = hardware.disk || {};
     cards.push(statCard('disk', 'Disk free', formatBytes(disk.freeBytes),
         Number.isFinite(disk.totalBytes) ? `of ${formatBytes(disk.totalBytes)}, for model weights` : 'for model weights'));
-    return cards.join('');
+    return cards.join('') + budget;
 }
 
 /** The deployment card: what runs, how it is doing, and its actions. */

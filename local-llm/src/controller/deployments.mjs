@@ -33,6 +33,7 @@ import {
 } from './downloader.mjs';
 import { ggufSizing, readGgufHeaderFile } from './ggufHeader.mjs';
 import {
+    readCgroupMemoryObservation,
     readMemory as readHostMemory,
     readMemoryPressure,
     readSnapshot,
@@ -41,6 +42,7 @@ import {
     untilStopped,
 } from './hardware.mjs';
 import { lookupHuggingFaceModel } from './modelLookup.mjs';
+import { BUDGET_UNREADABLE, cpuQuotaOf, memoryBudgetOf, overviewBudget } from './ploinkyBudget.mjs';
 import {
     UNIFIED,
     UNREADABLE_COMMIT_MS,
@@ -194,6 +196,8 @@ export function createController({
     // The unified profile's guard (DS005): every runner, sampled this often in every phase.
     readPressure = readMemoryPressure,
     unifiedGuardMs = UNIFIED.guardSampleMs,
+    // A container memory limit's current headroom (ploinkyBudget.mjs), sampled by the guard.
+    readBudget = () => readCgroupMemoryObservation(),
     // The hardware profile; null decides it from the first snapshot (DS005).
     profile: fixedProfile = null,
     // What the image contains; null (no source.contract) makes every runner available.
@@ -387,14 +391,18 @@ export function createController({
     // The pool limits the dashboard shows (DS005): the constants of the unified
     // profile, and on the CPU the reserve and floor of this machine's pool.
     function limitsFor(snap) {
-        if (profile === 'unified') return { floorBytes: UNIFIED.floorBytes, hostReserveBytes: UNIFIED.hostReserveBytes };
-        if (profile !== 'cpu') return null;
+        // The container budget Ploinky set (exact fractional CPUs, the memory
+        // limit), only when there is one: unlimited overviews are unchanged.
+        const budget = overviewBudget({ observation: memoryBudgetOf(snap), cpuQuota: cpuQuotaOf(snap) });
+        const withBudget = (limits) => (budget ? { ...(limits || {}), budget } : limits);
+        if (profile === 'unified') return withBudget({ floorBytes: UNIFIED.floorBytes, hostReserveBytes: UNIFIED.hostReserveBytes });
+        if (profile !== 'cpu') return withBudget(null);
         const pool = cpuPool(snap?.memory, snap?.cgroupMemory);
-        if (!Number.isFinite(pool.totalBytes)) return null;
-        return {
+        if (!Number.isFinite(pool.totalBytes)) return withBudget(null);
+        return withBudget({
             floorBytes: cpuFloorBytes(pool.totalBytes), hostReserveBytes: cpuHostReserveBytes(pool.totalBytes),
             poolBytes: pool.totalBytes, availableBytes: pool.availableBytes,
-        };
+        });
     }
 
     // A fresh snapshot that stops with the drain and, for a pending Run or a
@@ -1018,16 +1026,45 @@ export function createController({
         if (!Number.isFinite(floor) || floor <= 0) return () => {};
         let timer = null;
         let cancelled = false;
+        // Under a finite container memory limit the guard also samples its
+        // headroom, every 250 ms; two consecutive unreadable samples stop the
+        // runner's process group (budget_unreadable). Without one, unchanged.
+        const sampleBudget = () => {
+            try { return readBudget(); } catch { return null; }
+        };
+        const budgeted = Number.isSafeInteger(sampleBudget()?.finiteMemoryBytes);
+        let unreadableBudgetSamples = 0;
         if (pooled) guardStats = { floorBytes: floor, minAvailableBytes: null, maxPressureAvg10: null, samples: 0 };
         const schedule = () => {
             if (cancelled) return;
             const ready = state.deployment?.id === deployment.id && state.deployment.phase === 'ready';
-            timer = setTimeout(tick, pooled ? unifiedGuardMs : (ready ? memoryGuardReadyMs : memoryGuardLoadMs));
+            timer = setTimeout(tick, pooled || budgeted ? unifiedGuardMs : (ready ? memoryGuardReadyMs : memoryGuardLoadMs));
             timer.unref?.();
         };
-        const breach = (message) => {
+        const breach = (message, { kill = pooled } = {}) => {
             cancelled = true;
-            stopForMemory(deployment, current, message, { kill: pooled }).catch(() => {});
+            stopForMemory(deployment, current, message, { kill }).catch(() => {});
+        };
+        // The available memory within the container budget, or undefined when
+        // the budget's current use could not be read (counted, then stopped).
+        const withinBudget = (available) => {
+            if (!budgeted) return available;
+            const observation = sampleBudget();
+            if (observation?.memoryReadState !== 'known') {
+                unreadableBudgetSamples += 1;
+                return undefined;
+            }
+            unreadableBudgetSamples = 0;
+            if (!Number.isSafeInteger(observation.finiteMemoryBytes) || !Number.isFinite(available)) return available;
+            return Math.min(available, observation.finiteMemoryBytes, observation.headroomBytes);
+        };
+        const budgetUnreadable = () => {
+            if (unreadableBudgetSamples < 2) {
+                schedule();
+                return;
+            }
+            breach(`stopped: ${BUDGET_UNREADABLE}: the container memory limit's current use could not be read twice in a row, `
+                + 'so the runner cannot be watched', { kill: true });
         };
         const tick = () => {
             // Pool profiles: watched until the process exits, through a graceful Stop
@@ -1037,12 +1074,18 @@ export function createController({
             try {
                 available = readMemory().availableBytes;
             } catch {}
+            // An unreadable /proc/meminfo stops a pooled runner at once, before the budget is sampled.
+            if (pooled && !Number.isFinite(available)) {
+                breach('stopped: host memory cannot be read (/proc/meminfo), so the runner cannot be watched');
+                return;
+            }
+            available = withinBudget(available);
+            if (available === undefined) {
+                budgetUnreadable();
+                return;
+            }
             if (pooled) {
                 const stats = guardStats;
-                if (!Number.isFinite(available)) {
-                    breach('stopped: host memory cannot be read (/proc/meminfo), so the runner cannot be watched');
-                    return;
-                }
                 const pressure = readPressure();
                 stats.samples += 1;
                 stats.minAvailableBytes = stats.minAvailableBytes === null ? available : Math.min(stats.minAvailableBytes, available);

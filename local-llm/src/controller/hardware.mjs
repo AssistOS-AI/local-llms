@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 
 import { HARDWARE_QUERY_REAP_MS } from '../drainBudget.mjs';
+import { attachCpuQuota, attachMemoryBudget, observeMemoryBudget, parseCpuQuota } from './ploinkyBudget.mjs';
 
 // The Box GPU wiring binds the host nvidia-smi here (the override is a test seam).
 export const NVIDIA_SMI = process.env.LOCAL_LLM_NVIDIA_SMI || '/usr/local/nvidia/bin/nvidia-smi';
@@ -319,6 +320,32 @@ export function readCgroupMemory({ fsApi = fs } = {}) {
     return { maxBytes, currentBytes: bytes('/sys/fs/cgroup/memory.current') };
 }
 
+// The finite memory limit this process has seen, per filesystem reader (the
+// real one in production): a later failure to read memory.max never turns an
+// established limit into unlimited.
+const establishedMemoryLimits = new WeakMap();
+
+/**
+ * The internal memory-budget observation (ploinkyBudget.mjs): unlike
+ * readCgroupMemory, it keeps a literal `max` (no limit) apart from a file that
+ * cannot be read, and a finite limit apart from an unreadable `memory.current`.
+ * Used by admission and the memory guard; never published in the overview.
+ */
+export function readCgroupMemoryObservation({ fsApi = fs, established = establishedMemoryLimits.get(fsApi) ?? null } = {}) {
+    const observation = observeMemoryBudget({
+        maxText: readText(fsApi, '/sys/fs/cgroup/memory.max'),
+        currentText: readText(fsApi, '/sys/fs/cgroup/memory.current'),
+        established,
+    });
+    if (Number.isSafeInteger(observation.finiteMemoryBytes)) establishedMemoryLimits.set(fsApi, observation.finiteMemoryBytes);
+    return observation;
+}
+
+/** The raw cgroup v2 CPU quota in CPUs (1.5 for `150000 100000`), or null without one. */
+export function readCpuQuota({ fsApi = fs } = {}) {
+    return parseCpuQuota(readText(fsApi, '/sys/fs/cgroup/cpu.max'));
+}
+
 // "0-3,8,10-11" -> [0, 1, 2, 3, 8, 10, 11]
 function parseCpuList(text) {
     const cpus = [];
@@ -444,7 +471,7 @@ export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signa
     const pendingDisk = readDisk(dataDir, { statfs }).catch((error) => ({ freeBytes: null, totalBytes: null, error: error.message }));
     const gpu = await readGpu({ execFileImpl, signal });
     const disk = await untilStopped(pendingDisk, signal);
-    return {
+    const snapshot = {
         at: new Date().toISOString(),
         gpu,
         memory: readMemory({ fsApi }),
@@ -453,4 +480,7 @@ export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signa
         cores: physicalCoreCount({ fsApi }),
         cgroupMemory: readCgroupMemory({ fsApi }),
     };
+    // Internal budget facts (ploinkyBudget.mjs), not published with the snapshot.
+    attachCpuQuota(snapshot, readCpuQuota({ fsApi }));
+    return attachMemoryBudget(snapshot, readCgroupMemoryObservation({ fsApi }));
 }

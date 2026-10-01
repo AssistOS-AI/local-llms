@@ -6,6 +6,11 @@
 // the model's measured memory profile when the catalog has one (gpt-oss-20b
 // was calibrated on the RTX 3060 in Phase 0) and from the file size otherwise.
 
+// Strict RAM readings (ploinkyBudget.mjs): zero is a known value (no headroom),
+// not an absent one; an unknown reading under a finite limit is refused before
+// any policy runs (budgetGuard).
+import { budgetGuard, effectiveMemory, knownByte, memoryBudgetOf } from './ploinkyBudget.mjs';
+
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
 const CUDA_CONTEXT_BYTES = 200 * MIB;
@@ -21,8 +26,12 @@ function gib(bytes) {
     return `${(bytes / GIB).toFixed(1)} GiB`;
 }
 
-function result(status, reason, estimate, warnings = []) {
-    return Object.freeze({ status, reason, estimate: Object.freeze({ ...estimate, isEstimate: true }), warnings: Object.freeze(warnings) });
+function result(status, reason, estimate, warnings = [], reasonCode = null) {
+    return Object.freeze({
+        status, reason, estimate: Object.freeze({ ...estimate, isEstimate: true }), warnings: Object.freeze(warnings),
+        // A bounded machine-readable cause, only where one applies (budget_unreadable).
+        ...(reasonCode ? { reasonCode } : {}),
+    });
 }
 
 // Custom runner policies build their answers with the same shape.
@@ -56,7 +65,7 @@ function llamaWeightSplit(model, size, params) {
 
 // Shared with the unified estimates (profiles.mjs), which reuse these
 // formulas and defaults rather than inventing constants of their own.
-export { DEFAULT_KV_BYTES_PER_TOKEN, DEFAULT_LAYERS };
+export { DEFAULT_KV_BYTES_PER_TOKEN, DEFAULT_LAYERS, RAM_MARGIN_BYTES };
 
 export function computeBufferBytes(params) {
     const ubatch = params.ubatchSize || 512;
@@ -108,7 +117,7 @@ export function estimateOllama({ model, source, params }) {
 }
 
 function ramWarning(ramBytes, memory) {
-    if (!memory?.availableBytes || !ramBytes) return [];
+    if (!knownByte(memory?.availableBytes) || !ramBytes) return [];
     if (ramBytes <= memory.availableBytes * 0.5) return [];
     return [`Uses about ${gib(ramBytes)} of system RAM; ${gib(memory.availableBytes)} is available now. `
         + 'Close other applications or reduce the context if the desktop becomes slow.'];
@@ -137,7 +146,7 @@ export function admitLlamaServer({ model, source, params, gpu, memory, disk, rem
         return result('incompatible', `Needs about ${gib(estimate.gpuBytes)} of GPU memory; the GPU has `
             + `${gib(gpu.totalBytes)}. Keep more expert layers in RAM (nCpuMoe) or reduce ctxSize.`, estimate, warnings);
     }
-    if (memory.totalBytes && estimate.ramBytes > memory.totalBytes) {
+    if (knownByte(memory.totalBytes) && estimate.ramBytes > memory.totalBytes) {
         return result('incompatible', `Needs about ${gib(estimate.ramBytes)} of RAM; this machine has `
             + `${gib(memory.totalBytes)}.`, estimate, warnings);
     }
@@ -145,7 +154,7 @@ export function admitLlamaServer({ model, source, params, gpu, memory, disk, rem
         return result('insufficient-now', `Needs about ${gib(estimate.gpuBytes)} of GPU memory; `
             + `${gib(gpu.freeBytes)} is free now${otherGpuUsers(gpu)}.`, estimate, warnings);
     }
-    if (memory.availableBytes && estimate.ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
+    if (knownByte(memory.availableBytes) && estimate.ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
         return result('insufficient-now', `Needs about ${gib(estimate.ramBytes)} of RAM; `
             + `${gib(memory.availableBytes)} is available now.`, estimate, warnings);
     }
@@ -178,7 +187,7 @@ export function admitOllama({ model, source, params, gpu, memory, disk, remainin
         return result('incompatible', `numGpu puts about ${gib(estimate.gpuBytes)} on a GPU with `
             + `${gib(gpu.totalBytes)}; lower numGpu or leave it unset.`, withRam, warnings);
     }
-    if (memory.totalBytes && estimate.totalBytes > gpu.totalBytes + memory.totalBytes) {
+    if (knownByte(memory.totalBytes) && estimate.totalBytes > gpu.totalBytes + memory.totalBytes) {
         return result('incompatible', `Needs about ${gib(estimate.totalBytes)} of GPU memory and RAM together.`,
             withRam, warnings);
     }
@@ -186,7 +195,7 @@ export function admitOllama({ model, source, params, gpu, memory, disk, remainin
         return result('insufficient-now', `Only ${gib(gpu.freeBytes)} of GPU memory is free${otherGpuUsers(gpu)}.`,
             withRam, warnings);
     }
-    if (memory.availableBytes && ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
+    if (knownByte(memory.availableBytes) && ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
         return result('insufficient-now', `Needs about ${gib(ramBytes)} of RAM; `
             + `${gib(memory.availableBytes)} is available now.`, withRam, warnings);
     }
@@ -241,7 +250,9 @@ export function admitVllm({ model, source, params, gpu, memory, disk, remainingD
     const ramBytes = offloadBytes > 0
         ? Math.round((offloadBytes * VLLM_OFFLOAD_RAM_FACTOR + VLLM_OFFLOAD_RESIDENT_BYTES) * VLLM_OFFLOAD_RAM_MARGIN)
         : VLLM_RUNNER_RAM_BYTES;
-    const ramFloor = Math.max(VLLM_RAM_FLOOR_BYTES, (memory.totalBytes || 0) * VLLM_RAM_FLOOR_SHARE);
+    // An unknown total under a finite limit was refused before this policy ran
+    // (budgetGuard); without one, an unread total keeps the fixed 4 GiB floor.
+    const ramFloor = Math.max(VLLM_RAM_FLOOR_BYTES, (knownByte(memory.totalBytes) ? memory.totalBytes : 0) * VLLM_RAM_FLOOR_SHARE);
     const estimate = {
         weightsBytes: size, gpuWeightsBytes, cpuWeightsBytes: offloadBytes, kvBytes, gpuBytes, ramBytes,
         gpuMemoryUtilization, basis: offloadBytes > 0
@@ -273,11 +284,11 @@ export function admitVllm({ model, source, params, gpu, memory, disk, remainingD
     }
     const offloadNeeds = `Offloading ${gib(offloadBytes)} needs about ${gib(ramBytes)} of system RAM `
         + `(${VLLM_OFFLOAD_RAM_FACTOR} x the offload plus 3.0 GiB for vLLM, measured, plus 15 %)`;
-    if (offloadBytes > 0 && memory.totalBytes && ramBytes > memory.totalBytes - ramFloor) {
+    if (offloadBytes > 0 && knownByte(memory.totalBytes) && ramBytes > memory.totalBytes - ramFloor) {
         return result('incompatible', `${offloadNeeds}; this machine has ${gib(memory.totalBytes)} and ${gib(ramFloor)} must stay free. `
             + 'Lower cpuOffloadGb or pick a smaller model.', estimate, warnings);
     }
-    if (memory.totalBytes && ramBytes > memory.totalBytes) {
+    if (knownByte(memory.totalBytes) && ramBytes > memory.totalBytes) {
         return result('incompatible', `Needs about ${gib(ramBytes)} of RAM; this machine has ${gib(memory.totalBytes)}.`, estimate, warnings);
     }
     // Busy now: the share does not fit in the free memory, or what is free
@@ -287,12 +298,12 @@ export function admitVllm({ model, source, params, gpu, memory, disk, remainingD
         return result('insufficient-now', `Needs about ${gib(gpuBytes)} of GPU memory; ${gib(gpu.freeBytes)} is free now`
             + `${otherGpuUsers(gpu)}.`, estimate, warnings);
     }
-    if (offloadBytes > 0 && memory.availableBytes && ramBytes > memory.availableBytes - ramFloor) {
+    if (offloadBytes > 0 && knownByte(memory.availableBytes) && ramBytes > memory.availableBytes - ramFloor) {
         return result('insufficient-now', `${offloadNeeds}; ${gib(memory.availableBytes)} is available now and ${gib(ramFloor)} `
             + 'must stay free for the desktop and other agents. Close other applications, lower cpuOffloadGb, or pick a smaller model.',
         estimate, warnings);
     }
-    if (memory.availableBytes && ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
+    if (knownByte(memory.availableBytes) && ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
         return result('insufficient-now', `Needs about ${gib(ramBytes)} of RAM; ${gib(memory.availableBytes)} is available now.`,
             estimate, warnings);
     }
@@ -329,14 +340,14 @@ export function admitTabbyApi({ model, source, params, gpu, memory, disk, remain
             + `${params.cacheMode} cache; about ${gib(usable)} of this GPU is usable. Lower maxSeqLen, use cacheMode Q4, `
             + 'or pick a smaller model.', estimate, warnings);
     }
-    if (memory.totalBytes && ramBytes > memory.totalBytes) {
+    if (knownByte(memory.totalBytes) && ramBytes > memory.totalBytes) {
         return result('incompatible', `Needs about ${gib(ramBytes)} of RAM; this machine has ${gib(memory.totalBytes)}.`, estimate, warnings);
     }
     if (gpuBytes > gpu.freeBytes - GPU_MARGIN_BYTES) {
         return result('insufficient-now', `Needs about ${gib(gpuBytes)} of GPU memory; ${gib(gpu.freeBytes)} is free now`
             + `${otherGpuUsers(gpu)}.`, estimate, warnings);
     }
-    if (memory.availableBytes && ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
+    if (knownByte(memory.availableBytes) && ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
         return result('insufficient-now', `Needs about ${gib(ramBytes)} of RAM; ${gib(memory.availableBytes)} is available now.`,
             estimate, warnings);
     }
@@ -368,6 +379,12 @@ export function admit({ runner, model, source, params, snapshot, remainingDownlo
     if (!source) {
         return result('incompatible', `${model.displayName} has no ${runner.displayName} source.`, {});
     }
+    // A finite container memory limit whose current use cannot be read refuses
+    // every profile, the CPU one included, before any policy runs: temporary,
+    // never a permanent incompatibility, and no model starts on guessed headroom.
+    const budget = memoryBudgetOf(snapshot);
+    const unreadableBudget = budgetGuard(budget, result);
+    if (unreadableBudget) return unreadableBudget;
     if (profile === 'cpu') {
         if (typeof runner.admitCpu !== 'function') {
             return result('incompatible', `${runner.displayName} needs an NVIDIA GPU in this release; `
@@ -399,11 +416,12 @@ export function admit({ runner, model, source, params, snapshot, remainingDownlo
         if (typeof runner.admitUnified !== 'function') {
             return result('incompatible', `${runner.displayName} is not available on a GPU that shares system memory (${gpu.name}) in this release.`, {});
         }
+        // Capped once by a finite budget; the physical total stays beside it.
         return runner.admitUnified({
-            model, source, params, gpu, memory: snapshot.memory || {}, disk: snapshot.disk, remainingDownloadBytes,
+            model, source, params, gpu, memory: effectiveMemory(snapshot.memory || {}, budget), disk: snapshot.disk, remainingDownloadBytes,
         });
     }
     return runner.admit({
-        model, source, params, gpu, memory: snapshot.memory || {}, disk: snapshot.disk, remainingDownloadBytes,
+        model, source, params, gpu, memory: effectiveMemory(snapshot.memory || {}, budget), disk: snapshot.disk, remainingDownloadBytes,
     });
 }

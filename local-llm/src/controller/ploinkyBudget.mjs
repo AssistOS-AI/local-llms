@@ -1,0 +1,174 @@
+// Container budgets from Ploinky (DS003, DS005): what a finite cgroup memory
+// limit and CPU quota leave this agent, kept apart from the raw hardware
+// telemetry. Nothing here changes an unlimited machine: without a finite
+// limit every view below is the original object.
+//
+// Readings are strict. A byte count is known when it parses to a safe integer
+// of zero or more, so a finite zero is known (no headroom), while a missing,
+// malformed, negative or non-finite reading is unknown and is never taken for
+// zero or for unlimited. A cgroup file that says exactly `max` is unlimited,
+// which is not the same as a file that cannot be read.
+
+const UNREADABLE_REASON = 'budget_unreadable';
+
+/** A known byte count: a safe integer >= 0. Zero is known. */
+export function knownByte(value) {
+    return Number.isSafeInteger(value) && value >= 0;
+}
+
+/** Strictly parse a cgroup byte file: a decimal integer, `max` (unlimited), or unknown. */
+export function parseCgroupBytes(text) {
+    if (typeof text !== 'string') return { state: 'unknown', bytes: null };
+    const value = text.trim();
+    if (value === 'max') return { state: 'unlimited', bytes: null };
+    if (!/^\d+$/.test(value)) return { state: 'unknown', bytes: null };
+    const bytes = Number(value);
+    return knownByte(bytes) ? { state: 'known', bytes } : { state: 'unknown', bytes: null };
+}
+
+/**
+ * The raw CPU quota of cgroup v2 `cpu.max` as a fraction of CPUs (quota /
+ * period), with no rounding and no minimum of one: `150000 100000` is 1.5.
+ * `max` means no quota (null); anything unreadable is null too. Integer
+ * thread selection (physicalCoreCount) stays separate.
+ */
+export function parseCpuQuota(text) {
+    const match = typeof text === 'string' ? /^(max|\d+)\s+(\d+)\s*$/.exec(text.trim()) : null;
+    if (!match || match[1] === 'max') return null;
+    const quota = Number(match[1]);
+    const period = Number(match[2]);
+    if (!(quota > 0) || !(period > 0)) return null;
+    return quota / period;
+}
+
+/**
+ * The internal memory-budget observation: {memoryReadState, finiteMemoryBytes,
+ * headroomBytes, reasonCode}. `established` is a finite limit seen before: a
+ * later failure to read the limit never turns it into unlimited.
+ */
+export function observeMemoryBudget({ maxText, currentText, established = null }) {
+    const max = parseCgroupBytes(maxText);
+    if (max.state === 'unlimited') return noBudget();
+    // A limit beyond any real memory (all digits, past the safe range) is none,
+    // as the legacy projection reads it.
+    if (max.state === 'unknown' && typeof maxText === 'string' && /^\d+$/.test(maxText.trim())) return noBudget();
+    let finite = max.state === 'known' ? max.bytes : null;
+    if (finite === null) {
+        // Unreadable limit: no budget unless a finite one was established.
+        if (!knownByte(established)) return noBudget();
+        finite = established;
+        return unknownBudget(finite);
+    }
+    const current = parseCgroupBytes(currentText);
+    if (current.state !== 'known') return unknownBudget(finite);
+    return Object.freeze({
+        memoryReadState: 'known',
+        finiteMemoryBytes: finite,
+        headroomBytes: Math.max(0, finite - current.bytes),
+        reasonCode: null,
+    });
+}
+
+function noBudget() {
+    return Object.freeze({ memoryReadState: 'known', finiteMemoryBytes: null, headroomBytes: null, reasonCode: null });
+}
+
+function unknownBudget(finite) {
+    return Object.freeze({ memoryReadState: 'unknown', finiteMemoryBytes: finite, headroomBytes: null, reasonCode: UNREADABLE_REASON });
+}
+
+// The snapshot carries the observation as a non-enumerable field, so it is
+// used by admission but never published in the overview's hardware object.
+const OBSERVATION = 'memoryBudget';
+
+export function attachMemoryBudget(snapshot, observation) {
+    if (snapshot && typeof snapshot === 'object' && observation) {
+        Object.defineProperty(snapshot, OBSERVATION, { value: observation, enumerable: false, configurable: true, writable: false });
+    }
+    return snapshot;
+}
+
+const CPU_QUOTA = 'cpuQuota';
+
+/** Attach the raw CPU quota (CPUs, or null) to a snapshot, non-enumerable like the memory observation. */
+export function attachCpuQuota(snapshot, quota) {
+    if (snapshot && typeof snapshot === 'object' && Number.isFinite(quota) && quota > 0) {
+        Object.defineProperty(snapshot, CPU_QUOTA, { value: quota, enumerable: false, configurable: true, writable: false });
+    }
+    return snapshot;
+}
+
+export function cpuQuotaOf(snapshot) {
+    const quota = snapshot?.[CPU_QUOTA];
+    return Number.isFinite(quota) && quota > 0 ? quota : null;
+}
+
+/**
+ * The observation for a snapshot: the attached one, else derived from the
+ * legacy `cgroupMemory` projection ({maxBytes, currentBytes} or null).
+ */
+export function memoryBudgetOf(snapshot) {
+    const attached = snapshot?.[OBSERVATION];
+    if (attached) return attached;
+    const legacy = snapshot?.cgroupMemory;
+    if (!legacy || !knownByte(legacy.maxBytes)) return noBudget();
+    if (!knownByte(legacy.currentBytes)) return unknownBudget(legacy.maxBytes);
+    return Object.freeze({
+        memoryReadState: 'known',
+        finiteMemoryBytes: legacy.maxBytes,
+        headroomBytes: Math.max(0, legacy.maxBytes - legacy.currentBytes),
+        reasonCode: null,
+    });
+}
+
+/**
+ * The RAM a dedicated or unified policy sizes against, capped once by a known
+ * finite budget: total = min(raw total, limit), available = min(raw available,
+ * effective total, headroom). The raw figures are kept beside it
+ * (`physicalTotalBytes` for utilization denominators). Without a finite budget
+ * the original object is returned unchanged.
+ */
+export function effectiveMemory(memory, observation) {
+    if (!observation || observation.memoryReadState !== 'known' || !knownByte(observation.finiteMemoryBytes)) return memory;
+    const raw = memory || {};
+    const rawTotal = knownByte(raw.totalBytes) ? raw.totalBytes : null;
+    const rawAvailable = knownByte(raw.availableBytes) ? raw.availableBytes : null;
+    const totalBytes = rawTotal === null ? observation.finiteMemoryBytes : Math.min(rawTotal, observation.finiteMemoryBytes);
+    const candidates = [totalBytes, observation.headroomBytes];
+    if (rawAvailable !== null) candidates.push(rawAvailable);
+    return {
+        ...raw,
+        totalBytes,
+        availableBytes: Math.min(...candidates),
+        physicalTotalBytes: raw.totalBytes ?? null,
+        physicalAvailableBytes: raw.availableBytes ?? null,
+        budgetBytes: observation.finiteMemoryBytes,
+    };
+}
+
+export const BUDGET_UNREADABLE_MESSAGE = 'This agent has a container memory limit, but its current memory use cannot be read, '
+    + 'so no model is started on unverified headroom. Retry in a moment; if it persists, check the container\'s cgroup '
+    + '(memory.current) and restart local-llm.';
+
+/**
+ * The refusal before any runner dispatch, including the CPU profile: a known
+ * finite limit whose current use cannot be read. Temporary (insufficient-now),
+ * never a permanent incompatibility. Null when admission may proceed.
+ */
+export function budgetGuard(observation, result) {
+    if (observation?.memoryReadState !== 'unknown') return null;
+    return result('insufficient-now', BUDGET_UNREADABLE_MESSAGE, {}, [], UNREADABLE_REASON);
+}
+
+/**
+ * The optional overview budget: exact fractional CPUs and the finite memory
+ * limit, only when one is set; null otherwise (unlimited overviews unchanged).
+ */
+export function overviewBudget({ observation, cpuQuota = null }) {
+    const memoryBytes = knownByte(observation?.finiteMemoryBytes) ? observation.finiteMemoryBytes : null;
+    const cpus = Number.isFinite(cpuQuota) && cpuQuota > 0 ? cpuQuota : null;
+    if (memoryBytes === null && cpus === null) return null;
+    return Object.freeze({ cpus, memoryBytes, source: 'ploinky' });
+}
+
+export { UNREADABLE_REASON as BUDGET_UNREADABLE };
