@@ -1,0 +1,4194 @@
+{
+  "_meta": {
+    "generatedFrom": "a84617d (Phase 2 fix round head, before llama.cpp-cpu, the agent lock and the Ollama pin)",
+    "how": "git archive a84617d local-llm; collectOverviews and collectOllamaRuns from tests/overview-scenarios.mjs with that tree's modules and an installer over the image lock alone"
+  },
+  "scenarios": {
+    "dedicated, amd64 image": {
+      "profile": "dedicated",
+      "profileDecision": {
+        "profile": "dedicated",
+        "cause": "gpu",
+        "reason": null,
+        "gpuName": "NVIDIA GeForce RTX 3060 Laptop GPU"
+      },
+      "limits": null,
+      "hardware": {
+        "gpu": {
+          "available": true,
+          "name": "NVIDIA GeForce RTX 3060 Laptop GPU",
+          "driverVersion": "595.91.07",
+          "memoryModel": "dedicated",
+          "totalBytes": 6442450944,
+          "usedBytes": 150994944,
+          "freeBytes": 6291456000,
+          "processes": [],
+          "device": {
+            "pciDeviceId": "0x252010DE",
+            "computeCapability": "8.6",
+            "addressingMode": "None"
+          }
+        },
+        "memory": {
+          "totalBytes": 33285996544,
+          "availableBytes": 25769803776
+        },
+        "disk": {
+          "freeBytes": 322122547200,
+          "totalBytes": 536870912000
+        },
+        "cpus": 20
+      },
+      "runners": [
+        {
+          "id": "llama.cpp",
+          "displayName": "llama.cpp",
+          "weightFormat": "gguf",
+          "pinnedVersion": "b11159",
+          "supported": true,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "ctxSize": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 131072,
+                "default": 16384,
+                "title": "Context size",
+                "description": "Total context window in tokens, shared by all parallel slots."
+              },
+              "nGpuLayers": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 999,
+                "default": 99,
+                "title": "GPU layers",
+                "description": "Number of model layers offloaded to the GPU (99 or more means all)."
+              },
+              "nCpuMoe": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 256,
+                "default": 0,
+                "title": "CPU MoE layers",
+                "description": "Number of layers whose MoE expert weights stay in CPU RAM (0 keeps all on GPU)."
+              },
+              "flashAttn": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "on",
+                  "off"
+                ],
+                "default": "auto",
+                "title": "Flash attention",
+                "description": "Flash attention mode."
+              },
+              "cacheTypeK": {
+                "type": "string",
+                "enum": [
+                  "f16",
+                  "q8_0",
+                  "q4_0"
+                ],
+                "default": "f16",
+                "title": "K cache type",
+                "description": "Quantization type of the KV cache keys."
+              },
+              "cacheTypeV": {
+                "type": "string",
+                "enum": [
+                  "f16",
+                  "q8_0",
+                  "q4_0"
+                ],
+                "default": "f16",
+                "title": "V cache type",
+                "description": "Quantization type of the KV cache values."
+              },
+              "threads": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 256,
+                "default": null,
+                "title": "CPU threads",
+                "description": "Number of CPU threads for generation; empty uses the physical CPU cores minus 2."
+              },
+              "parallel": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16,
+                "default": 1,
+                "title": "Parallel slots",
+                "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+              },
+              "batchSize": {
+                "type": "integer",
+                "minimum": 32,
+                "maximum": 8192,
+                "default": 2048,
+                "title": "Batch size",
+                "description": "Logical maximum batch size for prompt processing."
+              },
+              "ubatchSize": {
+                "type": "integer",
+                "minimum": 32,
+                "maximum": 4096,
+                "default": 512,
+                "title": "Micro-batch size",
+                "description": "Physical maximum batch size; must not exceed the batch size."
+              },
+              "loadMode": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "none",
+                  "mmap",
+                  "mlock",
+                  "mmap+mlock",
+                  "dio"
+                ],
+                "default": "auto",
+                "title": "Load mode",
+                "description": "How the weights are read: auto (the runner decides), none (read without mmap), mmap, mlock, mmap+mlock, or dio (read with direct I/O, bypassing the page cache)."
+              },
+              "chatTemplateKwargs": {
+                "type": "object",
+                "additionalProperties": false,
+                "title": "Chat template arguments",
+                "description": "Extra arguments passed to the Jinja chat template.",
+                "properties": {
+                  "reasoning_effort": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high"
+                    ],
+                    "title": "Reasoning effort",
+                    "description": "Reasoning effort hint for models whose template supports it."
+                  },
+                  "preserve_thinking": {
+                    "type": "boolean",
+                    "title": "Preserve thinking",
+                    "description": "Keep earlier reasoning in the prompt, for templates that support it (Qwen3.6 with MTP)."
+                  }
+                }
+              }
+            }
+          },
+          "basicParams": [
+            "ctxSize",
+            "nCpuMoe"
+          ],
+          "moeParams": [
+            "nCpuMoe"
+          ],
+          "installed": true,
+          "version": "b11159",
+          "reason": null,
+          "enabled": true
+        },
+        {
+          "id": "ik_llama.cpp",
+          "displayName": "ik_llama.cpp",
+          "weightFormat": "gguf",
+          "pinnedVersion": "20f7a72",
+          "supported": true,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "ctxSize": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 131072,
+                "default": 16384,
+                "title": "Context size",
+                "description": "Total context window in tokens, shared by all parallel slots."
+              },
+              "nGpuLayers": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 999,
+                "default": 99,
+                "title": "GPU layers",
+                "description": "Number of model layers offloaded to the GPU (99 or more means all)."
+              },
+              "nCpuMoe": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 256,
+                "default": 0,
+                "title": "CPU MoE layers",
+                "description": "Number of layers whose MoE expert weights stay in CPU RAM (0 keeps all on GPU)."
+              },
+              "flashAttn": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "on",
+                  "off"
+                ],
+                "default": "auto",
+                "title": "Flash attention",
+                "description": "Flash attention mode."
+              },
+              "cacheTypeK": {
+                "type": "string",
+                "enum": [
+                  "f16",
+                  "q8_0",
+                  "q4_0"
+                ],
+                "default": "f16",
+                "title": "K cache type",
+                "description": "Quantization type of the KV cache keys."
+              },
+              "cacheTypeV": {
+                "type": "string",
+                "enum": [
+                  "f16",
+                  "q8_0",
+                  "q4_0"
+                ],
+                "default": "f16",
+                "title": "V cache type",
+                "description": "Quantization type of the KV cache values."
+              },
+              "threads": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 256,
+                "default": null,
+                "title": "CPU threads",
+                "description": "Number of CPU threads for generation; empty uses the physical CPU cores minus 2."
+              },
+              "parallel": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16,
+                "default": 1,
+                "title": "Parallel slots",
+                "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+              },
+              "batchSize": {
+                "type": "integer",
+                "minimum": 32,
+                "maximum": 8192,
+                "default": 2048,
+                "title": "Batch size",
+                "description": "Logical maximum batch size for prompt processing."
+              },
+              "ubatchSize": {
+                "type": "integer",
+                "minimum": 32,
+                "maximum": 4096,
+                "default": 512,
+                "title": "Micro-batch size",
+                "description": "Physical maximum batch size; must not exceed the batch size."
+              },
+              "loadMode": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "none",
+                  "mmap",
+                  "mlock",
+                  "mmap+mlock"
+                ],
+                "default": "auto",
+                "title": "Load mode",
+                "description": "How the weights are read: auto (the runner decides), none (read without mmap), mmap, mlock, mmap+mlock, or dio (read with direct I/O, bypassing the page cache)."
+              },
+              "chatTemplateKwargs": {
+                "type": "object",
+                "additionalProperties": false,
+                "title": "Chat template arguments",
+                "description": "Extra arguments passed to the Jinja chat template.",
+                "properties": {
+                  "reasoning_effort": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high"
+                    ],
+                    "title": "Reasoning effort",
+                    "description": "Reasoning effort hint for models whose template supports it."
+                  },
+                  "preserve_thinking": {
+                    "type": "boolean",
+                    "title": "Preserve thinking",
+                    "description": "Keep earlier reasoning in the prompt, for templates that support it (Qwen3.6 with MTP)."
+                  }
+                }
+              }
+            }
+          },
+          "basicParams": [
+            "ctxSize",
+            "nCpuMoe"
+          ],
+          "moeParams": [
+            "nCpuMoe"
+          ],
+          "installed": true,
+          "version": "20f7a72",
+          "reason": null,
+          "enabled": true
+        },
+        {
+          "id": "ollama",
+          "displayName": "Ollama",
+          "weightFormat": "ollama",
+          "pinnedVersion": "0.34.4",
+          "supported": true,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "numCtx": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 131072,
+                "default": 4096,
+                "title": "Context size",
+                "description": "Context window in tokens (num_ctx)."
+              },
+              "numGpu": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 999,
+                "default": null,
+                "title": "GPU layers",
+                "description": "Number of whole layers offloaded to the GPU; empty lets Ollama decide the split."
+              },
+              "numThread": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 256,
+                "default": null,
+                "title": "CPU threads",
+                "description": "Number of CPU threads; empty uses the Ollama default."
+              },
+              "flashAttention": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "default": null,
+                "title": "Flash attention",
+                "description": "Enable or disable flash attention; empty uses the Ollama default."
+              },
+              "kvCacheType": {
+                "type": "string",
+                "enum": [
+                  "f16",
+                  "q8_0",
+                  "q4_0"
+                ],
+                "default": "f16",
+                "title": "KV cache type",
+                "description": "Quantization type of the KV cache."
+              },
+              "keepAlive": {
+                "type": "string",
+                "pattern": "^(-1|0|[1-9][0-9]{0,4}[smh])$",
+                "maxLength": 6,
+                "default": "30m",
+                "title": "Keep alive",
+                "description": "How long the model stays loaded: -1 forever, 0 unload immediately, or e.g. 30m."
+              }
+            }
+          },
+          "basicParams": [
+            "numCtx"
+          ],
+          "moeParams": [],
+          "installed": true,
+          "version": "0.34.4",
+          "reason": null,
+          "enabled": true
+        },
+        {
+          "id": "vllm",
+          "displayName": "vLLM",
+          "weightFormat": "hf",
+          "pinnedVersion": "0.30.0",
+          "supported": true,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "maxModelLen": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 131072,
+                "default": 4096,
+                "title": "Max model length",
+                "description": "Maximum context length per request, in tokens; the KV cache is sized for it."
+              },
+              "gpuMemoryUtilization": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0.1,
+                "maximum": 0.95,
+                "default": null,
+                "title": "GPU memory utilization",
+                "description": "Share of the GPU vLLM may use for weights and KV cache; empty takes what is free now (at most 0.9)."
+              },
+              "cpuOffloadGb": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 512,
+                "default": 0,
+                "title": "CPU offload (GiB)",
+                "description": "GiB of model weights kept in system RAM; lets a larger model run, much more slowly."
+              },
+              "dtype": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "float16",
+                  "bfloat16"
+                ],
+                "default": "auto",
+                "title": "Data type",
+                "description": "Data type for model weights and activations."
+              },
+              "quantization": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[a-z0-9_]{1,32}$",
+                "maxLength": 32,
+                "default": null,
+                "title": "Quantization",
+                "description": "Quantization method name (e.g. awq_marlin, gptq); empty lets vLLM detect it."
+              },
+              "kvCacheDtype": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "fp8"
+                ],
+                "default": "auto",
+                "title": "KV cache type",
+                "description": "Data type of the KV cache."
+              },
+              "enforceEager": {
+                "type": "boolean",
+                "default": true,
+                "title": "Enforce eager mode",
+                "description": "Skip CUDA graph capture and compilation: a faster start, slightly slower generation."
+              },
+              "maxNumSeqs": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 256,
+                "default": 1,
+                "title": "Max sequences",
+                "description": "Maximum number of requests processed concurrently."
+              }
+            }
+          },
+          "basicParams": [
+            "maxModelLen",
+            "cpuOffloadGb"
+          ],
+          "moeParams": [],
+          "installed": false,
+          "version": "0.30.0",
+          "reason": null,
+          "enabled": true,
+          "install": {
+            "version": "0.30.0",
+            "totalBytes": 1000,
+            "files": 1,
+            "licence": {
+              "name": "Apache-2.0",
+              "url": "https://github.com/vllm-project/vllm/blob/v0.30.0/LICENSE",
+              "source": null,
+              "notice": null,
+              "requiresAcceptance": false,
+              "proprietary": false
+            },
+            "cache": {
+              "state": "absent",
+              "bytes": 0,
+              "total": 1000
+            },
+            "installed": false,
+            "record": null,
+            "runnable": false,
+            "state": null,
+            "installing": false
+          }
+        },
+        {
+          "id": "tabbyapi",
+          "displayName": "TabbyAPI (ExLlamaV3)",
+          "weightFormat": "exl3",
+          "pinnedVersion": "f07131c",
+          "supported": false,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "maxSeqLen": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 131072,
+                "default": 4096,
+                "title": "Max sequence length",
+                "description": "Maximum context length per request, in tokens."
+              },
+              "cacheSize": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 512,
+                "maximum": 262144,
+                "default": null,
+                "title": "Cache size",
+                "description": "KV cache size in tokens, at least the max sequence length; empty uses the max sequence length."
+              },
+              "cacheMode": {
+                "type": "string",
+                "enum": [
+                  "FP16",
+                  "Q8",
+                  "Q6",
+                  "Q4"
+                ],
+                "default": "FP16",
+                "title": "Cache mode",
+                "description": "KV cache precision; Q4 takes a quarter of FP16."
+              },
+              "chunkSize": {
+                "type": "integer",
+                "minimum": 256,
+                "maximum": 8192,
+                "default": 2048,
+                "title": "Chunk size",
+                "description": "Prompt tokens processed per step; smaller needs less GPU memory."
+              }
+            }
+          },
+          "basicParams": [
+            "maxSeqLen",
+            "cacheMode"
+          ],
+          "moeParams": [],
+          "unsupportedReason": "TabbyAPI (ExLlamaV3) is not available on this platform: this image does not include it.",
+          "installed": false,
+          "version": null,
+          "reason": "TabbyAPI (ExLlamaV3) is not available on this platform: this image does not include it.",
+          "enabled": true
+        },
+        {
+          "id": "lmstudio",
+          "displayName": "LM Studio (internal use only)",
+          "weightFormat": "gguf",
+          "pinnedVersion": "0.0.25-1",
+          "supported": true,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "ctxSize": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 131072,
+                "default": 16384,
+                "title": "Context size",
+                "description": "Total context window in tokens, shared by all parallel slots."
+              },
+              "nGpuLayers": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 999,
+                "default": 99,
+                "title": "GPU layers",
+                "description": "Number of model layers offloaded to the GPU (99 or more means all)."
+              },
+              "nCpuMoe": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 256,
+                "default": 0,
+                "title": "CPU MoE layers",
+                "description": "Number of layers whose MoE expert weights stay in CPU RAM (0 keeps all on GPU)."
+              },
+              "flashAttn": {
+                "type": "string",
+                "enum": [
+                  "on",
+                  "off"
+                ],
+                "default": "on",
+                "title": "Flash attention",
+                "description": "Flash attention on or off."
+              },
+              "cacheTypeK": {
+                "type": "string",
+                "enum": [
+                  "f16",
+                  "q8_0",
+                  "q4_0"
+                ],
+                "default": "f16",
+                "title": "K cache type",
+                "description": "Quantization type of the KV cache keys."
+              },
+              "cacheTypeV": {
+                "type": "string",
+                "enum": [
+                  "f16",
+                  "q8_0",
+                  "q4_0"
+                ],
+                "default": "f16",
+                "title": "V cache type",
+                "description": "Quantization type of the KV cache values."
+              },
+              "threads": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 256,
+                "default": null,
+                "title": "CPU threads",
+                "description": "Number of CPU threads for generation; empty uses the physical CPU cores minus 2."
+              },
+              "parallel": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16,
+                "default": 1,
+                "title": "Parallel slots",
+                "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+              },
+              "batchSize": {
+                "type": "integer",
+                "minimum": 32,
+                "maximum": 8192,
+                "default": 2048,
+                "title": "Batch size",
+                "description": "Logical maximum batch size for prompt processing."
+              },
+              "ubatchSize": {
+                "type": "integer",
+                "minimum": 32,
+                "maximum": 4096,
+                "default": 512,
+                "title": "Micro-batch size",
+                "description": "Physical maximum batch size; must not exceed the batch size."
+              },
+              "noMmap": {
+                "type": "boolean",
+                "default": false,
+                "title": "Disable mmap",
+                "description": "Read the model into memory instead of memory-mapping the file."
+              }
+            }
+          },
+          "basicParams": [
+            "ctxSize",
+            "nCpuMoe"
+          ],
+          "moeParams": [
+            "nCpuMoe"
+          ],
+          "installed": false,
+          "version": "0.0.25-1",
+          "reason": null,
+          "enabled": false,
+          "disabledReason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm.",
+          "install": {
+            "version": "0.0.25-1",
+            "totalBytes": 2000,
+            "files": 1,
+            "licence": {
+              "name": "LM Studio Terms",
+              "url": "https://lmstudio.ai/app-terms",
+              "source": null,
+              "notice": null,
+              "requiresAcceptance": true,
+              "proprietary": true
+            },
+            "cache": {
+              "state": "absent",
+              "bytes": 0,
+              "total": 2000
+            },
+            "installed": false,
+            "record": null,
+            "runnable": false,
+            "state": null,
+            "installing": false
+          }
+        }
+      ],
+      "unsupportedModels": [],
+      "models": [
+        {
+          "id": "both-formats",
+          "displayName": "Both formats",
+          "architecture": "dense",
+          "contextLength": 32768,
+          "seed": true,
+          "sources": {
+            "gguf": {
+              "type": "huggingface",
+              "repo": "acme/models",
+              "file": "m.gguf",
+              "revision": "main",
+              "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "size": 419430400,
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "ollama": {
+              "type": "ollama",
+              "tag": "both:1b",
+              "manifestDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "size": 419430400
+            }
+          },
+          "validated": {},
+          "weights": {
+            "gguf": {
+              "label": "GGUF file",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "acquisition": {
+                "bytesNeeded": 419430400,
+                "files": [
+                  {
+                    "file": "m.gguf",
+                    "method": "download",
+                    "bytesNeeded": 419430400
+                  }
+                ]
+              },
+              "runners": [
+                "llama.cpp",
+                "ik_llama.cpp"
+              ]
+            },
+            "ollama": {
+              "label": "Ollama tag",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "acquisition": {
+                "bytesNeeded": 419430400,
+                "files": []
+              },
+              "runners": [
+                "ollama"
+              ]
+            }
+          },
+          "runners": {
+            "llama.cpp": {
+              "format": "gguf",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "auto",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "loadMode": "auto"
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "ok",
+                "reason": null,
+                "estimate": {
+                  "weightsBytes": 419430400,
+                  "gpuWeightsBytes": 419430400,
+                  "cpuWeightsBytes": 0,
+                  "kvBytes": 201326592,
+                  "computeBytes": 227457106,
+                  "gpuBytes": 1057929298,
+                  "ramBytes": 805306368,
+                  "basis": "file size heuristic (no memory profile for this model)",
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            },
+            "ik_llama.cpp": {
+              "format": "gguf",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "auto",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "loadMode": "auto"
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "ok",
+                "reason": null,
+                "estimate": {
+                  "weightsBytes": 419430400,
+                  "gpuWeightsBytes": 419430400,
+                  "cpuWeightsBytes": 0,
+                  "kvBytes": 201326592,
+                  "computeBytes": 227457106,
+                  "gpuBytes": 1057929298,
+                  "ramBytes": 805306368,
+                  "basis": "file size heuristic (no memory profile for this model)",
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            },
+            "ollama": {
+              "format": "ollama",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": {
+                "numCtx": 4096,
+                "numGpu": null,
+                "numThread": null,
+                "flashAttention": null,
+                "kvCacheType": "f16",
+                "keepAlive": "30m"
+              },
+              "context": {
+                "totalContext": 4096,
+                "perRequestContext": 4096,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "ok",
+                "reason": null,
+                "estimate": {
+                  "weightsBytes": 419430400,
+                  "gpuWeightsBytes": null,
+                  "kvBytes": 50331648,
+                  "gpuBytes": null,
+                  "totalBytes": 679477248,
+                  "basis": "download size",
+                  "ramBytes": 805306368,
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            },
+            "lmstudio": {
+              "format": "gguf",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "on",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "noMmap": false
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "incompatible",
+                "reason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm.",
+                "estimate": {
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            }
+          }
+        },
+        {
+          "id": "gguf-only",
+          "displayName": "GGUF only",
+          "architecture": "moe",
+          "contextLength": 131072,
+          "seed": true,
+          "sources": {
+            "gguf": {
+              "type": "huggingface",
+              "repo": "acme/models",
+              "file": "n.gguf",
+              "revision": "main",
+              "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "size": 9663676416,
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          },
+          "validated": {},
+          "weights": {
+            "gguf": {
+              "label": "GGUF file",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "acquisition": {
+                "bytesNeeded": 9663676416,
+                "files": [
+                  {
+                    "file": "n.gguf",
+                    "method": "download",
+                    "bytesNeeded": 9663676416
+                  }
+                ]
+              },
+              "runners": [
+                "llama.cpp",
+                "ik_llama.cpp"
+              ]
+            }
+          },
+          "runners": {
+            "llama.cpp": {
+              "format": "gguf",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "auto",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "loadMode": "auto"
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "incompatible",
+                "reason": "Needs about 10.4 GiB of GPU memory; the GPU has 6.0 GiB. Keep more expert layers in RAM (nCpuMoe) or reduce ctxSize.",
+                "estimate": {
+                  "weightsBytes": 9663676416,
+                  "gpuWeightsBytes": 9663676416,
+                  "cpuWeightsBytes": 0,
+                  "kvBytes": 1073741824,
+                  "computeBytes": 227457106,
+                  "gpuBytes": 11174590546,
+                  "ramBytes": 805306368,
+                  "basis": "file size heuristic (no memory profile for this model)",
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            },
+            "ik_llama.cpp": {
+              "format": "gguf",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "auto",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "loadMode": "auto"
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "incompatible",
+                "reason": "Needs about 10.4 GiB of GPU memory; the GPU has 6.0 GiB. Keep more expert layers in RAM (nCpuMoe) or reduce ctxSize.",
+                "estimate": {
+                  "weightsBytes": 9663676416,
+                  "gpuWeightsBytes": 9663676416,
+                  "cpuWeightsBytes": 0,
+                  "kvBytes": 1073741824,
+                  "computeBytes": 227457106,
+                  "gpuBytes": 11174590546,
+                  "ramBytes": 805306368,
+                  "basis": "file size heuristic (no memory profile for this model)",
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            },
+            "lmstudio": {
+              "format": "gguf",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "on",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "noMmap": false
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "incompatible",
+                "reason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm.",
+                "estimate": {
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            }
+          }
+        },
+        {
+          "id": "tag-only",
+          "displayName": "Tag only",
+          "architecture": "dense",
+          "seed": true,
+          "sources": {
+            "ollama": {
+              "type": "ollama",
+              "tag": "tag:1b"
+            }
+          },
+          "validated": {},
+          "weights": {
+            "ollama": {
+              "label": "Ollama tag",
+              "size": null,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": null
+              },
+              "acquisition": {
+                "bytesNeeded": 0,
+                "files": []
+              },
+              "runners": [
+                "ollama"
+              ]
+            }
+          },
+          "runners": {
+            "ollama": {
+              "format": "ollama",
+              "size": null,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": null
+              },
+              "params": {
+                "numCtx": 4096,
+                "numGpu": null,
+                "numThread": null,
+                "flashAttention": null,
+                "kvCacheType": "f16",
+                "keepAlive": "30m"
+              },
+              "context": {
+                "totalContext": 4096,
+                "perRequestContext": 4096,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "ok",
+                "reason": null,
+                "estimate": {
+                  "weightsBytes": 0,
+                  "gpuWeightsBytes": null,
+                  "kvBytes": 268435456,
+                  "gpuBytes": null,
+                  "totalBytes": 478150656,
+                  "basis": "unknown size until the tag is pulled",
+                  "ramBytes": 805306368,
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            }
+          }
+        }
+      ],
+      "deployment": null,
+      "gatewayModel": "soul_gateway/local-llms/local-llm/default"
+    },
+    "dedicated, no image contract": {
+      "profile": "dedicated",
+      "profileDecision": {
+        "profile": "dedicated",
+        "cause": "gpu",
+        "reason": null,
+        "gpuName": "NVIDIA GeForce RTX 3060 Laptop GPU"
+      },
+      "limits": null,
+      "hardware": {
+        "gpu": {
+          "available": true,
+          "name": "NVIDIA GeForce RTX 3060 Laptop GPU",
+          "driverVersion": "595.91.07",
+          "memoryModel": "dedicated",
+          "totalBytes": 6442450944,
+          "usedBytes": 150994944,
+          "freeBytes": 6291456000,
+          "processes": [],
+          "device": {
+            "pciDeviceId": "0x252010DE",
+            "computeCapability": "8.6",
+            "addressingMode": "None"
+          }
+        },
+        "memory": {
+          "totalBytes": 33285996544,
+          "availableBytes": 25769803776
+        },
+        "disk": {
+          "freeBytes": 322122547200,
+          "totalBytes": 536870912000
+        },
+        "cpus": 20
+      },
+      "runners": [
+        {
+          "id": "llama.cpp",
+          "displayName": "llama.cpp",
+          "weightFormat": "gguf",
+          "pinnedVersion": "b11159",
+          "supported": true,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "ctxSize": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 131072,
+                "default": 16384,
+                "title": "Context size",
+                "description": "Total context window in tokens, shared by all parallel slots."
+              },
+              "nGpuLayers": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 999,
+                "default": 99,
+                "title": "GPU layers",
+                "description": "Number of model layers offloaded to the GPU (99 or more means all)."
+              },
+              "nCpuMoe": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 256,
+                "default": 0,
+                "title": "CPU MoE layers",
+                "description": "Number of layers whose MoE expert weights stay in CPU RAM (0 keeps all on GPU)."
+              },
+              "flashAttn": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "on",
+                  "off"
+                ],
+                "default": "auto",
+                "title": "Flash attention",
+                "description": "Flash attention mode."
+              },
+              "cacheTypeK": {
+                "type": "string",
+                "enum": [
+                  "f16",
+                  "q8_0",
+                  "q4_0"
+                ],
+                "default": "f16",
+                "title": "K cache type",
+                "description": "Quantization type of the KV cache keys."
+              },
+              "cacheTypeV": {
+                "type": "string",
+                "enum": [
+                  "f16",
+                  "q8_0",
+                  "q4_0"
+                ],
+                "default": "f16",
+                "title": "V cache type",
+                "description": "Quantization type of the KV cache values."
+              },
+              "threads": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 256,
+                "default": null,
+                "title": "CPU threads",
+                "description": "Number of CPU threads for generation; empty uses the physical CPU cores minus 2."
+              },
+              "parallel": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16,
+                "default": 1,
+                "title": "Parallel slots",
+                "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+              },
+              "batchSize": {
+                "type": "integer",
+                "minimum": 32,
+                "maximum": 8192,
+                "default": 2048,
+                "title": "Batch size",
+                "description": "Logical maximum batch size for prompt processing."
+              },
+              "ubatchSize": {
+                "type": "integer",
+                "minimum": 32,
+                "maximum": 4096,
+                "default": 512,
+                "title": "Micro-batch size",
+                "description": "Physical maximum batch size; must not exceed the batch size."
+              },
+              "loadMode": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "none",
+                  "mmap",
+                  "mlock",
+                  "mmap+mlock",
+                  "dio"
+                ],
+                "default": "auto",
+                "title": "Load mode",
+                "description": "How the weights are read: auto (the runner decides), none (read without mmap), mmap, mlock, mmap+mlock, or dio (read with direct I/O, bypassing the page cache)."
+              },
+              "chatTemplateKwargs": {
+                "type": "object",
+                "additionalProperties": false,
+                "title": "Chat template arguments",
+                "description": "Extra arguments passed to the Jinja chat template.",
+                "properties": {
+                  "reasoning_effort": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high"
+                    ],
+                    "title": "Reasoning effort",
+                    "description": "Reasoning effort hint for models whose template supports it."
+                  },
+                  "preserve_thinking": {
+                    "type": "boolean",
+                    "title": "Preserve thinking",
+                    "description": "Keep earlier reasoning in the prompt, for templates that support it (Qwen3.6 with MTP)."
+                  }
+                }
+              }
+            }
+          },
+          "basicParams": [
+            "ctxSize",
+            "nCpuMoe"
+          ],
+          "moeParams": [
+            "nCpuMoe"
+          ],
+          "installed": true,
+          "version": "b11159",
+          "reason": null,
+          "enabled": true
+        },
+        {
+          "id": "ik_llama.cpp",
+          "displayName": "ik_llama.cpp",
+          "weightFormat": "gguf",
+          "pinnedVersion": "20f7a72",
+          "supported": true,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "ctxSize": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 131072,
+                "default": 16384,
+                "title": "Context size",
+                "description": "Total context window in tokens, shared by all parallel slots."
+              },
+              "nGpuLayers": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 999,
+                "default": 99,
+                "title": "GPU layers",
+                "description": "Number of model layers offloaded to the GPU (99 or more means all)."
+              },
+              "nCpuMoe": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 256,
+                "default": 0,
+                "title": "CPU MoE layers",
+                "description": "Number of layers whose MoE expert weights stay in CPU RAM (0 keeps all on GPU)."
+              },
+              "flashAttn": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "on",
+                  "off"
+                ],
+                "default": "auto",
+                "title": "Flash attention",
+                "description": "Flash attention mode."
+              },
+              "cacheTypeK": {
+                "type": "string",
+                "enum": [
+                  "f16",
+                  "q8_0",
+                  "q4_0"
+                ],
+                "default": "f16",
+                "title": "K cache type",
+                "description": "Quantization type of the KV cache keys."
+              },
+              "cacheTypeV": {
+                "type": "string",
+                "enum": [
+                  "f16",
+                  "q8_0",
+                  "q4_0"
+                ],
+                "default": "f16",
+                "title": "V cache type",
+                "description": "Quantization type of the KV cache values."
+              },
+              "threads": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 256,
+                "default": null,
+                "title": "CPU threads",
+                "description": "Number of CPU threads for generation; empty uses the physical CPU cores minus 2."
+              },
+              "parallel": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16,
+                "default": 1,
+                "title": "Parallel slots",
+                "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+              },
+              "batchSize": {
+                "type": "integer",
+                "minimum": 32,
+                "maximum": 8192,
+                "default": 2048,
+                "title": "Batch size",
+                "description": "Logical maximum batch size for prompt processing."
+              },
+              "ubatchSize": {
+                "type": "integer",
+                "minimum": 32,
+                "maximum": 4096,
+                "default": 512,
+                "title": "Micro-batch size",
+                "description": "Physical maximum batch size; must not exceed the batch size."
+              },
+              "loadMode": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "none",
+                  "mmap",
+                  "mlock",
+                  "mmap+mlock"
+                ],
+                "default": "auto",
+                "title": "Load mode",
+                "description": "How the weights are read: auto (the runner decides), none (read without mmap), mmap, mlock, mmap+mlock, or dio (read with direct I/O, bypassing the page cache)."
+              },
+              "chatTemplateKwargs": {
+                "type": "object",
+                "additionalProperties": false,
+                "title": "Chat template arguments",
+                "description": "Extra arguments passed to the Jinja chat template.",
+                "properties": {
+                  "reasoning_effort": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high"
+                    ],
+                    "title": "Reasoning effort",
+                    "description": "Reasoning effort hint for models whose template supports it."
+                  },
+                  "preserve_thinking": {
+                    "type": "boolean",
+                    "title": "Preserve thinking",
+                    "description": "Keep earlier reasoning in the prompt, for templates that support it (Qwen3.6 with MTP)."
+                  }
+                }
+              }
+            }
+          },
+          "basicParams": [
+            "ctxSize",
+            "nCpuMoe"
+          ],
+          "moeParams": [
+            "nCpuMoe"
+          ],
+          "installed": true,
+          "version": "20f7a72",
+          "reason": null,
+          "enabled": true
+        },
+        {
+          "id": "ollama",
+          "displayName": "Ollama",
+          "weightFormat": "ollama",
+          "pinnedVersion": "0.34.4",
+          "supported": true,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "numCtx": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 131072,
+                "default": 4096,
+                "title": "Context size",
+                "description": "Context window in tokens (num_ctx)."
+              },
+              "numGpu": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 999,
+                "default": null,
+                "title": "GPU layers",
+                "description": "Number of whole layers offloaded to the GPU; empty lets Ollama decide the split."
+              },
+              "numThread": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 256,
+                "default": null,
+                "title": "CPU threads",
+                "description": "Number of CPU threads; empty uses the Ollama default."
+              },
+              "flashAttention": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "default": null,
+                "title": "Flash attention",
+                "description": "Enable or disable flash attention; empty uses the Ollama default."
+              },
+              "kvCacheType": {
+                "type": "string",
+                "enum": [
+                  "f16",
+                  "q8_0",
+                  "q4_0"
+                ],
+                "default": "f16",
+                "title": "KV cache type",
+                "description": "Quantization type of the KV cache."
+              },
+              "keepAlive": {
+                "type": "string",
+                "pattern": "^(-1|0|[1-9][0-9]{0,4}[smh])$",
+                "maxLength": 6,
+                "default": "30m",
+                "title": "Keep alive",
+                "description": "How long the model stays loaded: -1 forever, 0 unload immediately, or e.g. 30m."
+              }
+            }
+          },
+          "basicParams": [
+            "numCtx"
+          ],
+          "moeParams": [],
+          "installed": true,
+          "version": "0.34.4",
+          "reason": null,
+          "enabled": true
+        },
+        {
+          "id": "vllm",
+          "displayName": "vLLM",
+          "weightFormat": "hf",
+          "pinnedVersion": "0.30.0",
+          "supported": true,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "maxModelLen": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 131072,
+                "default": 4096,
+                "title": "Max model length",
+                "description": "Maximum context length per request, in tokens; the KV cache is sized for it."
+              },
+              "gpuMemoryUtilization": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0.1,
+                "maximum": 0.95,
+                "default": null,
+                "title": "GPU memory utilization",
+                "description": "Share of the GPU vLLM may use for weights and KV cache; empty takes what is free now (at most 0.9)."
+              },
+              "cpuOffloadGb": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 512,
+                "default": 0,
+                "title": "CPU offload (GiB)",
+                "description": "GiB of model weights kept in system RAM; lets a larger model run, much more slowly."
+              },
+              "dtype": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "float16",
+                  "bfloat16"
+                ],
+                "default": "auto",
+                "title": "Data type",
+                "description": "Data type for model weights and activations."
+              },
+              "quantization": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[a-z0-9_]{1,32}$",
+                "maxLength": 32,
+                "default": null,
+                "title": "Quantization",
+                "description": "Quantization method name (e.g. awq_marlin, gptq); empty lets vLLM detect it."
+              },
+              "kvCacheDtype": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "fp8"
+                ],
+                "default": "auto",
+                "title": "KV cache type",
+                "description": "Data type of the KV cache."
+              },
+              "enforceEager": {
+                "type": "boolean",
+                "default": true,
+                "title": "Enforce eager mode",
+                "description": "Skip CUDA graph capture and compilation: a faster start, slightly slower generation."
+              },
+              "maxNumSeqs": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 256,
+                "default": 1,
+                "title": "Max sequences",
+                "description": "Maximum number of requests processed concurrently."
+              }
+            }
+          },
+          "basicParams": [
+            "maxModelLen",
+            "cpuOffloadGb"
+          ],
+          "moeParams": [],
+          "installed": false,
+          "version": "0.30.0",
+          "reason": null,
+          "enabled": true,
+          "install": {
+            "version": "0.30.0",
+            "totalBytes": 1000,
+            "files": 1,
+            "licence": {
+              "name": "Apache-2.0",
+              "url": "https://github.com/vllm-project/vllm/blob/v0.30.0/LICENSE",
+              "source": null,
+              "notice": null,
+              "requiresAcceptance": false,
+              "proprietary": false
+            },
+            "cache": {
+              "state": "absent",
+              "bytes": 0,
+              "total": 1000
+            },
+            "installed": false,
+            "record": null,
+            "runnable": false,
+            "state": null,
+            "installing": false
+          }
+        },
+        {
+          "id": "tabbyapi",
+          "displayName": "TabbyAPI (ExLlamaV3)",
+          "weightFormat": "exl3",
+          "pinnedVersion": "f07131c",
+          "supported": true,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "maxSeqLen": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 131072,
+                "default": 4096,
+                "title": "Max sequence length",
+                "description": "Maximum context length per request, in tokens."
+              },
+              "cacheSize": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 512,
+                "maximum": 262144,
+                "default": null,
+                "title": "Cache size",
+                "description": "KV cache size in tokens, at least the max sequence length; empty uses the max sequence length."
+              },
+              "cacheMode": {
+                "type": "string",
+                "enum": [
+                  "FP16",
+                  "Q8",
+                  "Q6",
+                  "Q4"
+                ],
+                "default": "FP16",
+                "title": "Cache mode",
+                "description": "KV cache precision; Q4 takes a quarter of FP16."
+              },
+              "chunkSize": {
+                "type": "integer",
+                "minimum": 256,
+                "maximum": 8192,
+                "default": 2048,
+                "title": "Chunk size",
+                "description": "Prompt tokens processed per step; smaller needs less GPU memory."
+              }
+            }
+          },
+          "basicParams": [
+            "maxSeqLen",
+            "cacheMode"
+          ],
+          "moeParams": [],
+          "installed": false,
+          "version": "f07131c",
+          "reason": null,
+          "enabled": true
+        },
+        {
+          "id": "lmstudio",
+          "displayName": "LM Studio (internal use only)",
+          "weightFormat": "gguf",
+          "pinnedVersion": "0.0.25-1",
+          "supported": true,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "ctxSize": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 131072,
+                "default": 16384,
+                "title": "Context size",
+                "description": "Total context window in tokens, shared by all parallel slots."
+              },
+              "nGpuLayers": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 999,
+                "default": 99,
+                "title": "GPU layers",
+                "description": "Number of model layers offloaded to the GPU (99 or more means all)."
+              },
+              "nCpuMoe": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 256,
+                "default": 0,
+                "title": "CPU MoE layers",
+                "description": "Number of layers whose MoE expert weights stay in CPU RAM (0 keeps all on GPU)."
+              },
+              "flashAttn": {
+                "type": "string",
+                "enum": [
+                  "on",
+                  "off"
+                ],
+                "default": "on",
+                "title": "Flash attention",
+                "description": "Flash attention on or off."
+              },
+              "cacheTypeK": {
+                "type": "string",
+                "enum": [
+                  "f16",
+                  "q8_0",
+                  "q4_0"
+                ],
+                "default": "f16",
+                "title": "K cache type",
+                "description": "Quantization type of the KV cache keys."
+              },
+              "cacheTypeV": {
+                "type": "string",
+                "enum": [
+                  "f16",
+                  "q8_0",
+                  "q4_0"
+                ],
+                "default": "f16",
+                "title": "V cache type",
+                "description": "Quantization type of the KV cache values."
+              },
+              "threads": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 256,
+                "default": null,
+                "title": "CPU threads",
+                "description": "Number of CPU threads for generation; empty uses the physical CPU cores minus 2."
+              },
+              "parallel": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16,
+                "default": 1,
+                "title": "Parallel slots",
+                "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+              },
+              "batchSize": {
+                "type": "integer",
+                "minimum": 32,
+                "maximum": 8192,
+                "default": 2048,
+                "title": "Batch size",
+                "description": "Logical maximum batch size for prompt processing."
+              },
+              "ubatchSize": {
+                "type": "integer",
+                "minimum": 32,
+                "maximum": 4096,
+                "default": 512,
+                "title": "Micro-batch size",
+                "description": "Physical maximum batch size; must not exceed the batch size."
+              },
+              "noMmap": {
+                "type": "boolean",
+                "default": false,
+                "title": "Disable mmap",
+                "description": "Read the model into memory instead of memory-mapping the file."
+              }
+            }
+          },
+          "basicParams": [
+            "ctxSize",
+            "nCpuMoe"
+          ],
+          "moeParams": [
+            "nCpuMoe"
+          ],
+          "installed": false,
+          "version": "0.0.25-1",
+          "reason": null,
+          "enabled": false,
+          "disabledReason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm.",
+          "install": {
+            "version": "0.0.25-1",
+            "totalBytes": 2000,
+            "files": 1,
+            "licence": {
+              "name": "LM Studio Terms",
+              "url": "https://lmstudio.ai/app-terms",
+              "source": null,
+              "notice": null,
+              "requiresAcceptance": true,
+              "proprietary": true
+            },
+            "cache": {
+              "state": "absent",
+              "bytes": 0,
+              "total": 2000
+            },
+            "installed": false,
+            "record": null,
+            "runnable": false,
+            "state": null,
+            "installing": false
+          }
+        }
+      ],
+      "unsupportedModels": [],
+      "models": [
+        {
+          "id": "both-formats",
+          "displayName": "Both formats",
+          "architecture": "dense",
+          "contextLength": 32768,
+          "seed": true,
+          "sources": {
+            "gguf": {
+              "type": "huggingface",
+              "repo": "acme/models",
+              "file": "m.gguf",
+              "revision": "main",
+              "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "size": 419430400,
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "ollama": {
+              "type": "ollama",
+              "tag": "both:1b",
+              "manifestDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "size": 419430400
+            }
+          },
+          "validated": {},
+          "weights": {
+            "gguf": {
+              "label": "GGUF file",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "acquisition": {
+                "bytesNeeded": 419430400,
+                "files": [
+                  {
+                    "file": "m.gguf",
+                    "method": "download",
+                    "bytesNeeded": 419430400
+                  }
+                ]
+              },
+              "runners": [
+                "llama.cpp",
+                "ik_llama.cpp"
+              ]
+            },
+            "ollama": {
+              "label": "Ollama tag",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "acquisition": {
+                "bytesNeeded": 419430400,
+                "files": []
+              },
+              "runners": [
+                "ollama"
+              ]
+            }
+          },
+          "runners": {
+            "llama.cpp": {
+              "format": "gguf",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "auto",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "loadMode": "auto"
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "ok",
+                "reason": null,
+                "estimate": {
+                  "weightsBytes": 419430400,
+                  "gpuWeightsBytes": 419430400,
+                  "cpuWeightsBytes": 0,
+                  "kvBytes": 201326592,
+                  "computeBytes": 227457106,
+                  "gpuBytes": 1057929298,
+                  "ramBytes": 805306368,
+                  "basis": "file size heuristic (no memory profile for this model)",
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            },
+            "ik_llama.cpp": {
+              "format": "gguf",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "auto",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "loadMode": "auto"
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "ok",
+                "reason": null,
+                "estimate": {
+                  "weightsBytes": 419430400,
+                  "gpuWeightsBytes": 419430400,
+                  "cpuWeightsBytes": 0,
+                  "kvBytes": 201326592,
+                  "computeBytes": 227457106,
+                  "gpuBytes": 1057929298,
+                  "ramBytes": 805306368,
+                  "basis": "file size heuristic (no memory profile for this model)",
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            },
+            "ollama": {
+              "format": "ollama",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": {
+                "numCtx": 4096,
+                "numGpu": null,
+                "numThread": null,
+                "flashAttention": null,
+                "kvCacheType": "f16",
+                "keepAlive": "30m"
+              },
+              "context": {
+                "totalContext": 4096,
+                "perRequestContext": 4096,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "ok",
+                "reason": null,
+                "estimate": {
+                  "weightsBytes": 419430400,
+                  "gpuWeightsBytes": null,
+                  "kvBytes": 50331648,
+                  "gpuBytes": null,
+                  "totalBytes": 679477248,
+                  "basis": "download size",
+                  "ramBytes": 805306368,
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            },
+            "lmstudio": {
+              "format": "gguf",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "on",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "noMmap": false
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "incompatible",
+                "reason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm.",
+                "estimate": {
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            }
+          }
+        },
+        {
+          "id": "gguf-only",
+          "displayName": "GGUF only",
+          "architecture": "moe",
+          "contextLength": 131072,
+          "seed": true,
+          "sources": {
+            "gguf": {
+              "type": "huggingface",
+              "repo": "acme/models",
+              "file": "n.gguf",
+              "revision": "main",
+              "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "size": 9663676416,
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          },
+          "validated": {},
+          "weights": {
+            "gguf": {
+              "label": "GGUF file",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "acquisition": {
+                "bytesNeeded": 9663676416,
+                "files": [
+                  {
+                    "file": "n.gguf",
+                    "method": "download",
+                    "bytesNeeded": 9663676416
+                  }
+                ]
+              },
+              "runners": [
+                "llama.cpp",
+                "ik_llama.cpp"
+              ]
+            }
+          },
+          "runners": {
+            "llama.cpp": {
+              "format": "gguf",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "auto",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "loadMode": "auto"
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "incompatible",
+                "reason": "Needs about 10.4 GiB of GPU memory; the GPU has 6.0 GiB. Keep more expert layers in RAM (nCpuMoe) or reduce ctxSize.",
+                "estimate": {
+                  "weightsBytes": 9663676416,
+                  "gpuWeightsBytes": 9663676416,
+                  "cpuWeightsBytes": 0,
+                  "kvBytes": 1073741824,
+                  "computeBytes": 227457106,
+                  "gpuBytes": 11174590546,
+                  "ramBytes": 805306368,
+                  "basis": "file size heuristic (no memory profile for this model)",
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            },
+            "ik_llama.cpp": {
+              "format": "gguf",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "auto",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "loadMode": "auto"
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "incompatible",
+                "reason": "Needs about 10.4 GiB of GPU memory; the GPU has 6.0 GiB. Keep more expert layers in RAM (nCpuMoe) or reduce ctxSize.",
+                "estimate": {
+                  "weightsBytes": 9663676416,
+                  "gpuWeightsBytes": 9663676416,
+                  "cpuWeightsBytes": 0,
+                  "kvBytes": 1073741824,
+                  "computeBytes": 227457106,
+                  "gpuBytes": 11174590546,
+                  "ramBytes": 805306368,
+                  "basis": "file size heuristic (no memory profile for this model)",
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            },
+            "lmstudio": {
+              "format": "gguf",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "on",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "noMmap": false
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "incompatible",
+                "reason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm.",
+                "estimate": {
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            }
+          }
+        },
+        {
+          "id": "tag-only",
+          "displayName": "Tag only",
+          "architecture": "dense",
+          "seed": true,
+          "sources": {
+            "ollama": {
+              "type": "ollama",
+              "tag": "tag:1b"
+            }
+          },
+          "validated": {},
+          "weights": {
+            "ollama": {
+              "label": "Ollama tag",
+              "size": null,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": null
+              },
+              "acquisition": {
+                "bytesNeeded": 0,
+                "files": []
+              },
+              "runners": [
+                "ollama"
+              ]
+            }
+          },
+          "runners": {
+            "ollama": {
+              "format": "ollama",
+              "size": null,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": null
+              },
+              "params": {
+                "numCtx": 4096,
+                "numGpu": null,
+                "numThread": null,
+                "flashAttention": null,
+                "kvCacheType": "f16",
+                "keepAlive": "30m"
+              },
+              "context": {
+                "totalContext": 4096,
+                "perRequestContext": 4096,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "ok",
+                "reason": null,
+                "estimate": {
+                  "weightsBytes": 0,
+                  "gpuWeightsBytes": null,
+                  "kvBytes": 268435456,
+                  "gpuBytes": null,
+                  "totalBytes": 478150656,
+                  "basis": "unknown size until the tag is pulled",
+                  "ramBytes": 805306368,
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            }
+          }
+        }
+      ],
+      "deployment": null,
+      "gatewayModel": "soul_gateway/local-llms/local-llm/default"
+    },
+    "unified, arm64 image": {
+      "profile": "unified",
+      "profileDecision": {
+        "profile": "unified",
+        "cause": "gpu",
+        "reason": null,
+        "gpuName": "NVIDIA GB10"
+      },
+      "limits": {
+        "floorBytes": 8589934592,
+        "hostReserveBytes": 17179869184
+      },
+      "hardware": {
+        "gpu": {
+          "available": true,
+          "name": "NVIDIA GB10",
+          "driverVersion": "580.159.03",
+          "memoryModel": "unified",
+          "totalBytes": null,
+          "usedBytes": null,
+          "freeBytes": null,
+          "processes": [],
+          "device": {
+            "pciDeviceId": "0x2E1210DE",
+            "computeCapability": "12.1",
+            "addressingMode": "ATS"
+          }
+        },
+        "memory": {
+          "totalBytes": 128453013504,
+          "availableBytes": 115964116992
+        },
+        "disk": {
+          "freeBytes": 322122547200,
+          "totalBytes": 536870912000
+        },
+        "cpus": 20
+      },
+      "runners": [
+        {
+          "id": "llama.cpp",
+          "displayName": "llama.cpp",
+          "weightFormat": "gguf",
+          "pinnedVersion": "b11159",
+          "supported": true,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "ctxSize": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 262144,
+                "default": 32768,
+                "title": "Context size",
+                "description": "Total context window in tokens, shared by all parallel slots (at most the model's training context)."
+              },
+              "parallel": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16,
+                "default": 1,
+                "title": "Parallel slots",
+                "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+              },
+              "loadMode": {
+                "type": "string",
+                "enum": [
+                  "dio",
+                  "none"
+                ],
+                "default": "dio",
+                "title": "Load mode",
+                "description": "dio reads the weights with direct I/O, so loading does not fill the page cache; none reads them through it."
+              },
+              "mtp": {
+                "type": "boolean",
+                "default": false,
+                "title": "MTP speculative decoding",
+                "description": "Draft with the model's own multi-token-prediction head (--spec-type draft-mtp --spec-draft-n-max 3); only for models that have one. On by default where the catalog recommends it (Qwen3.6 MTP)."
+              },
+              "threads": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 256,
+                "default": null,
+                "title": "CPU threads",
+                "description": "Number of CPU threads; empty uses the high-performance cores (physical cores minus 2 where all cores are alike)."
+              },
+              "chatTemplateKwargs": {
+                "type": "object",
+                "additionalProperties": false,
+                "title": "Chat template arguments",
+                "description": "Extra arguments passed to the Jinja chat template.",
+                "properties": {
+                  "reasoning_effort": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high"
+                    ],
+                    "title": "Reasoning effort",
+                    "description": "Reasoning effort hint for models whose template supports it."
+                  },
+                  "preserve_thinking": {
+                    "type": "boolean",
+                    "title": "Preserve thinking",
+                    "description": "Keep earlier reasoning in the prompt, for templates that support it (Qwen3.6 with MTP)."
+                  }
+                }
+              }
+            }
+          },
+          "basicParams": [
+            "ctxSize",
+            "nCpuMoe"
+          ],
+          "moeParams": [
+            "nCpuMoe"
+          ],
+          "installed": true,
+          "version": "b11159",
+          "reason": null,
+          "enabled": true
+        },
+        {
+          "id": "ik_llama.cpp",
+          "displayName": "ik_llama.cpp",
+          "weightFormat": "gguf",
+          "pinnedVersion": "20f7a72",
+          "supported": false,
+          "paramSchema": null,
+          "basicParams": [
+            "ctxSize",
+            "nCpuMoe"
+          ],
+          "moeParams": [
+            "nCpuMoe"
+          ],
+          "unsupportedReason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+          "installed": false,
+          "version": null,
+          "reason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+          "enabled": true
+        },
+        {
+          "id": "ollama",
+          "displayName": "Ollama",
+          "weightFormat": "ollama",
+          "pinnedVersion": "0.34.4",
+          "supported": false,
+          "paramSchema": null,
+          "basicParams": [
+            "numCtx"
+          ],
+          "moeParams": [],
+          "unsupportedReason": "Ollama is not available on this platform: this image does not include it.",
+          "installed": false,
+          "version": null,
+          "reason": "Ollama is not available on this platform: this image does not include it.",
+          "enabled": true
+        },
+        {
+          "id": "vllm",
+          "displayName": "vLLM",
+          "weightFormat": "hf",
+          "pinnedVersion": "0.30.0",
+          "supported": true,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "maxModelLen": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 131072,
+                "default": 4096,
+                "title": "Max model length",
+                "description": "Maximum context length per request, in tokens; the KV cache is sized for it."
+              },
+              "gpuMemoryUtilization": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0.1,
+                "maximum": 0.95,
+                "default": null,
+                "title": "GPU memory utilization",
+                "description": "Share of the shared memory pool vLLM may use for weights and KV cache; empty takes what is free now, keeping the host reserve and the floor (at most 0.9)."
+              },
+              "dtype": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "float16",
+                  "bfloat16"
+                ],
+                "default": "auto",
+                "title": "Data type",
+                "description": "Data type for model weights and activations."
+              },
+              "quantization": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[a-z0-9_]{1,32}$",
+                "maxLength": 32,
+                "default": null,
+                "title": "Quantization",
+                "description": "Quantization method name (e.g. awq_marlin, gptq); empty lets vLLM detect it."
+              },
+              "kvCacheDtype": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "fp8"
+                ],
+                "default": "auto",
+                "title": "KV cache type",
+                "description": "Data type of the KV cache."
+              },
+              "enforceEager": {
+                "type": "boolean",
+                "default": true,
+                "title": "Enforce eager mode",
+                "description": "Skip CUDA graph capture and compilation: a faster start, slightly slower generation."
+              },
+              "maxNumSeqs": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 256,
+                "default": 1,
+                "title": "Max sequences",
+                "description": "Maximum number of requests processed concurrently."
+              }
+            }
+          },
+          "basicParams": [
+            "maxModelLen",
+            "cpuOffloadGb"
+          ],
+          "moeParams": [],
+          "installed": false,
+          "version": "0.30.0",
+          "reason": null,
+          "enabled": false,
+          "disabledReason": "vLLM is experimental on unified memory and is not enabled on this deployment. The operator can turn it on with ploinky var LOCAL_LLM_VLLM_UNIFIED experimental; it has not been measured on this hardware.",
+          "install": {
+            "version": "0.30.0",
+            "totalBytes": 1000,
+            "files": 1,
+            "licence": {
+              "name": "Apache-2.0",
+              "url": "https://github.com/vllm-project/vllm/blob/v0.30.0/LICENSE",
+              "source": null,
+              "notice": null,
+              "requiresAcceptance": false,
+              "proprietary": false
+            },
+            "cache": {
+              "state": "absent",
+              "bytes": 0,
+              "total": 1000
+            },
+            "installed": false,
+            "record": null,
+            "runnable": false,
+            "state": null,
+            "installing": false
+          }
+        },
+        {
+          "id": "tabbyapi",
+          "displayName": "TabbyAPI (ExLlamaV3)",
+          "weightFormat": "exl3",
+          "pinnedVersion": "f07131c",
+          "supported": false,
+          "paramSchema": null,
+          "basicParams": [
+            "maxSeqLen",
+            "cacheMode"
+          ],
+          "moeParams": [],
+          "unsupportedReason": "TabbyAPI (ExLlamaV3) is not available on this platform: this image does not include it.",
+          "installed": false,
+          "version": null,
+          "reason": "TabbyAPI (ExLlamaV3) is not available on this platform: this image does not include it.",
+          "enabled": true
+        },
+        {
+          "id": "lmstudio",
+          "displayName": "LM Studio (internal use only)",
+          "weightFormat": "gguf",
+          "pinnedVersion": "0.0.25-1",
+          "supported": true,
+          "paramSchema": null,
+          "basicParams": [
+            "ctxSize",
+            "nCpuMoe"
+          ],
+          "moeParams": [
+            "nCpuMoe"
+          ],
+          "installed": false,
+          "version": "0.0.25-1",
+          "reason": null,
+          "enabled": false,
+          "disabledReason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm.",
+          "install": {
+            "version": "0.0.25-1",
+            "totalBytes": 2000,
+            "files": 1,
+            "licence": {
+              "name": "LM Studio Terms",
+              "url": "https://lmstudio.ai/app-terms",
+              "source": null,
+              "notice": null,
+              "requiresAcceptance": true,
+              "proprietary": true
+            },
+            "cache": {
+              "state": "absent",
+              "bytes": 0,
+              "total": 2000
+            },
+            "installed": false,
+            "record": null,
+            "runnable": false,
+            "state": null,
+            "installing": false
+          }
+        }
+      ],
+      "unsupportedModels": [],
+      "models": [
+        {
+          "id": "both-formats",
+          "displayName": "Both formats",
+          "architecture": "dense",
+          "contextLength": 32768,
+          "seed": true,
+          "sources": {
+            "gguf": {
+              "type": "huggingface",
+              "repo": "acme/models",
+              "file": "m.gguf",
+              "revision": "main",
+              "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "size": 419430400,
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "ollama": {
+              "type": "ollama",
+              "tag": "both:1b",
+              "manifestDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "size": 419430400
+            }
+          },
+          "validated": {},
+          "weights": {
+            "gguf": {
+              "label": "GGUF file",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "acquisition": {
+                "bytesNeeded": 419430400,
+                "files": [
+                  {
+                    "file": "m.gguf",
+                    "method": "download",
+                    "bytesNeeded": 419430400
+                  }
+                ]
+              },
+              "runners": [
+                "llama.cpp"
+              ]
+            },
+            "ollama": {
+              "label": "Ollama tag",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "acquisition": {
+                "bytesNeeded": 419430400,
+                "files": []
+              },
+              "runners": []
+            }
+          },
+          "runners": {
+            "llama.cpp": {
+              "format": "gguf",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": {
+                "ctxSize": 32768,
+                "parallel": 1,
+                "loadMode": "dio",
+                "mtp": false,
+                "threads": null
+              },
+              "context": {
+                "totalContext": 32768,
+                "perRequestContext": 32768,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "ok",
+                "reason": null,
+                "estimate": {
+                  "weightsBytes": 419430400,
+                  "kvBytes": 402653184,
+                  "computeBytes": 485155144,
+                  "mtpBytes": 0,
+                  "runtimeBytes": 1610612736,
+                  "cacheRamBytes": 8589934592,
+                  "unifiedBytes": 11507786056,
+                  "poolBytes": 128453013504,
+                  "floorBytes": 8589934592,
+                  "hostReserveBytes": 17179869184,
+                  "envelope": null,
+                  "measured": false,
+                  "defaulted": [],
+                  "userSizing": [],
+                  "basis": "estimate, not measured on this machine: pinned weight size, f16 KV cache for ctxSize at 12288 bytes per token (from the catalog entry), compute buffers, runtime and the prompt cache bound",
+                  "isEstimate": true
+                },
+                "warnings": [
+                  "Not measured on unified memory: about 10.7 GiB is an estimate. The memory guard stops the runner at once if available memory falls below 8.0 GiB."
+                ]
+              }
+            },
+            "ik_llama.cpp": {
+              "format": "gguf",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": null,
+              "context": null,
+              "admission": {
+                "status": "incompatible",
+                "reason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+                "estimate": {
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            },
+            "ollama": {
+              "format": "ollama",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": null,
+              "context": null,
+              "admission": {
+                "status": "incompatible",
+                "reason": "Ollama is not available on this platform: this image does not include it.",
+                "estimate": {
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            },
+            "lmstudio": {
+              "format": "gguf",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "on",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "noMmap": false
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "incompatible",
+                "reason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm.",
+                "estimate": {
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            }
+          }
+        },
+        {
+          "id": "gguf-only",
+          "displayName": "GGUF only",
+          "architecture": "moe",
+          "contextLength": 131072,
+          "seed": true,
+          "sources": {
+            "gguf": {
+              "type": "huggingface",
+              "repo": "acme/models",
+              "file": "n.gguf",
+              "revision": "main",
+              "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "size": 9663676416,
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          },
+          "validated": {},
+          "weights": {
+            "gguf": {
+              "label": "GGUF file",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "acquisition": {
+                "bytesNeeded": 9663676416,
+                "files": [
+                  {
+                    "file": "n.gguf",
+                    "method": "download",
+                    "bytesNeeded": 9663676416
+                  }
+                ]
+              },
+              "runners": [
+                "llama.cpp"
+              ]
+            }
+          },
+          "runners": {
+            "llama.cpp": {
+              "format": "gguf",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "params": {
+                "ctxSize": 32768,
+                "parallel": 1,
+                "loadMode": "dio",
+                "mtp": false,
+                "threads": null
+              },
+              "context": {
+                "totalContext": 32768,
+                "perRequestContext": 32768,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "ok",
+                "reason": null,
+                "estimate": {
+                  "weightsBytes": 9663676416,
+                  "kvBytes": 2147483648,
+                  "computeBytes": 485155144,
+                  "mtpBytes": 0,
+                  "runtimeBytes": 1610612736,
+                  "cacheRamBytes": 8589934592,
+                  "unifiedBytes": 22496862536,
+                  "poolBytes": 128453013504,
+                  "floorBytes": 8589934592,
+                  "hostReserveBytes": 17179869184,
+                  "envelope": null,
+                  "measured": false,
+                  "defaulted": [
+                    "memory.kvBytesPerToken"
+                  ],
+                  "userSizing": [],
+                  "basis": "estimate, not measured on this machine: pinned weight size, f16 KV cache for ctxSize at 65536 bytes per token (a default: the entry has no memory.kvBytesPerToken), compute buffers, runtime and the prompt cache bound; defaults used for memory.kvBytesPerToken",
+                  "isEstimate": true
+                },
+                "warnings": [
+                  "Not measured on unified memory: about 21.0 GiB is an estimate. The memory guard stops the runner at once if available memory falls below 8.0 GiB.",
+                  "Estimated without memory.kvBytesPerToken (the 64 KiB per token default can understate the KV cache several times for large dense models); add them to the model entry (Settings, or the local_llm_model_update tool) for a closer estimate."
+                ]
+              }
+            },
+            "ik_llama.cpp": {
+              "format": "gguf",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "params": null,
+              "context": null,
+              "admission": {
+                "status": "incompatible",
+                "reason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+                "estimate": {
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            },
+            "lmstudio": {
+              "format": "gguf",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "on",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "noMmap": false
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "incompatible",
+                "reason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm.",
+                "estimate": {
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            }
+          }
+        },
+        {
+          "id": "tag-only",
+          "displayName": "Tag only",
+          "architecture": "dense",
+          "seed": true,
+          "sources": {
+            "ollama": {
+              "type": "ollama",
+              "tag": "tag:1b"
+            }
+          },
+          "validated": {},
+          "weights": {
+            "ollama": {
+              "label": "Ollama tag",
+              "size": null,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": null
+              },
+              "acquisition": {
+                "bytesNeeded": 0,
+                "files": []
+              },
+              "runners": []
+            }
+          },
+          "runners": {
+            "ollama": {
+              "format": "ollama",
+              "size": null,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": null
+              },
+              "params": null,
+              "context": null,
+              "admission": {
+                "status": "incompatible",
+                "reason": "Ollama is not available on this platform: this image does not include it.",
+                "estimate": {
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            }
+          }
+        }
+      ],
+      "deployment": null,
+      "gatewayModel": "soul_gateway/local-llms/local-llm/default"
+    },
+    "unified, no image contract": {
+      "profile": "unified",
+      "profileDecision": {
+        "profile": "unified",
+        "cause": "gpu",
+        "reason": null,
+        "gpuName": "NVIDIA GB10"
+      },
+      "limits": {
+        "floorBytes": 8589934592,
+        "hostReserveBytes": 17179869184
+      },
+      "hardware": {
+        "gpu": {
+          "available": true,
+          "name": "NVIDIA GB10",
+          "driverVersion": "580.159.03",
+          "memoryModel": "unified",
+          "totalBytes": null,
+          "usedBytes": null,
+          "freeBytes": null,
+          "processes": [],
+          "device": {
+            "pciDeviceId": "0x2E1210DE",
+            "computeCapability": "12.1",
+            "addressingMode": "ATS"
+          }
+        },
+        "memory": {
+          "totalBytes": 128453013504,
+          "availableBytes": 115964116992
+        },
+        "disk": {
+          "freeBytes": 322122547200,
+          "totalBytes": 536870912000
+        },
+        "cpus": 20
+      },
+      "runners": [
+        {
+          "id": "llama.cpp",
+          "displayName": "llama.cpp",
+          "weightFormat": "gguf",
+          "pinnedVersion": "b11159",
+          "supported": true,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "ctxSize": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 262144,
+                "default": 32768,
+                "title": "Context size",
+                "description": "Total context window in tokens, shared by all parallel slots (at most the model's training context)."
+              },
+              "parallel": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16,
+                "default": 1,
+                "title": "Parallel slots",
+                "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+              },
+              "loadMode": {
+                "type": "string",
+                "enum": [
+                  "dio",
+                  "none"
+                ],
+                "default": "dio",
+                "title": "Load mode",
+                "description": "dio reads the weights with direct I/O, so loading does not fill the page cache; none reads them through it."
+              },
+              "mtp": {
+                "type": "boolean",
+                "default": false,
+                "title": "MTP speculative decoding",
+                "description": "Draft with the model's own multi-token-prediction head (--spec-type draft-mtp --spec-draft-n-max 3); only for models that have one. On by default where the catalog recommends it (Qwen3.6 MTP)."
+              },
+              "threads": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 256,
+                "default": null,
+                "title": "CPU threads",
+                "description": "Number of CPU threads; empty uses the high-performance cores (physical cores minus 2 where all cores are alike)."
+              },
+              "chatTemplateKwargs": {
+                "type": "object",
+                "additionalProperties": false,
+                "title": "Chat template arguments",
+                "description": "Extra arguments passed to the Jinja chat template.",
+                "properties": {
+                  "reasoning_effort": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high"
+                    ],
+                    "title": "Reasoning effort",
+                    "description": "Reasoning effort hint for models whose template supports it."
+                  },
+                  "preserve_thinking": {
+                    "type": "boolean",
+                    "title": "Preserve thinking",
+                    "description": "Keep earlier reasoning in the prompt, for templates that support it (Qwen3.6 with MTP)."
+                  }
+                }
+              }
+            }
+          },
+          "basicParams": [
+            "ctxSize",
+            "nCpuMoe"
+          ],
+          "moeParams": [
+            "nCpuMoe"
+          ],
+          "installed": true,
+          "version": "b11159",
+          "reason": null,
+          "enabled": true
+        },
+        {
+          "id": "ik_llama.cpp",
+          "displayName": "ik_llama.cpp",
+          "weightFormat": "gguf",
+          "pinnedVersion": "20f7a72",
+          "supported": true,
+          "paramSchema": null,
+          "basicParams": [
+            "ctxSize",
+            "nCpuMoe"
+          ],
+          "moeParams": [
+            "nCpuMoe"
+          ],
+          "installed": true,
+          "version": "20f7a72",
+          "reason": null,
+          "enabled": true
+        },
+        {
+          "id": "ollama",
+          "displayName": "Ollama",
+          "weightFormat": "ollama",
+          "pinnedVersion": "0.34.4",
+          "supported": true,
+          "paramSchema": null,
+          "basicParams": [
+            "numCtx"
+          ],
+          "moeParams": [],
+          "installed": true,
+          "version": "0.34.4",
+          "reason": null,
+          "enabled": true
+        },
+        {
+          "id": "vllm",
+          "displayName": "vLLM",
+          "weightFormat": "hf",
+          "pinnedVersion": "0.30.0",
+          "supported": true,
+          "paramSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "maxModelLen": {
+                "type": "integer",
+                "minimum": 512,
+                "maximum": 131072,
+                "default": 4096,
+                "title": "Max model length",
+                "description": "Maximum context length per request, in tokens; the KV cache is sized for it."
+              },
+              "gpuMemoryUtilization": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0.1,
+                "maximum": 0.95,
+                "default": null,
+                "title": "GPU memory utilization",
+                "description": "Share of the shared memory pool vLLM may use for weights and KV cache; empty takes what is free now, keeping the host reserve and the floor (at most 0.9)."
+              },
+              "dtype": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "float16",
+                  "bfloat16"
+                ],
+                "default": "auto",
+                "title": "Data type",
+                "description": "Data type for model weights and activations."
+              },
+              "quantization": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[a-z0-9_]{1,32}$",
+                "maxLength": 32,
+                "default": null,
+                "title": "Quantization",
+                "description": "Quantization method name (e.g. awq_marlin, gptq); empty lets vLLM detect it."
+              },
+              "kvCacheDtype": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "fp8"
+                ],
+                "default": "auto",
+                "title": "KV cache type",
+                "description": "Data type of the KV cache."
+              },
+              "enforceEager": {
+                "type": "boolean",
+                "default": true,
+                "title": "Enforce eager mode",
+                "description": "Skip CUDA graph capture and compilation: a faster start, slightly slower generation."
+              },
+              "maxNumSeqs": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 256,
+                "default": 1,
+                "title": "Max sequences",
+                "description": "Maximum number of requests processed concurrently."
+              }
+            }
+          },
+          "basicParams": [
+            "maxModelLen",
+            "cpuOffloadGb"
+          ],
+          "moeParams": [],
+          "installed": false,
+          "version": "0.30.0",
+          "reason": null,
+          "enabled": false,
+          "disabledReason": "vLLM is experimental on unified memory and is not enabled on this deployment. The operator can turn it on with ploinky var LOCAL_LLM_VLLM_UNIFIED experimental; it has not been measured on this hardware.",
+          "install": {
+            "version": "0.30.0",
+            "totalBytes": 1000,
+            "files": 1,
+            "licence": {
+              "name": "Apache-2.0",
+              "url": "https://github.com/vllm-project/vllm/blob/v0.30.0/LICENSE",
+              "source": null,
+              "notice": null,
+              "requiresAcceptance": false,
+              "proprietary": false
+            },
+            "cache": {
+              "state": "absent",
+              "bytes": 0,
+              "total": 1000
+            },
+            "installed": false,
+            "record": null,
+            "runnable": false,
+            "state": null,
+            "installing": false
+          }
+        },
+        {
+          "id": "tabbyapi",
+          "displayName": "TabbyAPI (ExLlamaV3)",
+          "weightFormat": "exl3",
+          "pinnedVersion": "f07131c",
+          "supported": true,
+          "paramSchema": null,
+          "basicParams": [
+            "maxSeqLen",
+            "cacheMode"
+          ],
+          "moeParams": [],
+          "installed": false,
+          "version": "f07131c",
+          "reason": null,
+          "enabled": true
+        },
+        {
+          "id": "lmstudio",
+          "displayName": "LM Studio (internal use only)",
+          "weightFormat": "gguf",
+          "pinnedVersion": "0.0.25-1",
+          "supported": true,
+          "paramSchema": null,
+          "basicParams": [
+            "ctxSize",
+            "nCpuMoe"
+          ],
+          "moeParams": [
+            "nCpuMoe"
+          ],
+          "installed": false,
+          "version": "0.0.25-1",
+          "reason": null,
+          "enabled": false,
+          "disabledReason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm.",
+          "install": {
+            "version": "0.0.25-1",
+            "totalBytes": 2000,
+            "files": 1,
+            "licence": {
+              "name": "LM Studio Terms",
+              "url": "https://lmstudio.ai/app-terms",
+              "source": null,
+              "notice": null,
+              "requiresAcceptance": true,
+              "proprietary": true
+            },
+            "cache": {
+              "state": "absent",
+              "bytes": 0,
+              "total": 2000
+            },
+            "installed": false,
+            "record": null,
+            "runnable": false,
+            "state": null,
+            "installing": false
+          }
+        }
+      ],
+      "unsupportedModels": [],
+      "models": [
+        {
+          "id": "both-formats",
+          "displayName": "Both formats",
+          "architecture": "dense",
+          "contextLength": 32768,
+          "seed": true,
+          "sources": {
+            "gguf": {
+              "type": "huggingface",
+              "repo": "acme/models",
+              "file": "m.gguf",
+              "revision": "main",
+              "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "size": 419430400,
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "ollama": {
+              "type": "ollama",
+              "tag": "both:1b",
+              "manifestDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "size": 419430400
+            }
+          },
+          "validated": {},
+          "weights": {
+            "gguf": {
+              "label": "GGUF file",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "acquisition": {
+                "bytesNeeded": 419430400,
+                "files": [
+                  {
+                    "file": "m.gguf",
+                    "method": "download",
+                    "bytesNeeded": 419430400
+                  }
+                ]
+              },
+              "runners": [
+                "llama.cpp",
+                "ik_llama.cpp"
+              ]
+            },
+            "ollama": {
+              "label": "Ollama tag",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "acquisition": {
+                "bytesNeeded": 419430400,
+                "files": []
+              },
+              "runners": [
+                "ollama"
+              ]
+            }
+          },
+          "runners": {
+            "llama.cpp": {
+              "format": "gguf",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": {
+                "ctxSize": 32768,
+                "parallel": 1,
+                "loadMode": "dio",
+                "mtp": false,
+                "threads": null
+              },
+              "context": {
+                "totalContext": 32768,
+                "perRequestContext": 32768,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "ok",
+                "reason": null,
+                "estimate": {
+                  "weightsBytes": 419430400,
+                  "kvBytes": 402653184,
+                  "computeBytes": 485155144,
+                  "mtpBytes": 0,
+                  "runtimeBytes": 1610612736,
+                  "cacheRamBytes": 8589934592,
+                  "unifiedBytes": 11507786056,
+                  "poolBytes": 128453013504,
+                  "floorBytes": 8589934592,
+                  "hostReserveBytes": 17179869184,
+                  "envelope": null,
+                  "measured": false,
+                  "defaulted": [],
+                  "userSizing": [],
+                  "basis": "estimate, not measured on this machine: pinned weight size, f16 KV cache for ctxSize at 12288 bytes per token (from the catalog entry), compute buffers, runtime and the prompt cache bound",
+                  "isEstimate": true
+                },
+                "warnings": [
+                  "Not measured on unified memory: about 10.7 GiB is an estimate. The memory guard stops the runner at once if available memory falls below 8.0 GiB."
+                ]
+              }
+            },
+            "ik_llama.cpp": {
+              "format": "gguf",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": null,
+              "context": null,
+              "admission": {
+                "status": "incompatible",
+                "reason": "Invalid parameter (runner): ik_llama.cpp has no parameters for the unified profile",
+                "estimate": {},
+                "warnings": []
+              }
+            },
+            "ollama": {
+              "format": "ollama",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": {
+                "numCtx": 4096,
+                "numGpu": null,
+                "numThread": null,
+                "flashAttention": null,
+                "kvCacheType": "f16",
+                "keepAlive": "30m"
+              },
+              "context": {
+                "totalContext": 4096,
+                "perRequestContext": 4096,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "incompatible",
+                "reason": "Ollama is not available on a GPU that shares system memory (NVIDIA GB10) in this release.",
+                "estimate": {
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            },
+            "lmstudio": {
+              "format": "gguf",
+              "size": 419430400,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 419430400
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "on",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "noMmap": false
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "incompatible",
+                "reason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm.",
+                "estimate": {
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            }
+          }
+        },
+        {
+          "id": "gguf-only",
+          "displayName": "GGUF only",
+          "architecture": "moe",
+          "contextLength": 131072,
+          "seed": true,
+          "sources": {
+            "gguf": {
+              "type": "huggingface",
+              "repo": "acme/models",
+              "file": "n.gguf",
+              "revision": "main",
+              "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "size": 9663676416,
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          },
+          "validated": {},
+          "weights": {
+            "gguf": {
+              "label": "GGUF file",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "acquisition": {
+                "bytesNeeded": 9663676416,
+                "files": [
+                  {
+                    "file": "n.gguf",
+                    "method": "download",
+                    "bytesNeeded": 9663676416
+                  }
+                ]
+              },
+              "runners": [
+                "llama.cpp",
+                "ik_llama.cpp"
+              ]
+            }
+          },
+          "runners": {
+            "llama.cpp": {
+              "format": "gguf",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "params": {
+                "ctxSize": 32768,
+                "parallel": 1,
+                "loadMode": "dio",
+                "mtp": false,
+                "threads": null
+              },
+              "context": {
+                "totalContext": 32768,
+                "perRequestContext": 32768,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "ok",
+                "reason": null,
+                "estimate": {
+                  "weightsBytes": 9663676416,
+                  "kvBytes": 2147483648,
+                  "computeBytes": 485155144,
+                  "mtpBytes": 0,
+                  "runtimeBytes": 1610612736,
+                  "cacheRamBytes": 8589934592,
+                  "unifiedBytes": 22496862536,
+                  "poolBytes": 128453013504,
+                  "floorBytes": 8589934592,
+                  "hostReserveBytes": 17179869184,
+                  "envelope": null,
+                  "measured": false,
+                  "defaulted": [
+                    "memory.kvBytesPerToken"
+                  ],
+                  "userSizing": [],
+                  "basis": "estimate, not measured on this machine: pinned weight size, f16 KV cache for ctxSize at 65536 bytes per token (a default: the entry has no memory.kvBytesPerToken), compute buffers, runtime and the prompt cache bound; defaults used for memory.kvBytesPerToken",
+                  "isEstimate": true
+                },
+                "warnings": [
+                  "Not measured on unified memory: about 21.0 GiB is an estimate. The memory guard stops the runner at once if available memory falls below 8.0 GiB.",
+                  "Estimated without memory.kvBytesPerToken (the 64 KiB per token default can understate the KV cache several times for large dense models); add them to the model entry (Settings, or the local_llm_model_update tool) for a closer estimate."
+                ]
+              }
+            },
+            "ik_llama.cpp": {
+              "format": "gguf",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "params": null,
+              "context": null,
+              "admission": {
+                "status": "incompatible",
+                "reason": "Invalid parameter (runner): ik_llama.cpp has no parameters for the unified profile",
+                "estimate": {},
+                "warnings": []
+              }
+            },
+            "lmstudio": {
+              "format": "gguf",
+              "size": 9663676416,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 9663676416
+              },
+              "params": {
+                "ctxSize": 16384,
+                "nGpuLayers": 99,
+                "nCpuMoe": 0,
+                "flashAttn": "on",
+                "cacheTypeK": "f16",
+                "cacheTypeV": "f16",
+                "threads": null,
+                "parallel": 1,
+                "batchSize": 2048,
+                "ubatchSize": 512,
+                "noMmap": false
+              },
+              "context": {
+                "totalContext": 16384,
+                "perRequestContext": 16384,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "incompatible",
+                "reason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm.",
+                "estimate": {
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            }
+          }
+        },
+        {
+          "id": "tag-only",
+          "displayName": "Tag only",
+          "architecture": "dense",
+          "seed": true,
+          "sources": {
+            "ollama": {
+              "type": "ollama",
+              "tag": "tag:1b"
+            }
+          },
+          "validated": {},
+          "weights": {
+            "ollama": {
+              "label": "Ollama tag",
+              "size": null,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": null
+              },
+              "acquisition": {
+                "bytesNeeded": 0,
+                "files": []
+              },
+              "runners": [
+                "ollama"
+              ]
+            }
+          },
+          "runners": {
+            "ollama": {
+              "format": "ollama",
+              "size": null,
+              "download": {
+                "state": "absent",
+                "bytes": 0,
+                "total": null
+              },
+              "params": {
+                "numCtx": 4096,
+                "numGpu": null,
+                "numThread": null,
+                "flashAttention": null,
+                "kvCacheType": "f16",
+                "keepAlive": "30m"
+              },
+              "context": {
+                "totalContext": 4096,
+                "perRequestContext": 4096,
+                "parallel": 1,
+                "kvUnified": false
+              },
+              "admission": {
+                "status": "incompatible",
+                "reason": "Ollama is not available on a GPU that shares system memory (NVIDIA GB10) in this release.",
+                "estimate": {
+                  "isEstimate": true
+                },
+                "warnings": []
+              }
+            }
+          }
+        }
+      ],
+      "deployment": null,
+      "gatewayModel": "soul_gateway/local-llms/local-llm/default"
+    }
+  },
+  "ollamaRuns": {
+    "dedicated, amd64 image with Ollama in it": {
+      "added": {
+        "ollama": {
+          "type": "ollama",
+          "tag": "gpt-oss:20b"
+        }
+      },
+      "stored": [
+        {
+          "ollama": {
+            "type": "ollama",
+            "tag": "gpt-oss:20b"
+          }
+        }
+      ],
+      "accepted": true,
+      "phase": "ready",
+      "error": null,
+      "profile": "dedicated",
+      "params": {
+        "numCtx": 4096,
+        "numGpu": null,
+        "numThread": null,
+        "flashAttention": null,
+        "kvCacheType": "f16",
+        "keepAlive": "30m"
+      },
+      "admission": {
+        "status": "ok",
+        "reason": null
+      },
+      "artifact": {
+        "type": "ollama",
+        "tag": "gpt-oss:20b"
+      },
+      "resolved": {
+        "manifestDigest": "sha256:056d21726a745c4473c6f19027776ec800316970cbacb82373d0f5a3d6b9b6a0",
+        "blobs": [
+          "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ]
+      },
+      "runner": {
+        "ollama": {
+          "sizeBytes": 16,
+          "sizeVramBytes": 8,
+          "contextLength": 4096
+        },
+        "port": 18434
+      },
+      "process": {
+        "command": "/opt/ollama/bin/ollama",
+        "args": [
+          "serve"
+        ],
+        "env": {
+          "PATH": "/usr/bin",
+          "HOME": "<data>/home",
+          "LANG": "C.UTF-8",
+          "CUDA_CACHE_PATH": "/opt/runners/.cuda-cache",
+          "OLLAMA_MODELS": "<data>/models/ollama",
+          "OLLAMA_HOST": "127.0.0.1:18434",
+          "OLLAMA_NUM_PARALLEL": "1",
+          "OLLAMA_MAX_LOADED_MODELS": "1",
+          "OLLAMA_KV_CACHE_TYPE": "f16",
+          "OLLAMA_CONTEXT_LENGTH": "4096",
+          "OLLAMA_KEEP_ALIVE": "30m",
+          "OLLAMA_NO_CLOUD": "1",
+          "LD_LIBRARY_PATH": "/usr/local/nvidia/lib64"
+        }
+      },
+      "calls": [
+        [
+          "http://127.0.0.1:18434/api/version",
+          "GET",
+          null
+        ],
+        [
+          "http://127.0.0.1:18434/api/pull",
+          "POST",
+          {
+            "model": "gpt-oss:20b",
+            "stream": true
+          }
+        ],
+        [
+          "http://127.0.0.1:18434/api/generate",
+          "POST",
+          {
+            "model": "gpt-oss:20b",
+            "prompt": "",
+            "stream": false,
+            "options": {
+              "num_ctx": 4096
+            },
+            "keep_alive": "30m"
+          }
+        ],
+        [
+          "http://127.0.0.1:18434/api/ps",
+          "GET",
+          null
+        ]
+      ],
+      "chatTarget": {
+        "runnerId": "ollama",
+        "modelId": "olla-user",
+        "baseUrl": "http://127.0.0.1:18434",
+        "apiKey": null,
+        "model": "gpt-oss:20b",
+        "requestOptions": {
+          "options": {
+            "num_ctx": 4096
+          },
+          "keep_alive": "30m"
+        }
+      }
+    },
+    "dedicated, no image contract": {
+      "added": {
+        "ollama": {
+          "type": "ollama",
+          "tag": "gpt-oss:20b"
+        }
+      },
+      "stored": [
+        {
+          "ollama": {
+            "type": "ollama",
+            "tag": "gpt-oss:20b"
+          }
+        }
+      ],
+      "accepted": true,
+      "phase": "ready",
+      "error": null,
+      "profile": "dedicated",
+      "params": {
+        "numCtx": 4096,
+        "numGpu": null,
+        "numThread": null,
+        "flashAttention": null,
+        "kvCacheType": "f16",
+        "keepAlive": "30m"
+      },
+      "admission": {
+        "status": "ok",
+        "reason": null
+      },
+      "artifact": {
+        "type": "ollama",
+        "tag": "gpt-oss:20b"
+      },
+      "resolved": {
+        "manifestDigest": "sha256:056d21726a745c4473c6f19027776ec800316970cbacb82373d0f5a3d6b9b6a0",
+        "blobs": [
+          "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ]
+      },
+      "runner": {
+        "ollama": {
+          "sizeBytes": 16,
+          "sizeVramBytes": 8,
+          "contextLength": 4096
+        },
+        "port": 18434
+      },
+      "process": {
+        "command": "/opt/ollama/bin/ollama",
+        "args": [
+          "serve"
+        ],
+        "env": {
+          "PATH": "/usr/bin",
+          "HOME": "<data>/home",
+          "LANG": "C.UTF-8",
+          "CUDA_CACHE_PATH": "/opt/runners/.cuda-cache",
+          "OLLAMA_MODELS": "<data>/models/ollama",
+          "OLLAMA_HOST": "127.0.0.1:18434",
+          "OLLAMA_NUM_PARALLEL": "1",
+          "OLLAMA_MAX_LOADED_MODELS": "1",
+          "OLLAMA_KV_CACHE_TYPE": "f16",
+          "OLLAMA_CONTEXT_LENGTH": "4096",
+          "OLLAMA_KEEP_ALIVE": "30m",
+          "OLLAMA_NO_CLOUD": "1",
+          "LD_LIBRARY_PATH": "/usr/local/nvidia/lib64"
+        }
+      },
+      "calls": [
+        [
+          "http://127.0.0.1:18434/api/version",
+          "GET",
+          null
+        ],
+        [
+          "http://127.0.0.1:18434/api/pull",
+          "POST",
+          {
+            "model": "gpt-oss:20b",
+            "stream": true
+          }
+        ],
+        [
+          "http://127.0.0.1:18434/api/generate",
+          "POST",
+          {
+            "model": "gpt-oss:20b",
+            "prompt": "",
+            "stream": false,
+            "options": {
+              "num_ctx": 4096
+            },
+            "keep_alive": "30m"
+          }
+        ],
+        [
+          "http://127.0.0.1:18434/api/ps",
+          "GET",
+          null
+        ]
+      ],
+      "chatTarget": {
+        "runnerId": "ollama",
+        "modelId": "olla-user",
+        "baseUrl": "http://127.0.0.1:18434",
+        "apiKey": null,
+        "model": "gpt-oss:20b",
+        "requestOptions": {
+          "options": {
+            "num_ctx": 4096
+          },
+          "keep_alive": "30m"
+        }
+      }
+    },
+    "dedicated, arm64 image without Ollama": {
+      "added": {
+        "ollama": {
+          "type": "ollama",
+          "tag": "gpt-oss:20b"
+        }
+      },
+      "stored": [
+        {
+          "ollama": {
+            "type": "ollama",
+            "tag": "gpt-oss:20b"
+          }
+        }
+      ],
+      "refused": {
+        "code": "runner_unavailable",
+        "message": "Ollama is not available on this platform: this image does not include it."
+      }
+    }
+  }
+}

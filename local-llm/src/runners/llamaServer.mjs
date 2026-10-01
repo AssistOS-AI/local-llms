@@ -4,10 +4,11 @@
 // else, the readiness probes included, is shared.
 
 import { spawnSync as realSpawnSync } from 'node:child_process';
+import path from 'node:path';
 
 import { admitLlamaServer, admissionResult } from '../controller/admission.mjs';
-import { defaultThreads, performanceCoreCount, physicalCoreCount } from '../controller/hardware.mjs';
-import { UNIFIED, admitUnifiedLlamaServer } from '../controller/profiles.mjs';
+import { cpuDefaultThreads, defaultThreads, performanceCoreCount, physicalCoreCount } from '../controller/hardware.mjs';
+import { CPU, UNIFIED, admitCpuLlamaServer, admitUnifiedLlamaServer } from '../controller/profiles.mjs';
 import { parseRunnerReport } from '../controller/runnerProcess.mjs';
 import {
     ParamError,
@@ -147,6 +148,42 @@ export const LLAMA_SERVER_UNIFIED_PARAM_SCHEMA = deepFreeze({
     }
 });
 
+// The cpu profile (DS005): no GPU is used, and every flag that changes memory or
+// the device is fixed (--device none, --n-gpu-layers 0, --fit off, --flash-attn
+// on, f16 K and V, -b and -ub 512, --cache-ram 256). mlock and dio are not
+// offered: the container's locked-memory limit is 8 MiB, and direct I/O on a
+// Mac's shared folder is unmeasured.
+export const LLAMA_SERVER_CPU_PARAM_SCHEMA = deepFreeze({
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+        ctxSize: {
+            type: 'integer', minimum: 512, maximum: 131072, default: 4096,
+            title: 'Context size',
+            description: 'Total context window in tokens, shared by all parallel slots (at most the model\'s training context per slot). '
+                + 'The KV cache lives in this machine\'s memory, so a larger context needs more of it.'
+        },
+        parallel: {
+            type: 'integer', minimum: 1, maximum: 4, default: 1,
+            title: 'Parallel slots',
+            description: 'Number of concurrent request slots; above 1 the slots share one unified KV cache.'
+        },
+        loadMode: {
+            type: 'string', enum: ['mmap', 'none'], default: 'mmap',
+            title: 'Load mode',
+            description: 'mmap maps the weights from the file, so they are page cache the system can drop under memory pressure '
+                + '(generation then slows down); none reads them into memory the runner owns.'
+        },
+        threads: {
+            type: ['integer', 'null'], minimum: 1, maximum: 256, default: null,
+            title: 'CPU threads',
+            description: 'Number of CPU threads; empty uses the high-performance cores where cores differ, otherwise the physical cores '
+                + 'minus 1 (four cores or fewer) or minus 2.'
+        },
+        chatTemplateKwargs: CHAT_TEMPLATE_KWARGS_PARAM
+    }
+});
+
 const UNIFIED_BATCH = UNIFIED.batchSize;
 
 function assertModelId(model) {
@@ -166,15 +203,25 @@ function assertModelId(model) {
  * dialect.jinja(model)   whether to pass --jinja
  * dialect.parseVersion   the version from `--version` output, or null
  * dialect.unified        whether the runner has a unified-memory policy (DS005)
+ * dialect.cpu            whether the runner has a CPU policy (DS005): a schema, a launch and admitCpu
+ *
+ * profiles  the profiles the runner is offered on, when it is for some of them only (llama.cpp's
+ *           CPU build, installed from the agent's lock: ['cpu']). It gets a schema and a policy
+ *           for those alone, and the controller offers it nowhere else. Without it, the
+ *           dialect decides, as it always did.
+ * runnable  the executable's name inside the runnable copy (`runnerDir`) of a runner the
+ *           agent's lock installs, when `executable` is null.
  *
  * cpuCores() counts the physical cores for the dedicated default --threads,
- * perfCores() the high-performance cores for the unified one; each is read
- * once, on the first launch that needs it.
+ * perfCores() the high-performance cores for the unified and CPU ones; each is
+ * read once, on the first launch that needs it.
  */
 export function createLlamaServerRunner({
-    id, displayName, executable, pinnedVersion, port, dialect,
+    id, displayName, executable, runnable = null, pinnedVersion, port, dialect, profiles = null,
     cpuCores = physicalCoreCount, perfCores = performanceCoreCount,
 }) {
+    if (!executable && !runnable) throw new Error(`Runner ${id} needs an executable or a runnable name`);
+    const offeredOn = (profile) => profiles === null || profiles.includes(profile);
     const loadModes = dialect.loadModes || LOAD_MODES;
     const paramSchema = deepFreeze({
         ...LLAMA_SERVER_PARAM_SCHEMA,
@@ -183,16 +230,25 @@ export function createLlamaServerRunner({
             loadMode: { ...LOAD_MODE_PARAM, enum: loadModes.filter((mode) => LOAD_MODES.includes(mode)) },
         },
     });
-    const schemas = Object.freeze({ dedicated: paramSchema, unified: dialect.unified ? LLAMA_SERVER_UNIFIED_PARAM_SCHEMA : null });
+    const schemas = Object.freeze({
+        dedicated: offeredOn('dedicated') ? paramSchema : null,
+        unified: offeredOn('unified') && dialect.unified ? LLAMA_SERVER_UNIFIED_PARAM_SCHEMA : null,
+        cpu: offeredOn('cpu') && dialect.cpu ? LLAMA_SERVER_CPU_PARAM_SCHEMA : null,
+    });
     let autoThreads = null;
     let unifiedThreads = null;
+    let cpuThreads = null;
     // The servers default to few threads; physical cores minus 2 is faster
     // here and leaves room for the agent and the host (runners plan, I2). On
     // unified memory with cores of different capacity, the high-performance
-    // cores. An admin-set value wins; the stored parameters keep "empty".
+    // cores. On the CPU profile the same, and otherwise physical cores minus 1
+    // up to four cores, where minus 2 would leave one or two threads. An
+    // admin-set value wins; the stored parameters keep "empty".
     const threadsFor = (values, profile) => values.threads ?? (profile === 'unified'
         ? (unifiedThreads ??= perfCores() ?? defaultThreads(cpuCores()))
-        : (autoThreads ??= defaultThreads(cpuCores())));
+        : profile === 'cpu'
+            ? (cpuThreads ??= perfCores() ?? cpuDefaultThreads(cpuCores()))
+            : (autoThreads ??= defaultThreads(cpuCores())));
 
     function paramSchemaFor(profile = 'dedicated') {
         return schemas[profile] ?? null;
@@ -235,18 +291,36 @@ export function createLlamaServerRunner({
         return { totalContext: ctxSize, perRequestContext, parallel, kvUnified: dialect.unifiedKv && parallel > 1 };
     }
 
-    function detect({ spawnSync = realSpawnSync } = {}) {
-        return probeVersion({
-            spawnSync,
-            executable,
-            args: ['--version'],
-            env: probeEnv({ LD_LIBRARY_PATH: NVIDIA_LIB_DIR }),
-            parse: dialect.parseVersion,
-            pinnedVersion
-        });
+    // A runner in the image is probed for its version. One the agent's lock installs (DS004) is asked of
+    // the installer, which reads the cache and its install record; it never starts the binary.
+    function detect({ spawnSync = realSpawnSync, installer } = {}) {
+        if (executable) {
+            return probeVersion({
+                spawnSync,
+                executable,
+                args: ['--version'],
+                env: probeEnv({ LD_LIBRARY_PATH: NVIDIA_LIB_DIR }),
+                parse: dialect.parseVersion,
+                pinnedVersion
+            });
+        }
+        return (async () => {
+            if (!installer?.installable(id)) return { installed: false, version: null, reason: `This image's runner locks have no ${displayName} entry.` };
+            const info = await installer.describe(id);
+            return info.installed
+                ? { installed: true, version: info.version, reason: null }
+                : { installed: false, version: null, reason: 'Not installed. An admin can Install it under Runners.' };
+        })();
     }
 
     function tuningArgs(values, profile) {
+        if (profile === 'cpu') {
+            const args = ['--ctx-size', values.ctxSize, '--device', 'none', '--n-gpu-layers', 0, '--fit', 'off', '--flash-attn', 'on',
+                '--cache-type-k', 'f16', '--cache-type-v', 'f16', '--threads', threadsFor(values, profile), '-np', values.parallel];
+            if (values.parallel > 1) args.push('--kv-unified');
+            args.push('--batch-size', CPU.batchSize, '--ubatch-size', CPU.batchSize, '--cache-ram', CPU.cacheRamMiB);
+            return args;
+        }
         if (profile === 'unified') {
             const args = ['--ctx-size', values.ctxSize, '--n-gpu-layers', 999, '--flash-attn', 'on',
                 '--cache-type-k', 'f16', '--cache-type-v', 'f16', '--threads', threadsFor(values, profile), '-np', values.parallel];
@@ -281,8 +355,9 @@ export function createLlamaServerRunner({
         return args;
     }
 
-    function buildLaunch({ artifactPath, params, port: launchPort, apiKey, model, profile = 'dedicated' } = {}) {
+    function buildLaunch({ artifactPath, params, port: launchPort, apiKey, model, profile = 'dedicated', runnerDir } = {}) {
         const values = normalizeParams(params, { model, profile });
+        const command = executable ?? path.join(assertAbsolutePath(runnerDir, 'runnerDir'), runnable);
         const args = [
             '-m', assertAbsolutePath(artifactPath, 'artifactPath'),
             '--host', '127.0.0.1',
@@ -293,7 +368,10 @@ export function createLlamaServerRunner({
             ...tuningArgs(values, profile),
             ...extraArgs(values, model)
         ];
-        return { command: executable, args: args.map(String), env: { LD_LIBRARY_PATH: NVIDIA_LIB_DIR } };
+        // The CPU launch never loads the CUDA driver library, even where a GPU is
+        // attached but unusable: no library path, and no device is visible (DS003).
+        const launchEnv = profile === 'cpu' ? { CUDA_VISIBLE_DEVICES: '' } : { LD_LIBRARY_PATH: NVIDIA_LIB_DIR };
+        return { command, args: args.map(String), env: launchEnv };
     }
 
     // /health answers once the model is loaded (llama.cpp returns 503 while it
@@ -302,7 +380,7 @@ export function createLlamaServerRunner({
     async function start(ctx) {
         const process = ctx.launch(ctx.runner.buildLaunch({
             artifactPath: ctx.weights.path, params: ctx.params, port: ctx.port, apiKey: ctx.apiKey, model: ctx.model,
-            profile: ctx.profile,
+            profile: ctx.profile, runnerDir: ctx.runnerDir,
         }));
         const base = `http://127.0.0.1:${ctx.port}`;
         await ctx.waitForHttp(`${base}/health`, { process });
@@ -319,7 +397,7 @@ export function createLlamaServerRunner({
         executable,
         port,
         apiKey: true,
-        paramSchema,
+        paramSchema: schemas.dedicated,
         paramSchemaFor,
         // Shown outside "Advanced" in the Run form; nCpuMoe only for MoE models.
         basicParams: Object.freeze(['ctxSize', 'nCpuMoe']),
@@ -331,10 +409,15 @@ export function createLlamaServerRunner({
         start,
         // --alias makes the model id the name the server answers to.
         chatModel: (deployment) => deployment.modelId,
-        admit: admitLlamaServer,
-        ...(dialect.unified ? {
+        // A policy for a profile the runner is not offered on is left out: admission refuses it there.
+        ...(offeredOn('dedicated') ? { admit: admitLlamaServer } : {}),
+        ...(schemas.unified ? {
             admitUnified: (input) => admitUnifiedLlamaServer({ ...input, runnerId: id, displayName }, admissionResult),
         } : {}),
+        ...(schemas.cpu ? {
+            admitCpu: (input) => admitCpuLlamaServer({ ...input, runnerId: id, displayName }, admissionResult),
+        } : {}),
+        ...(profiles ? { profiles: Object.freeze([...profiles]) } : {}),
         parseReport: parseRunnerReport
     });
 }

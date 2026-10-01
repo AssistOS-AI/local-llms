@@ -13,7 +13,8 @@
       "requiresJinja": true,
       "profiles": [
         "dedicated",
-        "unified"
+        "unified",
+        "cpu"
       ],
       "sources": {
         "gguf": {
@@ -146,6 +147,16 @@
             "ctxSize": 32768,
             "parallel": 1,
             "loadMode": "dio",
+            "chatTemplateKwargs": {
+              "reasoning_effort": "low"
+            }
+          }
+        },
+        "cpu": {
+          "llama.cpp": {
+            "ctxSize": 8192,
+            "parallel": 1,
+            "loadMode": "mmap",
             "chatTemplateKwargs": {
               "reasoning_effort": "low"
             }
@@ -465,6 +476,120 @@
               "sha256": "e3d0c53a236f6628928918ff3db806ab410b2b337d5e041076f57d9296ce47f5"
             }
           ]
+        }
+      }
+    },
+    {
+      "id": "qwen2.5-0.5b-instruct-q4_k_m",
+      "displayName": "Qwen2.5 0.5B Instruct (Q4_K_M)",
+      "description": "A small dense chat model that runs on the CPU of a machine with a few GiB of free RAM; the quickest way to check that a machine can serve a model.",
+      "license": "Apache-2.0",
+      "architecture": "dense",
+      "totalParams": "0.5B",
+      "activeParams": "0.5B",
+      "contextLength": 32768,
+      "profiles": [
+        "cpu",
+        "dedicated",
+        "unified"
+      ],
+      "sources": {
+        "gguf": {
+          "type": "huggingface",
+          "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+          "file": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+          "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
+          "commit": "9217f5db79a29953eb74d5343926648285ec7e67",
+          "size": 491400032,
+          "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+          "quantization": "Q4_K_M"
+        }
+      },
+      "memory": {
+        "layers": 24,
+        "kvBytesPerToken": 12288
+      },
+      "recommended": {
+        "cpu": {
+          "llama.cpp": {
+            "ctxSize": 4096
+          }
+        }
+      }
+    },
+    {
+      "id": "qwen2.5-1.5b-instruct-q4_k_m",
+      "displayName": "Qwen2.5 1.5B Instruct (Q4_K_M)",
+      "description": "A small dense chat model that runs on the CPU of a machine with about 3 GiB of free RAM.",
+      "license": "Apache-2.0",
+      "architecture": "dense",
+      "totalParams": "1.5B",
+      "activeParams": "1.5B",
+      "contextLength": 32768,
+      "profiles": [
+        "cpu",
+        "dedicated",
+        "unified"
+      ],
+      "sources": {
+        "gguf": {
+          "type": "huggingface",
+          "repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+          "file": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+          "revision": "91cad51170dc346986eccefdc2dd33a9da36ead9",
+          "commit": "91cad51170dc346986eccefdc2dd33a9da36ead9",
+          "size": 1117320736,
+          "sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+          "quantization": "Q4_K_M"
+        }
+      },
+      "memory": {
+        "layers": 28,
+        "kvBytesPerToken": 28672
+      },
+      "recommended": {
+        "cpu": {
+          "llama.cpp": {
+            "ctxSize": 4096
+          }
+        }
+      }
+    },
+    {
+      "id": "qwen3-4b-instruct-2507-q4_k_m",
+      "displayName": "Qwen3 4B Instruct 2507 (Q4_K_M)",
+      "description": "A small dense chat model that runs on the CPU of a machine with about 4 GiB of free RAM.",
+      "license": "Apache-2.0",
+      "architecture": "dense",
+      "totalParams": "4B",
+      "activeParams": "4B",
+      "contextLength": 262144,
+      "profiles": [
+        "cpu",
+        "dedicated",
+        "unified"
+      ],
+      "sources": {
+        "gguf": {
+          "type": "huggingface",
+          "repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+          "file": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+          "revision": "a06e946bb6b655725eafa393f4a9745d460374c9",
+          "commit": "a06e946bb6b655725eafa393f4a9745d460374c9",
+          "size": 2497281120,
+          "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
+          "quantization": "Q4_K_M"
+        }
+      },
+      "memory": {
+        "layers": 36,
+        "kvBytesPerToken": 147456
+      },
+      "recommended": {
+        "cpu": {
+          "llama.cpp": {
+            "ctxSize": 4096
+          }
         }
       }
     }

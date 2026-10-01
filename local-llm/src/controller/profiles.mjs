@@ -1,7 +1,9 @@
 // Hardware profiles (DS005). `dedicated`: the GPU has its own memory and the
 // controller sizes models against it (DS003). `unified`: the GPU shares the
 // machine's memory (NVIDIA GB10 in DGX Spark); there is one pool, read from
-// /proc/meminfo, and the rules below apply.
+// /proc/meminfo, and the rules below apply. `cpu`: no NVIDIA GPU is usable, so
+// models run on the CPU against the same kind of pool, capped by a container
+// memory limit when there is one; decideProfile chooses it automatically.
 //
 // The unified constants come from the Phase 0 measurements on DGX Spark
 // (plans/local-llm-multiarch-implementation-log.md) and stay provisional: the
@@ -21,7 +23,7 @@ import {
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
 
-export const PROFILES = Object.freeze(['dedicated', 'unified']);
+export const PROFILES = Object.freeze(['dedicated', 'unified', 'cpu']);
 
 export const UNIFIED = Object.freeze({
     // Admission refuses a run needing more than MemTotal less this as incompatible:
@@ -46,6 +48,24 @@ export const UNIFIED = Object.freeze({
     // or more available.
     psiStopAvg10: 50,
 });
+
+// The CPU profile's constants. Provisional, like the unified ones: no benchmark
+// calibrates them. They are smaller than the unified values because the first
+// CPU host is a 5.76 GiB Podman machine, where a 16 GiB reserve and an 8 GiB
+// floor would refuse everything; the reserve and floor below scale with the
+// pool and converge on the unified values on large hosts. The memory guard
+// samples at UNIFIED.guardSampleMs and stops on UNIFIED.psiStopAvg10.
+export const CPU = Object.freeze({
+    // The runner process beyond the buffers llama.cpp logs.
+    runtimeBytes: 512 * MIB,
+    // llama-server's prompt cache in host RAM (`--cache-ram`, MiB): a hard bound.
+    cacheRamMiB: 256,
+    // llama-server's -b and -ub on the CPU (fixed, like every other memory flag).
+    batchSize: 512,
+});
+
+// A GPU that stays unreadable this long no longer holds the CPU profile back.
+export const UNREADABLE_COMMIT_MS = 60_000;
 
 // The load modes llama-server may use on unified memory. They fill the page
 // cache very differently (DS005), so an envelope rectangle names the one it
@@ -124,13 +144,38 @@ function userSizing(model, fields) {
 
 // llama-server's need grows with the KV and MTP terms; vLLM's need is its share
 // plus its runner RAM, so there these fields only decide whether the model is
-// judged to fit the share.
-function userSizingWarning(fields, runner = 'llama-server') {
-    const prefix = `Sized with ${fields.join(', ')} from the model entry added at run time. Nothing checks these against the weights: `;
-    return runner === 'vllm'
-        ? `${prefix}an understated value only loosens the check that the weights and KV cache fit vLLM's share, so vLLM may fail `
+// judged to fit the share. The warning names where the values came from
+// (`sizingSource`, DS002): typed by hand (or `manual`) is the original text;
+// a GGUF header read when the model was added is read again from the verified
+// file after the download, and once it was (`sizingVerified`, set on the
+// copy the controller admits with) the values are the file's own, unless the
+// file's architecture could not be used (`sizingUnchecked`); a snapshot's
+// config.json was checked against its digest at lookup.
+function userSizingWarning(fields, runner = 'llama-server', model = {}) {
+    const vllm = runner === 'vllm';
+    const tail = vllm
+        ? `an understated value only loosens the check that the weights and KV cache fit vLLM's share, so vLLM may fail `
             + 'to start; its memory need (the share plus its runner RAM) does not depend on it.'
-        : `${prefix}an understated value makes the estimate too small, and then only the memory guard stands behind the run.`;
+        : 'an understated value makes the estimate too small, and then only the memory guard stands behind the run.';
+    if (model.sizingSource === 'gguf-header' && typeof model.sizingUnchecked === 'string' && !vllm) {
+        return `Sized with ${fields.join(', ')} from the GGUF header read when the model was added; the downloaded file's header could not `
+            + `be used to check them (${model.sizingUnchecked}), so they stand unchecked: ${tail}`;
+    }
+    if (model.sizingSource === 'gguf-header' && model.sizingVerified === true && !vllm) {
+        return `Sized with ${fields.join(', ')} from the GGUF header of the downloaded file, which was checked against its sha256; `
+            + 'the header read when the model was added was read again from it.';
+    }
+    if (model.sizingSource === 'gguf-header') {
+        const later = vllm
+            ? 'vLLM loads the snapshot, not that file, so nothing reads it again: '
+            : 'the header is read again from the verified file after the download, and the last admissions use the values it gives; until then ';
+        return `Sized with ${fields.join(', ')} from the GGUF header read when the model was added; ${later}${tail}`;
+    }
+    if (model.sizingSource === 'config.json') {
+        return `Sized with ${fields.join(', ')} from the config.json of the model's pinned snapshot, checked against its digest when the model `
+            + `was looked up. Nothing checks these against the weights: ${tail}`;
+    }
+    return `Sized with ${fields.join(', ')} from the model entry added at run time. Nothing checks these against the weights: ${tail}`;
 }
 
 // Honest about what a default can miss (the defaults are DS003's).
@@ -241,7 +286,7 @@ export function admitUnifiedLlamaServer({ runnerId, model, source, params, memor
         warnings.push(`Not measured on unified memory: about ${gib(estimate.unifiedBytes)} is an estimate. The memory guard stops `
             + `the runner at once if available memory falls below ${gib(UNIFIED.floorBytes)}.`);
         if (estimate.defaulted.length) warnings.push(defaultedWarning(estimate.defaulted));
-        if (estimate.userSizing.length) warnings.push(userSizingWarning(estimate.userSizing));
+        if (estimate.userSizing.length) warnings.push(userSizingWarning(estimate.userSizing, 'llama-server', model));
     }
     if (unreadable(memory)) return result('incompatible', MEMORY_UNREADABLE, estimate, warnings);
     return poolVerdict({
@@ -273,7 +318,7 @@ export function admitUnifiedVllm({ model, source, params, memory, disk, remainin
     const warnings = ['Experimental: vLLM has not been measured on unified memory. Its share and its RAM beyond it are estimates, '
         + `and the memory guard stops it at once if available memory falls below ${gib(UNIFIED.floorBytes)}.`];
     if (defaulted.length) warnings.push(defaultedWarning(defaulted));
-    if (sizing.length) warnings.push(userSizingWarning(sizing, 'vllm'));
+    if (sizing.length) warnings.push(userSizingWarning(sizing, 'vllm', model));
     const base = {
         weightsBytes, kvBytes, overheadBytes: VLLM_OVERHEAD_BYTES, runnerRamBytes: VLLM_RUNNER_RAM_BYTES, floorBytes: UNIFIED.floorBytes,
         hostReserveBytes: UNIFIED.hostReserveBytes, poolBytes: memory.totalBytes ?? null, envelope: null, measured: false,
@@ -317,4 +362,254 @@ export function admitUnifiedVllm({ model, source, params, memory, disk, remainin
         needBytes: estimate.unifiedBytes, memory, disk, remainingDownloadBytes, result, estimate, warnings,
         tooLarge: 'Lower gpuMemoryUtilization or leave it empty.',
     });
+}
+
+// ---------------------------------------------------------------- the cpu profile
+
+/**
+ * The reason a usable GPU is outside the compute capabilities the image's CUDA
+ * runners were built for, or null. A GPU that does not report its capability
+ * counts as outside when the image lists any; decideProfile treats that case as
+ * unreadable rather than as a verdict.
+ */
+export function capabilityMismatch(gpu, capabilities = []) {
+    const listed = (Array.isArray(capabilities) ? capabilities : []).filter(Boolean);
+    if (!listed.length || !gpu?.available) return null;
+    const capability = gpu.device?.computeCapability;
+    if (capability && listed.includes(capability)) return null;
+    return `This image's runners are built for GPUs of compute capability ${listed.join(', ')}; `
+        + `${gpu.name} ${capability ? `is ${capability}` : 'did not report its compute capability'}.`;
+}
+
+/**
+ * Which profile a hardware snapshot calls for (DS005). Pure: the caller keeps
+ * the window state and the clock.
+ *
+ * Positive evidence decides at once: a usable GPU the image supports (its own
+ * profile), a usable GPU whose reported capability the image was not built for
+ * (`cpu`, cause `mismatch`), no nvidia-smi at all (`absent`), or a GPU whose
+ * memory model is unusable. Everything else (`unreadable`, a snapshot without a
+ * state, no GPU, no snapshot, a usable GPU that does not report its capability
+ * on an image that lists them) may be transient, so it waits: `profile` is null
+ * until `commitAfterMs` have passed since the first such snapshot, then `cpu`
+ * (cause `unreadable-timeout`). A snapshot that decides resets the window.
+ *
+ * @returns {{ profile: 'dedicated'|'unified'|'cpu'|null, cause: string, reason: string|null, unreadable: { firstAtMs: number }|null }}
+ */
+export function decideProfile({ snapshot, capabilities = [], unreadable = null, nowMs = Date.now(), commitAfterMs = UNREADABLE_COMMIT_MS } = {}) {
+    const gpu = snapshot?.gpu;
+    let waitingReason = 'the hardware snapshot could not be read';
+    if (gpu?.available) {
+        const mismatch = capabilityMismatch(gpu, capabilities);
+        if (!mismatch) return { profile: profileOf(snapshot), cause: 'gpu', reason: null, unreadable: null };
+        if (gpu.device?.computeCapability) return { profile: 'cpu', cause: 'mismatch', reason: mismatch, unreadable: null };
+        waitingReason = mismatch;
+    } else if (gpu?.state === 'absent' || gpu?.state === 'unusable') {
+        return { profile: 'cpu', cause: gpu.state, reason: gpu.reason || 'No NVIDIA GPU is usable by this agent.', unreadable: null };
+    } else if (gpu?.reason) {
+        waitingReason = gpu.reason;
+    }
+    const firstAtMs = Number.isFinite(unreadable?.firstAtMs) ? unreadable.firstAtMs : nowMs;
+    const window = { firstAtMs };
+    if (nowMs - firstAtMs >= commitAfterMs) return { profile: 'cpu', cause: 'unreadable-timeout', reason: waitingReason, unreadable: window };
+    return { profile: null, cause: 'unreadable', reason: waitingReason, unreadable: window };
+}
+
+/** The CPU reserve: what admission leaves for the host, at least 1.5 GiB and at most 16 GiB. */
+export function cpuHostReserveBytes(totalBytes) {
+    return Math.ceil(Math.min(16 * GIB, Math.max(1.5 * GIB, 0.25 * totalBytes)));
+}
+
+/** The CPU floor: the memory the guard keeps available, at least 512 MiB and at most 8 GiB. */
+export function cpuFloorBytes(totalBytes) {
+    return Math.ceil(Math.min(8 * GIB, Math.max(512 * MIB, 0.10 * totalBytes)));
+}
+
+/**
+ * The memory the CPU profile sizes against: MemTotal and MemAvailable, and
+ * within a container memory limit (cgroup `memory.max`) at most that limit,
+ * with what is available now at most the limit less `memory.current`.
+ * /proc/meminfo shows the host's memory, not the container's. Memory that
+ * cannot be read gives null figures, which admission refuses.
+ */
+export function cpuPool(memory = {}, cgroupMemory = null) {
+    if (!Number.isFinite(memory?.totalBytes) || !Number.isFinite(memory?.availableBytes)) {
+        return { totalBytes: null, availableBytes: null, capped: false };
+    }
+    let totalBytes = memory.totalBytes;
+    let availableBytes = memory.availableBytes;
+    const limit = cgroupMemory?.maxBytes;
+    if (Number.isFinite(limit) && limit > 0) {
+        totalBytes = Math.min(totalBytes, limit);
+        availableBytes = Math.min(availableBytes, totalBytes);
+        if (Number.isFinite(cgroupMemory.currentBytes)) availableBytes = Math.min(availableBytes, Math.max(0, limit - cgroupMemory.currentBytes));
+    }
+    return { totalBytes, availableBytes, capped: totalBytes < memory.totalBytes || availableBytes < memory.availableBytes };
+}
+
+// A byte count for a message: MiB below 1 GiB, otherwise GiB with two decimals, because the CPU hosts are small.
+function amount(bytes) {
+    return bytes >= GIB ? `${(bytes / GIB).toFixed(2)} GiB` : `${Math.round(bytes / MIB)} MiB`;
+}
+
+const CPU_MEMORY_UNREADABLE = 'System memory cannot be read (/proc/meminfo), so nothing can be sized on the CPU.';
+
+/**
+ * What llama-server needs on the CPU: an estimate from the model's data and the
+ * fixed CPU flags, never a measurement. All weights are resident (every shard;
+ * `--n-gpu-layers 0`); the KV cache is f16 for the whole ctxSize (`--kv-unified`
+ * makes it the pool above one slot); the compute buffers use the flash-attention
+ * formula at the fixed micro-batch; then the runtime constant and the prompt
+ * cache's explicit bound. Inputs the entry lacks fall back to the dedicated
+ * defaults and are named, so the admin can add them.
+ */
+export function estimateCpuLlamaServer({ model, source, params, pool = {} }) {
+    const memory = model.memory || {};
+    const defaulted = [];
+    const kvPerToken = memory.kvBytesPerToken ?? (defaulted.push('memory.kvBytesPerToken'), DEFAULT_KV_BYTES_PER_TOKEN);
+    const kvBytes = Math.round(kvPerToken * params.ctxSize + (memory.fixedKvBytes || 0));
+    const computeBytes = Math.round(computeBufferBytes({ ubatchSize: CPU.batchSize, flashAttn: 'on' }));
+    if (!Number.isInteger(model.contextLength)) defaulted.push('contextLength');
+    const cacheRamBytes = CPU.cacheRamMiB * MIB;
+    const weightsBytes = source.size || 0;
+    const ramBytes = weightsBytes + kvBytes + computeBytes + CPU.runtimeBytes + cacheRamBytes;
+    const poolBytes = Number.isFinite(pool.totalBytes) ? pool.totalBytes : null;
+    const from = model.seed ? 'the catalog entry' : 'the model entry added at run time';
+    return {
+        weightsBytes,
+        kvBytes,
+        computeBytes,
+        runtimeBytes: CPU.runtimeBytes,
+        cacheRamBytes,
+        ramBytes,
+        poolBytes,
+        floorBytes: poolBytes === null ? null : cpuFloorBytes(poolBytes),
+        hostReserveBytes: poolBytes === null ? null : cpuHostReserveBytes(poolBytes),
+        measured: false,
+        defaulted,
+        userSizing: userSizing(model, ['memory.kvBytesPerToken', 'memory.fixedKvBytes']),
+        basis: `estimate, not measured on this machine: pinned weight size, f16 KV cache for ctxSize at ${kvPerToken} bytes per token `
+            + `(${defaulted.includes('memory.kvBytesPerToken') ? 'a default: the entry has no memory.kvBytesPerToken' : `from ${from}`}), `
+            + 'compute buffers, runtime and the prompt cache bound'
+            + (defaulted.length ? `; defaults used for ${defaulted.join(', ')}` : ''),
+    };
+}
+
+// The lead of the "Runs on the CPU" warning, by the cause of the decision (DS005).
+const CPU_LEADS = Object.freeze({
+    absent: 'no NVIDIA GPU is attached',
+    unusable: 'the NVIDIA GPU cannot be used',
+    mismatch: 'this image\'s CUDA runners were not built for this GPU',
+    'unreadable-timeout': 'the NVIDIA GPU could not be read for 60 s',
+});
+
+// What every CPU policy ends with: the warnings, then the verdict. The need must
+// fit the pool less the host reserve (else `incompatible`), what is available now
+// less the floor (else `insufficient-now`), and the disk; the memory guard stops the
+// runner below the floor and is the backstop, not the control. `decision` says why
+// this is the CPU (cause, reason); `gpuRecovered` is set by the controller when the
+// GPU that was unreadable would now be chosen. `shrink` is the runner's own advice.
+function cpuVerdict({ estimate, pool, model, cgroupMemory, disk, remainingDownloadBytes, gpu, decision, result, shrink }) {
+    const warnings = [];
+    const lead = CPU_LEADS[decision?.cause];
+    const why = String(decision?.reason || '').replace(/\.+\s*$/, '').slice(0, 300);
+    warnings.push(`Runs on the CPU: ${[lead, why && (lead ? `(${why})` : why)].filter(Boolean).join(' ') || 'no NVIDIA GPU is used'}. `
+        + 'Generation is much slower than on a GPU.');
+    if (Number.isFinite(estimate.floorBytes)) {
+        warnings.push(`Not measured on this machine: about ${amount(estimate.ramBytes)} is an estimate. The memory guard stops the runner at once `
+            + `if available memory falls below ${amount(estimate.floorBytes)}.`);
+    }
+    if (estimate.defaulted.length) warnings.push(defaultedWarning(estimate.defaulted));
+    if (estimate.userSizing.length) warnings.push(userSizingWarning(estimate.userSizing, 'llama-server', model));
+    if (pool.capped) warnings.push(`A container memory limit of ${amount(cgroupMemory.maxBytes)} applies.`);
+    if (decision?.cause === 'unreadable-timeout' && decision.gpuRecovered && gpu?.available) {
+        warnings.push(`The NVIDIA GPU is readable now (${gpu.name}); restart local-llm to use it.`);
+    }
+    if (!Number.isFinite(pool.totalBytes)) return result('incompatible', CPU_MEMORY_UNREADABLE, estimate, warnings);
+    if (estimate.ramBytes > pool.totalBytes - estimate.hostReserveBytes) {
+        return result('incompatible', `Needs about ${amount(estimate.ramBytes)} of the ${amount(pool.totalBytes)} of memory on this machine, `
+            + `which must keep ${amount(estimate.hostReserveBytes)} for the host. ${shrink}`,
+        estimate, warnings);
+    }
+    if (estimate.ramBytes > pool.availableBytes - estimate.floorBytes) {
+        return result('insufficient-now', `Needs about ${amount(estimate.ramBytes)} of memory and ${amount(estimate.floorBytes)} kept free; `
+            + `${amount(pool.availableBytes)} is available now. Other processes on this machine hold the rest.`, estimate, warnings);
+    }
+    if (Number.isFinite(disk?.freeBytes) && remainingDownloadBytes * 1.05 > disk.freeBytes) {
+        return result('insufficient-now', `The weights need ${amount(remainingDownloadBytes * 1.05)} of free disk (download or copy, with a 5 % reserve); `
+            + `${amount(disk.freeBytes)} is free.`, estimate, warnings);
+    }
+    return result('ok', null, estimate, warnings);
+}
+
+/**
+ * The CPU policy of llama-server (DS005). There is no envelope and no benchmark:
+ * estimateCpuLlamaServer sizes every run, bundled or added at run time.
+ */
+export function admitCpuLlamaServer({ model, source, params, memory = {}, cgroupMemory = null, disk, remainingDownloadBytes = 0, gpu, decision },
+    result) {
+    if (!(source.size > 0)) {
+        return result('incompatible', `${model.displayName}'s weight size is unknown, so it cannot be sized on the CPU; `
+            + 'add the model again so its files are pinned.', {});
+    }
+    const pool = cpuPool(memory, cgroupMemory);
+    const estimate = estimateCpuLlamaServer({ model, source, params, pool });
+    return cpuVerdict({ estimate, pool, model, cgroupMemory, disk, remainingDownloadBytes, gpu, decision, result,
+        shrink: 'Reduce the context or the parallel slots, or pick a smaller model.' });
+}
+
+// Ollama's own need on the CPU beyond the weights and the KV cache: the server and its runner process (provisional, like every CPU constant).
+export const OLLAMA_CPU = Object.freeze({ runtimeBytes: 768 * MIB });
+
+/**
+ * What Ollama needs on the CPU (DS005), from the tag's pinned size and never
+ * from a measurement: all weights resident, an f16 KV cache for the whole
+ * `numCtx` (Ollama runs one slot here), the compute buffers at llama.cpp's
+ * flash-attention formula and Ollama's default batch of 512, and the server
+ * and runner process. `kvBytesPerToken` falls back to the dedicated default and
+ * is named when it does.
+ */
+export function estimateCpuOllama({ model, source, params, pool = {} }) {
+    const memory = model.memory || {};
+    const defaulted = [];
+    const kvPerToken = memory.kvBytesPerToken ?? (defaulted.push('memory.kvBytesPerToken'), DEFAULT_KV_BYTES_PER_TOKEN);
+    const kvBytes = Math.round(kvPerToken * params.numCtx + (memory.fixedKvBytes || 0));
+    const computeBytes = Math.round(computeBufferBytes({ ubatchSize: 512, flashAttn: 'on' }));
+    const weightsBytes = source.size || 0;
+    const ramBytes = weightsBytes + kvBytes + computeBytes + OLLAMA_CPU.runtimeBytes;
+    const poolBytes = Number.isFinite(pool.totalBytes) ? pool.totalBytes : null;
+    const from = model.seed ? 'the catalog entry' : 'the model entry added at run time';
+    return {
+        weightsBytes,
+        kvBytes,
+        computeBytes,
+        runtimeBytes: OLLAMA_CPU.runtimeBytes,
+        ramBytes,
+        poolBytes,
+        floorBytes: poolBytes === null ? null : cpuFloorBytes(poolBytes),
+        hostReserveBytes: poolBytes === null ? null : cpuHostReserveBytes(poolBytes),
+        measured: false,
+        defaulted,
+        userSizing: userSizing(model, ['memory.kvBytesPerToken', 'memory.fixedKvBytes']),
+        basis: `estimate, not measured on this machine: the tag's pinned size, f16 KV cache for numCtx at ${kvPerToken} bytes per token `
+            + `(${defaulted.includes('memory.kvBytesPerToken') ? 'a default: the entry has no memory.kvBytesPerToken' : `from ${from}`}), `
+            + 'compute buffers and the Ollama server and runner'
+            + (defaulted.length ? `; defaults used for ${defaulted.join(', ')}` : ''),
+    };
+}
+
+/**
+ * The CPU policy of Ollama (DS005): sized from the tag's pinned size, so a tag
+ * whose size is not pinned (an entry stored before tags were pinned) is refused
+ * until an update pins it. Ollama pulls its own weights, so the pinned size is
+ * also the disk the pull needs.
+ */
+export function admitCpuOllama({ model, source, params, memory = {}, cgroupMemory = null, disk, remainingDownloadBytes = 0, gpu, decision }, result) {
+    if (!(source.size > 0)) {
+        return result('incompatible', 'The tag\'s size is not pinned; update the model entry so it is pinned.', {});
+    }
+    const pool = cpuPool(memory, cgroupMemory);
+    const estimate = estimateCpuOllama({ model, source, params, pool });
+    return cpuVerdict({ estimate, pool, model, cgroupMemory, disk, remainingDownloadBytes, gpu, decision, result,
+        shrink: 'Reduce the context or pick a smaller model.' });
 }

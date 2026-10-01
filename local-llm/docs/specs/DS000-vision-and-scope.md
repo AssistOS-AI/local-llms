@@ -10,7 +10,7 @@ summary: What local-llm is, the retired shared-image agents and the services tha
 
 ## Introduction
 
-`local-llm` runs open-weight language models on the workspace's own NVIDIA GPU. A workspace administrator opens Local LLMs from Explorer's toolbar (or Settings → Agents → Local LLMs), picks a model and a runner, presses Run, and the agent downloads the weights, starts the runner on the GPU, and exposes the running model to other agents through the workspace-local Soul Gateway.
+`local-llm` runs open-weight language models on the workspace's own hardware: on its NVIDIA GPU when one is attached and usable, and otherwise on the CPU (the `cpu` profile, DS005). A workspace administrator opens Local LLMs from Explorer's toolbar (or Settings → Agents → Local LLMs), picks a model and a runner, and presses Run. The agent then downloads the weights, starts the runner on the GPU or the CPU, and exposes the running model to other agents through the workspace-local Soul Gateway.
 
 ## Core Content
 
@@ -24,7 +24,7 @@ What disappears with them:
 | --- | --- | --- |
 | Translation | `language-translation`: a transformers seq2seq service (facebook/m2m100_418M) with its own translation API | none |
 | Relevance scoring and reranking | `relevance`: a cross-encoder / sentence-transformers scoring API (Qwen/Qwen3-Reranker-0.6B) | none |
-| CPU-only chat models | the ten role agents, each an Ollama or llama.cpp model on the CPU in the shared image | none: local-llm needs an NVIDIA GPU and has no CPU fallback |
+| CPU-only chat models | the ten role agents, each an Ollama or llama.cpp model on the CPU in the shared image | local-llm's `cpu` profile (DS005): models run on the CPU automatically when no NVIDIA GPU is usable, any GGUF model that fits the machine's memory; no role agent is recreated |
 | Model and profile management | `local-llms-manager`'s registration, startup-script and profile tools | local-llm's own catalog, registry and tools (DS001, DS002) |
 
 A workspace that enabled a legacy agent loses it at its next repository update: Ploinky can no longer find the agent's manifest. No stored data is deleted by this: models the legacy agents downloaded stay under the workspace's `.ploinky/data/local-llms/`, and local-llm's own models and state under its `/data` are untouched. The `assistos/local-llms` image is no longer built from this repository; already published tags are not removed.
@@ -35,6 +35,7 @@ A workspace that enabled a legacy agent loses it at its next repository update: 
 | --- | --- |
 | Weights are downloaded only after an explicit Run, never at enable, restart or when a model is added. | DS002 |
 | The GPU is used only through the named-agent Box GPU grant; the agent asks for no privilege, capability or host device of its own. | DS003 |
+| A machine without a usable NVIDIA GPU runs models on the CPU, with no operator step. | DS005 |
 | Every control operation is admin-only and goes through one serialized controller. | DS001 |
 | Other agents use the running model through AchillesAgentLib and the local Soul Gateway, never through a runner port. | DS001 |
 | Admission explains, before anything is downloaded, whether a model and its parameters fit this machine. | DS003 |
@@ -43,14 +44,15 @@ A workspace that enabled a legacy agent loses it at its next repository update: 
 
 | Runner | State in this release |
 | --- | --- |
-| llama.cpp `b11159` (amd64: CUDA 12.8 build; arm64: ggml-org's CUDA 13.4 build with native sm_121a code for NVIDIA GB10) | Supported. GGUF from Hugging Face, pinned by commit, size and sha256. The default runner on a GPU that shares system memory (DGX Spark), for the listed models and models added at run time, sized by a labelled estimate or a trusted envelope (DS005); no per-model benchmark is required. |
+| llama.cpp `b11159` (amd64: CUDA 12.8 build; arm64: ggml-org's CUDA 13.4 build with native sm_121a code for NVIDIA GB10) | Supported. GGUF from Hugging Face, pinned by commit, size and sha256. The default runner on a GPU that shares system memory (DGX Spark), for the listed models and models added at run time, sized by a labelled estimate or a trusted envelope (DS005); no per-model benchmark is required. On a machine without a usable NVIDIA GPU it runs on the CPU (`cpu` profile, DS005). The arm64 image's build carries CPU backends beside its CUDA backend; the amd64 build is made with the same release flags. |
+| llama.cpp's CPU build, release `b11295` (ggml-org's own `ubuntu-arm64` and `ubuntu-x64` assets) | Supported on the `cpu` profile only. It is installed on demand from the agent's own runner lock (DS004) and runs from its runnable copy, beside the image's llama.cpp. It has a CPU policy and no GPU policy, so a GPU host neither shows nor runs it. |
 | ik_llama.cpp, commit `20f7a72` (built into the image with CUDA 12.8 for sm_86 and sm_89) | Supported. A llama.cpp fork with faster hybrid CPU/GPU inference for mixture-of-experts models. It reads the same GGUF files as llama.cpp, so the two share one download. |
-| Ollama `0.34.4` | Supported. Library tags pulled by the Ollama daemon, verified by manifest digest when the catalog pins one. |
+| Ollama `0.34.4` | Supported. Library tags pulled by the Ollama daemon, verified by manifest digest when the entry pins one; a tag added at run time on the `cpu` profile is pinned when it is added (DS002). On arm64, where the image has no Ollama, the `cpu` profile installs it on demand from the agent's runner lock (DS004); it then runs on the CPU, with the tag's pinned size deciding admission (DS005). |
 | vLLM `0.30.0` | Supported once an admin installs it from the image's runner lock (DS004). It reads Hugging Face snapshots (`hf`, DS002), such as the seed Qwen3-4B-AWQ, runs eager by default for a faster start, and takes only a model whose weights and KV cache fit the GPU unless the admin offloads weights to RAM (DS003). gpt-oss's tokenizer vocabulary is pinned in the lock and read from the runnable copy, not downloaded at run time (DS004). On DGX Spark it is experimental: off unless the operator sets `LOCAL_LLM_VLLM_UNIFIED=experimental` (DS001, DS005), and sized as a share of the shared pool. |
 | TabbyAPI `f07131c` with ExLlamaV3 1.5.1 | Supported once an admin installs it from the image's runner lock after accepting TabbyAPI's AGPL-3.0 notice (DS004). It reads EXL3 snapshots (`exl3`, DS002), such as the seed Qwen3-8B EXL3 4.0 bpw, runs from its source directory in the runnable copy on loopback, and requires its per-start key. |
 | LM Studio's llmster `0.0.25-1` (bundled CUDA 12 engine 2.41.0, llama.cpp b11026) | Internal use only. Off unless the deployment's operator turns it on (below). Once on, an admin installs it from the image's runner lock after accepting LM Studio's Terms (DS004). It reads the same GGUF files as llama.cpp. |
 
-The image decides which runners exist (DS005): the amd64 image has all of them; the arm64 image, for NVIDIA GB10 in DGX Spark, has llama.cpp and a runner lock with vLLM (its aarch64 wheels, installed on demand and experimental there), so ik_llama.cpp, Ollama, TabbyAPI and LM Studio are reported "not available on this platform" and refused before anything downloads.
+The image decides which runners exist (DS005): the amd64 image has all of them; the arm64 image, for NVIDIA GB10 in DGX Spark, has llama.cpp and a runner lock with vLLM (its aarch64 wheels, installed on demand and experimental there), so ik_llama.cpp, Ollama, TabbyAPI and LM Studio are reported "not available on this platform" and refused before anything downloads. The agent's own runner lock (DS004) adds runners to the `cpu` profile alone: there Ollama becomes installable on arm64, and so does llama.cpp's CPU build on both architectures. In the `cpu` profile only the runners with a CPU policy run (llama.cpp, Ollama, and llama.cpp's CPU build installed on demand, DS004); every other runner is refused before anything downloads (ik_llama.cpp links the CUDA driver library directly).
 
 Every runner is an adapter in `src/runners/`: its identity, the weight format it reads, its loopback port and per-start key, its parameter schema and basic form fields, detection, its start-up pipeline (launch and readiness), the model name for chat requests, its admission policy and its log parser. The controller, the tools and the dashboard have no per-runner branches, so a new runner is an adapter plus data.
 
@@ -70,7 +72,7 @@ The agent uses none of what LM Studio adds on top of llama.cpp: its native REST 
 
 ### Out of scope
 
-A CPU fallback, translation and reranking services (retired above), and a shared host model cache. Each needs its own decision.
+Translation and reranking services (retired above), a shared host model cache, and Apple GPU acceleration through Podman libkrun/Vulkan (deferred by the user 2026-09-30, to be added later). Each needs its own decision.
 
 ## Decisions & Questions
 
@@ -78,6 +80,10 @@ A CPU fallback, translation and reranking services (retired above), and a shared
 
 Response: The shared image was CPU-only and arm64-first, started one fixed model per agent, and its dispatcher was shell. GPU runners, on-demand weights, admission and a Settings UI need a long-running controller with state, so local-llm began as a separate agent beside the legacy ones, and the legacy agents were later retired (above).
 
+### Question #2: Why does local-llm run models on the CPU when no NVIDIA GPU is usable?
+
+Response: Plan decision D7 left CPU inference out. That made the agent unusable on a Mac (through its Podman machine) and on hosts without a GPU, although Explorer enables it by default. On 2026-09-30 the user decided that an NVIDIA GPU may not be a prerequisite. The CPU path is automatic, with no operator switch, and is sized from the machine's RAM (DS005). Revoking the GPU grant therefore no longer stops local-llm from serving models: it moves them to the CPU.
+
 ## Conclusion
 
-`local-llm` is an opt-in, per-workspace, GPU-backed model host that downloads nothing until an administrator runs a model, and serves other agents only through the local Soul Gateway.
+`local-llm` is an opt-in, per-workspace model host. It uses the NVIDIA GPU when one is attached and the CPU otherwise, downloads nothing until an administrator runs a model, and serves other agents only through the local Soul Gateway.

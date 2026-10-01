@@ -1,6 +1,8 @@
-// The runner lock shipped inside the image (/opt/local-llm/runners.lock.json):
-// the only runners that can be installed on demand, and the only files they
-// may download (runners plan §5.2). Admins choose a runner id, never a URL.
+// The runner locks: the one shipped inside the image (/opt/local-llm/runners.lock.json)
+// and the agent's own, one per platform (catalog/runners.lock.linux-<arch>.json,
+// DS004). Together they name the only runners that can be installed on demand,
+// and the only files they may download (runners plan §5.2). Admins choose a
+// runner id, never a URL. Both have the schema below.
 //
 // {
 //   "schema": "local-llm.runners-lock/v1",
@@ -11,16 +13,18 @@
 //       "licence": { "name", "url", "source"?, "notice"?, "requiresAcceptance", "proprietary"? },
 //       "files": [{ "name", "url", "size", "sha256", "extract"?, "into"?, "strip"? }],
 //       "check": { "distributions": { "<dist>": "<version>" }, "imports": [], "gpuImports": [],
-//                  "optionalLibraries": { "<soname glob>": "<why this runner does not need it>" } }
+//                  "optionalLibraries": { "<soname glob>": "<why this runner does not need it>" },
+//                  "executable": "<path inside the runnable copy of the file the adapter launches>" }
 //     }
 //   }
 // }
 //
 // A python runner's files are wheels (plus optional source archives with
 // `extract`); `uv` installs exactly those wheels, offline, with their hashes.
-// An archive runner's files are archives extracted into its runnable copy,
-// dropping one leading directory unless the file says `strip: 0` (an archive
-// whose entries sit at its root, like LM Studio's llmster tarball).
+// An archive runner's files are .tar.gz or .tar.zst archives (Ollama's
+// releases) extracted into its runnable copy, dropping one leading directory
+// unless the file says `strip: 0` (an archive whose entries sit at its root,
+// like LM Studio's llmster tarball).
 // A python runner may also pin data files it would otherwise download at run
 // time (`into`: the directory of the runnable copy the file is copied to).
 //
@@ -31,6 +35,7 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import { LocalLlmError } from '../errors.mjs';
 
@@ -50,10 +55,15 @@ export const ALLOWED_HOSTS = Object.freeze([
     'llmster.lmstudio.ai',
 ]);
 
+// The agent's lock of each platform, by the CPU architecture Node reports.
+const AGENT_LOCK_PLATFORMS = Object.freeze({ arm64: 'arm64', x64: 'amd64' });
+
 const ID_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 const VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
 const FILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$/;
 const EXTRACT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+// A path inside the runnable copy: plain segments, no '.', '..' or empty one.
+const EXECUTABLE_RE = /^(?!\.{1,2}(?:\/|$))[A-Za-z0-9._+-]{1,80}(?:\/(?!\.{1,2}(?:\/|$))[A-Za-z0-9._+-]{1,80}){0,7}$/;
 const DIST_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const MODULE_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
@@ -87,6 +97,22 @@ function text(value, field, { required = false, max = TEXT_MAX } = {}) {
     return value;
 }
 
+/** How an archive's file name says it is compressed ('gz' or 'zst'), or null when it names no archive this lock unpacks. */
+export function archiveCompression(name) {
+    if (/\.(tar\.gz|tgz)$/.test(name)) return 'gz';
+    return /\.tar\.zst$/.test(name) ? 'zst' : null;
+}
+
+/**
+ * The compression of an archive a runner of this kind unpacks, or null. A python runner's source
+ * archives are .tar.gz; .tar.zst is for archive runners. The validator and the installer both ask
+ * this, so a file one accepts as an archive is one the other unpacks.
+ */
+export function archiveCompressionFor(kind, name) {
+    const compression = archiveCompression(name);
+    return compression === 'zst' && kind !== 'archive' ? null : compression;
+}
+
 export function validateLockUrl(value, field) {
     let url;
     try {
@@ -101,6 +127,20 @@ export function validateLockUrl(value, field) {
         throw invalid(`${field} is not on an allowed host (${ALLOWED_HOSTS.join(', ')})`);
     }
     return url.href;
+}
+
+// A licence link is shown in the dashboard as a link: only a plain https URL is taken, never javascript: or data:.
+function link(value, field, { required = false } = {}) {
+    const url = text(value, field, { required, max: 400 });
+    if (url === null) return null;
+    let parsed;
+    try {
+        parsed = new URL(url);
+    } catch {
+        throw invalid(`${field} must be an https URL`);
+    }
+    if (parsed.protocol !== 'https:') throw invalid(`${field} must be an https URL`);
+    return url;
 }
 
 function validateFile(value, field, kind) {
@@ -119,7 +159,11 @@ function validateFile(value, field, kind) {
     if (into !== null && (typeof into !== 'string' || !EXTRACT_RE.test(into))) {
         throw invalid(`${field}.into must be a directory name`);
     }
-    const archive = /\.(tar\.gz|tgz)$/.test(value.name);
+    const archive = archiveCompressionFor(kind, value.name) !== null;
+    // Not an archive for this kind, yet named like one the installer would unpack: refused here, so no data file is ever taken for one.
+    if (!archive && archiveCompression(value.name) !== null) {
+        throw invalid(`${field} is a .tar.zst archive, which only an archive runner may list`);
+    }
     const wheel = value.name.endsWith('.whl');
     if (value.strip !== undefined) {
         if (value.strip !== 0 && value.strip !== 1) throw invalid(`${field}.strip must be 0 or 1`);
@@ -128,7 +172,7 @@ function validateFile(value, field, kind) {
     if (into !== null && (wheel || archive || extract !== null)) {
         throw invalid(`${field}.into is only for data files, not wheels or archives`);
     }
-    if (kind === 'archive' && !archive) throw invalid(`${field} must be a .tar.gz archive`);
+    if (kind === 'archive' && !archive) throw invalid(`${field} must be a .tar.gz archive or a .tar.zst archive`);
     if (kind === 'python' && !wheel && !(archive && extract) && into === null) {
         throw invalid(`${field} must be a wheel, a .tar.gz archive with extract, or a data file with into`);
     }
@@ -143,12 +187,27 @@ function validateFile(value, field, kind) {
     });
 }
 
-function validateCheck(value, field) {
+function validateCheck(value, field, { kind, requireExecutable = false } = {}) {
+    const needsExecutable = requireExecutable && kind === 'archive';
     if (value === undefined) {
+        if (needsExecutable) throw invalid(`${field}.executable is required: the install must prove the file the adapter launches`);
         return Object.freeze({ distributions: Object.freeze({}), imports: Object.freeze([]), gpuImports: Object.freeze([]), optionalLibraries: Object.freeze({}) });
     }
     if (!plainObject(value)) throw invalid(`${field} must be an object`);
-    onlyKeys(value, ['distributions', 'imports', 'gpuImports', 'optionalLibraries'], field);
+    onlyKeys(value, ['distributions', 'imports', 'gpuImports', 'optionalLibraries', 'executable'], field);
+    // The file the adapter launches, inside the runnable copy. After the unpack it must be there, a regular
+    // executable file: a wrong strip or a truncated archive unpacks to a copy without it, and the decompressor
+    // and tar may not say so.
+    let executable = null;
+    if (value.executable !== undefined) {
+        if (typeof value.executable !== 'string' || !EXECUTABLE_RE.test(value.executable)) {
+            throw invalid(`${field}.executable must be a relative path inside the runnable copy`);
+        }
+        executable = value.executable;
+    }
+    if (needsExecutable && executable === null) {
+        throw invalid(`${field}.executable is required: the install must prove the file the adapter launches`);
+    }
     // Libraries the CI check may find missing because this runner never uses
     // the feature that loads them; each needs its reason.
     const optionalLibraries = {};
@@ -184,10 +243,11 @@ function validateCheck(value, field) {
         imports: modules(value.imports, 'imports'),
         gpuImports: modules(value.gpuImports, 'gpuImports'),
         optionalLibraries: Object.freeze(optionalLibraries),
+        ...(executable ? { executable } : {}),
     });
 }
 
-function validateRunner(id, value) {
+function validateRunner(id, value, options) {
     const field = `runners.${id}`;
     if (!ID_RE.test(id)) throw invalid(`${field}: runner ids are 1-32 lowercase letters, digits, dot, dash or underscore`);
     if (!plainObject(value)) throw invalid(`${field} must be an object`);
@@ -199,8 +259,8 @@ function validateRunner(id, value) {
     if (![undefined, true, false].includes(value.licence.proprietary)) throw invalid(`${field}.licence.proprietary must be true or false`);
     const licence = Object.freeze({
         name: text(value.licence.name, `${field}.licence.name`, { required: true, max: 80 }),
-        url: text(value.licence.url, `${field}.licence.url`, { required: true, max: 400 }),
-        source: text(value.licence.source, `${field}.licence.source`, { max: 400 }),
+        url: link(value.licence.url, `${field}.licence.url`, { required: true }),
+        source: link(value.licence.source, `${field}.licence.source`),
         notice: text(value.licence.notice, `${field}.licence.notice`),
         requiresAcceptance: value.licence.requiresAcceptance === true,
         proprietary: value.licence.proprietary === true,
@@ -223,28 +283,36 @@ function validateRunner(id, value) {
         kind: value.kind,
         licence,
         files: Object.freeze(files),
-        check: validateCheck(value.check, `${field}.check`),
+        check: validateCheck(value.check, `${field}.check`, { kind: value.kind, ...options }),
     };
     entry.totalBytes = files.reduce((sum, file) => sum + file.size, 0);
-    // Names this exact entry: a changed lock entry needs a fresh runnable copy.
+    // Names this exact entry: a changed lock entry needs a fresh runnable copy. The launch file is part of it
+    // when the entry names one, so a copy marked ready before it was named is built again and proven; an
+    // entry that names none (every image-lock entry) has the digest it always had, so nothing installed on
+    // a GPU host is rebuilt.
     entry.digest = crypto.createHash('sha256')
-        .update(JSON.stringify({ id, version: entry.version, kind: entry.kind, files }))
+        .update(JSON.stringify({ id, version: entry.version, kind: entry.kind, files,
+            ...(entry.check.executable ? { check: { executable: entry.check.executable } } : {}) }))
         .digest('hex');
     return Object.freeze(entry);
 }
 
-export function validateRunnerLock(document) {
+/**
+ * `requireExecutable` makes `check.executable` mandatory for archive runners: the agent's own lock needs it,
+ * since nothing else proves the unpacked copy holds the binary the adapter launches. The image's lock does not.
+ */
+export function validateRunnerLock(document, { requireExecutable = false } = {}) {
     if (!plainObject(document)) throw invalid('The runner lock must be an object');
     onlyKeys(document, ['schema', 'runners'], 'lock');
     if (document.schema !== RUNNER_LOCK_SCHEMA) throw invalid(`Unsupported runner lock schema ${String(document.schema)}`);
     if (!plainObject(document.runners)) throw invalid('runners must be an object');
     const runners = {};
-    for (const [id, value] of Object.entries(document.runners)) runners[id] = validateRunner(id, value);
+    for (const [id, value] of Object.entries(document.runners)) runners[id] = validateRunner(id, value, { requireExecutable });
     return Object.freeze({ schema: RUNNER_LOCK_SCHEMA, runners: Object.freeze(runners) });
 }
 
 /** The image's lock, or an empty lock when the image has none (an older image). */
-export function loadRunnerLock(file = DEFAULT_RUNNER_LOCK, { fsApi = fs } = {}) {
+export function loadRunnerLock(file = DEFAULT_RUNNER_LOCK, { fsApi = fs, requireExecutable = false } = {}) {
     let text;
     try {
         text = fsApi.readFileSync(file, 'utf8');
@@ -252,5 +320,54 @@ export function loadRunnerLock(file = DEFAULT_RUNNER_LOCK, { fsApi = fs } = {}) 
         if (error?.code === 'ENOENT') return Object.freeze({ schema: RUNNER_LOCK_SCHEMA, runners: Object.freeze({}) });
         throw error;
     }
-    return validateRunnerLock(JSON.parse(text));
+    return validateRunnerLock(JSON.parse(text), { requireExecutable });
+}
+
+/** The agent's lock file for a CPU architecture (Node's `process.arch`), or null for an architecture that has none. */
+export function agentRunnerLockFile(arch = process.arch) {
+    if (!Object.hasOwn(AGENT_LOCK_PLATFORMS, arch)) return null;
+    return fileURLToPath(new URL(`../../catalog/runners.lock.linux-${AGENT_LOCK_PLATFORMS[arch]}.json`, import.meta.url));
+}
+
+/**
+ * The image's lock and the agent's lock of this platform, as one lock. An id in
+ * both keeps the image's entry (the image was proven and promoted as a whole),
+ * and `clashes` lists such ids so the caller can log them. `origin` says where
+ * each entry came from ('image' or 'agent'): the controller offers an agent
+ * entry only under a profile the runner has a policy for. An agent lock that
+ * cannot be read or is not valid is left out, and `ignored` says why; an
+ * invalid image lock still throws, as it always did.
+ */
+export function loadRunnerLocks({ image = DEFAULT_RUNNER_LOCK, agent = agentRunnerLockFile(), fsApi = fs } = {}) {
+    const fromImage = loadRunnerLock(image, { fsApi });
+    let fromAgent = Object.freeze({ schema: RUNNER_LOCK_SCHEMA, runners: Object.freeze({}) });
+    const ignored = [];
+    if (agent) {
+        try {
+            // The lock comes with the repository revision; a file that is a link could be pointed elsewhere by a later
+            // change that no path filter would notice. (A directory above it may be a link: the workspace mounts do that.)
+            if (fsApi.lstatSync(agent, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error('it is a symbolic link, not a file of the repository');
+            fromAgent = loadRunnerLock(agent, { fsApi, requireExecutable: true });
+        } catch (error) {
+            ignored.push({ file: agent, reason: error?.message || String(error) });
+        }
+    }
+    const runners = { ...fromImage.runners };
+    const origin = Object.fromEntries(Object.keys(fromImage.runners).map((id) => [id, 'image']));
+    const clashes = [];
+    for (const [id, entry] of Object.entries(fromAgent.runners)) {
+        if (Object.hasOwn(runners, id)) {
+            clashes.push(id);
+            continue;
+        }
+        runners[id] = entry;
+        origin[id] = 'agent';
+    }
+    return Object.freeze({
+        schema: RUNNER_LOCK_SCHEMA,
+        runners: Object.freeze(runners),
+        origin: Object.freeze(origin),
+        clashes: Object.freeze(clashes),
+        ignored: Object.freeze(ignored),
+    });
 }

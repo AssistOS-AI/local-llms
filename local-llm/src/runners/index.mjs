@@ -1,6 +1,6 @@
 import { codedError } from './params.mjs';
 import { ikLlamaCppRunner } from './ikLlamaCpp.mjs';
-import { llamaCppRunner } from './llamaCpp.mjs';
+import { llamaCppCpuRunner, llamaCppRunner } from './llamaCpp.mjs';
 import { lmStudioRunner } from './lmStudio.mjs';
 import { ollamaRunner } from './ollama.mjs';
 import { tabbyApiRunner } from './tabbyApi.mjs';
@@ -19,7 +19,9 @@ export const RUNNERS = Object.freeze({
     ollama: ollamaRunner,
     vllm: vllmRunner,
     tabbyapi: tabbyApiRunner,
-    lmstudio: lmStudioRunner
+    lmstudio: lmStudioRunner,
+    // Installed from the agent's lock, for the cpu profile only (DS004, DS005).
+    'llama.cpp-cpu': llamaCppCpuRunner
 });
 
 export function getRunner(id) {
@@ -45,23 +47,46 @@ export function defaultPorts(runners = RUNNERS) {
     return Object.freeze(ports);
 }
 
+/** The runner's parameter schema for a hardware profile, or null when it has no policy for it (DS005). */
+export function schemaOf(runner, profile = 'dedicated') {
+    if (typeof runner.paramSchemaFor === 'function') return runner.paramSchemaFor(profile);
+    return profile === 'dedicated' ? runner.paramSchema : null;
+}
+
+/**
+ * Whether a runner is offered on a profile. A runner that declares the profiles it serves
+ * (`profiles`) is offered on those alone; every other runner is offered on all of them. An
+ * undecided profile (null) is shown as dedicated, like the rest of the overview.
+ */
+export function offeredIn(runner, profile) {
+    return !Array.isArray(runner.profiles) || runner.profiles.includes(profile ?? 'dedicated');
+}
+
+/** Why a runner without parameters for the cpu profile cannot run there (DS005). */
+function cpuRefusal(displayName) {
+    return `${displayName} needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.`;
+}
+
 /**
  * What the overview and the dashboard learn about each runner, with its
  * parameter schema for the hardware profile (null where it has no policy for
- * that profile, DS005).
+ * that profile, DS005). `profileUnsupportedReason` is added only on the `cpu`
+ * profile, for a runner with no schema for it: the dedicated and unified
+ * profiles refuse such a runner through admission, as they always did, and an
+ * undecided profile (null) adds none, so every runner keeps its place until
+ * the profile is known.
  */
 export function runnerSummary(runner, profile = 'dedicated') {
     const { id, displayName, weightFormat, pinnedVersion, supported } = runner;
-    const paramSchema = typeof runner.paramSchemaFor === 'function'
-        ? runner.paramSchemaFor(profile)
-        : (profile === 'dedicated' ? runner.paramSchema : null);
+    const paramSchema = schemaOf(runner, profile);
     return {
         id, displayName, weightFormat, pinnedVersion, supported, paramSchema,
         basicParams: runner.basicParams || [],
         moeParams: runner.moeParams || [],
+        ...(profile === 'cpu' && paramSchema === null ? { profileUnsupportedReason: cpuRefusal(displayName) } : {}),
     };
 }
 
 export function runnerSummaries(runners = RUNNERS, profile = 'dedicated') {
-    return Object.values(runners).map((runner) => runnerSummary(runner, profile));
+    return Object.values(runners).filter((runner) => offeredIn(runner, profile)).map((runner) => runnerSummary(runner, profile));
 }

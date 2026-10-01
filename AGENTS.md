@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository provides one Ploinky agent, `local-llm/`: it runs open-weight LLMs on the machine's NVIDIA GPU, with runners chosen per model (llama.cpp, ik_llama.cpp, Ollama, vLLM, TabbyAPI, and LM Studio for internal use only), on x86 hosts with a GPU of their own and on NVIDIA DGX Spark (arm64, unified memory). Its image is built in `container-image-builds/images/local-llm` (amd64 `Dockerfile`, arm64 `Dockerfile.arm64`, published as one multi-arch index). The twelve shared-image agents the repository held before were retired; `local-llm/docs/specs/DS000-vision-and-scope.md` says what went with them.
+This repository provides one Ploinky agent, `local-llm/`: it runs open-weight LLMs on the machine's NVIDIA GPU when one is usable, and on the CPU otherwise, with runners chosen per model (llama.cpp, ik_llama.cpp, Ollama, vLLM, TabbyAPI, and LM Studio for internal use only), on x86 hosts with a GPU of their own and on NVIDIA DGX Spark (arm64, unified memory). Its image is built in `container-image-builds/images/local-llm` (amd64 `Dockerfile`, arm64 `Dockerfile.arm64`, published as one multi-arch index). The twelve shared-image agents the repository held before were retired; `local-llm/docs/specs/DS000-vision-and-scope.md` says what went with them.
 
 ## Mandatory Reading Order
 
@@ -25,6 +25,7 @@ This repository provides one Ploinky agent, `local-llm/`: it runs open-weight LL
 - `local-llm/manifest.json` — the agent's manifest (image pin, GPU declaration, chat endpoint).
 - `local-llm/src/` — controller, runner adapters, chat responder.
 - `local-llm/catalog/models.json` — seed model catalog (schema `local-llm.catalog/v3`).
+- `local-llm/catalog/runners.lock.linux-{amd64,arm64}.json` — the agent's own runner lock per platform (DS004); `.github/workflows/runner-lock-check.yml` installs its entries in CI.
 - `local-llm/IDE-plugins/` — the Local LLMs dashboard and Settings.
 - `local-llm/tests/` — tests.
 - `local-llm/docs/specs/` — specifications.

@@ -31,7 +31,13 @@ import {
 } from './downloader.mjs';
 import { freedBytes, orderCandidates, regularFilesIn, walkShared } from './workspaceReuse.mjs';
 import { splitGgufFiles, splitGgufName } from './catalog.mjs';
-import { deleteOllamaModel, deleteOllamaPartials, partialPullBytes, readOllamaManifest } from './ollamaStore.mjs';
+import {
+    deleteOllamaModel,
+    deleteOllamaPartials,
+    fetchOllamaRegistryManifest,
+    partialPullBytes,
+    readOllamaManifest,
+} from './ollamaStore.mjs';
 
 export function createWeightStores({
     dataDir,
@@ -48,6 +54,8 @@ export function createWeightStores({
     downloadSnapshot = downloadSnapshotFile,
     inspectSnapshot = inspectSnapshotFile,
     resolveSnapshot = resolveHuggingFaceSnapshot,
+    // Reads a tag's identity from the Ollama registry when a model is added (DS002).
+    resolveOllama = fetchOllamaRegistryManifest,
     acquire = artifactAcquisition,
     acquireSnapshot = snapshotFileAcquisition,
     verify = verifyArtifact,
@@ -248,7 +256,26 @@ export function createWeightStores({
             }
             return freed;
         },
-        pin: async (source) => source,
+        // On the committed cpu profile a tag is pinned when it is added: its manifest digest and the size of
+        // its layers, read from the registry (manifest only, nothing is pulled). What the entry already
+        // carries, typed or stored, must agree with the registry: a tag that moved since it was pinned, or a
+        // size that was typed wrong (the CPU admission trusts it), is refused and never pinned silently. An
+        // update that names a bare tag pins it afresh, which is how a moved tag is accepted. On every other
+        // profile, and while the profile is undecided, nothing is read and the source is kept as it is: Add and
+        // Run there are what they were before tags were pinned, and need no network.
+        async pin(source, { profile = null, signal } = {}) {
+            if (profile !== 'cpu') return source;
+            const current = await resolveOllama(source.tag, { signal });
+            if (source.manifestDigest && source.manifestDigest !== current.manifestDigest) {
+                throw new LocalLlmError('identity_changed', `The Ollama tag ${source.tag} now resolves to ${current.manifestDigest}, `
+                    + `not the pinned ${source.manifestDigest}; update the model entry without its manifestDigest and size to accept it.`);
+            }
+            if (source.size && source.size !== current.size) {
+                throw new LocalLlmError('identity_changed', `The Ollama tag ${source.tag} is now ${current.size} bytes, not the pinned ${source.size}; `
+                    + 'update the model entry without its manifestDigest and size to accept it.');
+            }
+            return { ...source, manifestDigest: current.manifestDigest, size: current.size };
+        },
         carryPin: (next) => next,
         // Used by the Ollama runner while it pulls.
         readManifest: (tag) => readOllamaManifest(ollamaModels, tag),

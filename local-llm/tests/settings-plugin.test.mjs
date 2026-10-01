@@ -6,6 +6,8 @@ import * as presenterModule from '../IDE-plugins/local-llm-settings/local-llm-se
 import {
     confirmMessage,
     fieldsFromSchema,
+    lookupCommitFor,
+    lookupFormatFor,
     mergeLogs,
     modelEntryFromForm,
     newRequestId,
@@ -15,7 +17,11 @@ import {
     runnerLabel,
     runnerOptions,
     shouldPoll,
+    sizingSourceFor,
+    stripBidi,
+    suggestModelId,
 } from '../IDE-plugins/local-llm-settings/local-llm-settings-model.js';
+import { validateModel } from '../src/controller/catalog.mjs';
 import { RUNNERS } from '../src/runners/index.mjs';
 
 const ROOT = new URL('..', import.meta.url);
@@ -223,6 +229,123 @@ test('the Add model form builds a registry entry for a GGUF file or an Ollama ta
     assert.deepEqual(modelEntryFromForm({ id: 'granite', sourceKind: 'ollama', tag: 'granite4:tiny-h', repo: 'ignored' }).sources, {
         ollama: { type: 'ollama', tag: 'granite4:tiny-h' },
     });
+});
+
+test('the Add model form builds entries for every source kind: GGUF, safetensors, EXL3 and Ollama', () => {
+    // The form offers the four kinds, in this order.
+    const html = fs.readFileSync(new URL('IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard.html', ROOT), 'utf8');
+    const select = /<custom-select[^>]*data-name="sourceKind"[^>]*>/.exec(html)?.[0] || '';
+    const offered = JSON.parse(decodeURIComponent(/data-options="([^"]*)"/.exec(select)?.[1] || '%5B%5D'));
+    assert.deepEqual(offered.map((option) => option.value), ['huggingface', 'hf', 'exl3', 'ollama']);
+    assert.ok(offered.every((option) => option.label.length > 0));
+    const base = { id: 'X-Model', repo: ' owner/repo ', revision: '', displayName: 'X', license: 'MIT', architecture: 'moe' };
+    const entries = {
+        gguf: modelEntryFromForm({ ...base, sourceKind: 'huggingface', file: 'm-Q4_K_M.gguf', quantization: 'Q4_K_M' }),
+        hf: modelEntryFromForm({ ...base, sourceKind: 'hf', file: 'ignored.gguf', quantization: 'ignored', tag: 'ignored' }),
+        exl3: modelEntryFromForm({ ...base, sourceKind: 'exl3', revision: '4.0bpw' }),
+        ollama: modelEntryFromForm({ id: 'x-tag', sourceKind: 'ollama', tag: 'qwen2.5:0.5b', repo: 'ignored', file: 'ignored.gguf' }),
+    };
+    assert.deepEqual(entries.gguf.sources, { gguf: { type: 'huggingface', repo: 'owner/repo', file: 'm-Q4_K_M.gguf', revision: 'main', quantization: 'Q4_K_M' } });
+    assert.deepEqual(entries.hf.sources, { hf: { type: 'hf-snapshot', repo: 'owner/repo', revision: 'main' } });
+    assert.deepEqual(entries.exl3.sources, { exl3: { type: 'hf-snapshot', repo: 'owner/repo', revision: '4.0bpw' } });
+    assert.deepEqual(entries.ollama.sources, { ollama: { type: 'ollama', tag: 'qwen2.5:0.5b' } });
+    assert.deepEqual([entries.hf.id, entries.hf.architecture, entries.hf.license, entries.hf.displayName], ['x-model', 'moe', 'MIT', 'X']);
+    // Every one is an entry the agent accepts, as the form builds it.
+    for (const [kind, entry] of Object.entries(entries)) assert.doesNotThrow(() => validateModel(entry), kind);
+    // An unknown kind is a GGUF file, as before.
+    assert.ok(modelEntryFromForm({ ...base, sourceKind: 'modelscope', file: 'a.gguf' }).sources.gguf);
+    // Sizing passes through for every kind, and the sizing source only where the entry has that source.
+    const sized = { contextLength: '32768', layers: '24', kvBytesPerToken: '12288' };
+    const fits = (kind, sizingSource) => modelEntryFromForm({ ...base, ...sized, sourceKind: kind, file: 'm.gguf', tag: 't:1', sizingSource }).sizingSource;
+    assert.equal(fits('huggingface', 'gguf-header'), 'gguf-header');
+    assert.equal(fits('hf', 'gguf-header'), undefined);
+    assert.equal(fits('ollama', 'gguf-header'), undefined);
+    assert.equal(fits('hf', 'config.json'), 'config.json');
+    assert.equal(fits('exl3', 'config.json'), 'config.json');
+    assert.equal(fits('huggingface', 'config.json'), undefined);
+    for (const kind of ['huggingface', 'hf', 'exl3', 'ollama']) assert.equal(fits(kind, 'manual'), 'manual', kind);
+    for (const junk of ['guess', '', null, 7, undefined]) assert.equal(fits('huggingface', junk), undefined, String(junk));
+    const hf = modelEntryFromForm({ ...base, ...sized, sourceKind: 'hf', sizingSource: 'config.json' });
+    assert.deepEqual([hf.contextLength, hf.memory], [32768, { layers: 24, kvBytesPerToken: 12288 }]);
+    assert.doesNotThrow(() => validateModel(hf));
+    const gguf = modelEntryFromForm({ ...base, ...sized, sourceKind: 'huggingface', file: 'm.gguf', sizingSource: 'gguf-header' });
+    assert.doesNotThrow(() => validateModel(gguf));
+    // A lookup format for each kind that has a lookup; an Ollama tag has none.
+    assert.deepEqual(['huggingface', 'hf', 'exl3', 'ollama', 'constructor'].map(lookupFormatFor), ['gguf', 'hf', 'exl3', null, null]);
+});
+
+test('the sizing source follows what a lookup filled in: untouched values keep it, changed ones are manual, none stays absent', () => {
+    const lookup = {
+        source: 'gguf-header', repo: 'owner/repo', revision: 'main', file: 'm.gguf', architecture: 'dense',
+        values: { contextLength: '32768', layers: '24', kvBytesPerToken: '12288' },
+    };
+    const form = { repo: 'owner/repo', revision: '', file: 'm.gguf', architecture: 'dense', contextLength: '32768', layers: '24', kvBytesPerToken: '12288' };
+    assert.equal(sizingSourceFor(form, lookup), 'gguf-header');
+    assert.equal(sizingSourceFor({ ...form, revision: 'main', contextLength: ' 32768 ' }, lookup), 'gguf-header');
+    for (const change of [{ layers: '25' }, { kvBytesPerToken: '' }, { contextLength: '16384' }, { architecture: 'moe' }, { file: 'other.gguf' }, { repo: 'owner/other' }, { revision: 'dev' }]) {
+        assert.equal(sizingSourceFor({ ...form, ...change }, lookup), 'manual', JSON.stringify(change));
+    }
+    // Every value cleared: nothing is left to attribute to anyone.
+    assert.equal(sizingSourceFor({ ...form, contextLength: '', layers: '', kvBytesPerToken: '' }, lookup), undefined);
+    // Without a lookup the entry keeps today's shape, however much was typed; a header that gave no value for a field stays empty.
+    assert.equal(sizingSourceFor(form, null), undefined);
+    assert.equal(sizingSourceFor(form, { ...lookup, source: 'guess' }), undefined);
+    const partial = { ...lookup, values: { contextLength: '32768', layers: '24', kvBytesPerToken: '' } };
+    assert.equal(sizingSourceFor({ ...form, kvBytesPerToken: '' }, partial), 'gguf-header');
+    assert.equal(sizingSourceFor(form, partial), 'manual');
+    // A snapshot's lookup has no file.
+    const snapshot = { source: 'config.json', repo: 'owner/repo', revision: 'main', architecture: 'dense', values: lookup.values };
+    assert.equal(sizingSourceFor({ ...form, file: 'whatever' }, snapshot), 'config.json');
+    // Suggested ids are valid ids.
+    const idPattern = /^[a-z0-9][a-z0-9._-]{1,63}$/;
+    for (const [repo, quantization, expected] of [
+        ['Qwen/Qwen2.5-0.5B-Instruct-GGUF', 'Q4_K_M', 'qwen2.5-0.5b-instruct-gguf-q4_k_m'],
+        ['unsloth/gpt-oss-20b-GGUF', 'UD-Q3_K_XL', 'gpt-oss-20b-gguf-ud-q3_k_xl'],
+        ['owner/Name With Spaces!', '', 'name-with-spaces'],
+        ['owner/' + 'x'.repeat(100), 'Q4_K_M', 'x'.repeat(64)],
+        ['owner/---', '', 'model'], ['', '', 'model'],
+    ]) {
+        const id = suggestModelId(repo, quantization);
+        assert.equal(id, expected, repo);
+        assert.match(id, idPattern, repo);
+    }
+});
+
+test('a looked-up commit replaces the revision in every Hugging Face source, and only a real commit does', () => {
+    const commit = 'f'.repeat(40);
+    const base = { id: 'x-model', repo: 'owner/repo', revision: 'dev', file: 'm.gguf' };
+    assert.equal(modelEntryFromForm({ ...base, sourceKind: 'huggingface', commit }).sources.gguf.revision, commit);
+    assert.equal(modelEntryFromForm({ ...base, sourceKind: 'hf', commit }).sources.hf.revision, commit);
+    assert.equal(modelEntryFromForm({ ...base, sourceKind: 'exl3', commit }).sources.exl3.revision, commit);
+    assert.equal(modelEntryFromForm({ ...base, revision: '', sourceKind: 'huggingface', commit }).sources.gguf.revision, commit, 'an empty revision too');
+    // Anything that is not 40 lowercase hex characters is ignored, and the revision as typed stands (main when empty).
+    for (const junk of [undefined, null, '', 'main', 'F'.repeat(40), 'f'.repeat(39), 'f'.repeat(41), `${commit} `, 'g'.repeat(40), 7, ['f'.repeat(40)]]) {
+        assert.equal(modelEntryFromForm({ ...base, sourceKind: 'huggingface', commit: junk }).sources.gguf.revision, 'dev', String(junk));
+    }
+    assert.equal(modelEntryFromForm({ ...base, revision: '', sourceKind: 'hf', commit: 'nope' }).sources.hf.revision, 'main');
+    // An Ollama tag has no revision to replace.
+    assert.deepEqual(modelEntryFromForm({ id: 'x-tag', sourceKind: 'ollama', tag: 'q:1', commit }).sources, { ollama: { type: 'ollama', tag: 'q:1' } });
+    // The entries validate with a commit as their revision.
+    for (const kind of ['huggingface', 'hf', 'exl3']) assert.doesNotThrow(() => validateModel(modelEntryFromForm({ ...base, sourceKind: kind, commit })), kind);
+    // The commit comes from the lookup only while the form still names what it read.
+    const lookup = { source: 'gguf-header', repo: 'owner/repo', revision: 'main', file: 'm.gguf', architecture: 'dense', commit, values: {} };
+    const form = { repo: 'owner/repo', revision: '', file: 'm.gguf' };
+    assert.equal(lookupCommitFor(form, lookup), commit);
+    assert.equal(lookupCommitFor({ ...form, revision: 'main' }, lookup), commit);
+    assert.equal(lookupCommitFor({ ...form, layers: '99', kvBytesPerToken: '1', architecture: 'moe' }, lookup), commit, 'edited sizing does not change the files');
+    for (const change of [{ repo: 'owner/other' }, { revision: 'dev' }, { file: 'other.gguf' }]) assert.equal(lookupCommitFor({ ...form, ...change }, lookup), undefined, JSON.stringify(change));
+    assert.equal(lookupCommitFor(form, null), undefined);
+    assert.equal(lookupCommitFor(form, { ...lookup, commit: undefined }), undefined);
+    assert.equal(lookupCommitFor(form, { ...lookup, commit: 'main' }), undefined);
+    // A snapshot's lookup names no file, so any file in the form is beside the point.
+    assert.equal(lookupCommitFor({ ...form, file: 'whatever.gguf' }, { ...lookup, file: undefined }), commit);
+    // A lookup that sized nothing (no source) still carries its commit, and gives no sizing source.
+    assert.equal(lookupCommitFor(form, { ...lookup, source: null }), commit);
+    assert.equal(sizingSourceFor({ ...form, layers: '24' }, { ...lookup, source: null }), undefined);
+    // stripBidi drops the bidirectional controls and nothing else.
+    assert.equal(stripBidi('a\u202Eb\u2066c\u2069d'), 'abcd');
+    assert.equal(stripBidi('\u200E\u200F'), '\u200E\u200F', 'only the ranges named: embeddings, overrides and isolates');
+    assert.equal(stripBidi(null), '');
 });
 
 test('tool results are parsed, and tool failures surface their message', () => {

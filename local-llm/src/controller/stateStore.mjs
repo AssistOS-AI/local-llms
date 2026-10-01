@@ -75,6 +75,8 @@ function normalizeState(value) {
     if (value.params && typeof value.params === 'object' && !Array.isArray(value.params)) state.params = value.params;
     if (value.requests && typeof value.requests === 'object' && !Array.isArray(value.requests)) state.requests = requestMap(value.requests);
     if (Array.isArray(value.registry)) state.registry = value.registry;
+    // Set once the `cpu` profile has been added to stored user entries (DS002); absent means not yet.
+    if (typeof value.cpuProfileMigration === 'string' && value.cpuProfileMigration) state.cpuProfileMigration = value.cpuProfileMigration;
     if (value.ollamaPulls && typeof value.ollamaPulls === 'object' && !Array.isArray(value.ollamaPulls)) {
         state.ollamaPulls = value.ollamaPulls;
     }

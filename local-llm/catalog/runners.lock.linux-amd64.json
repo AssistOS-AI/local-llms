@@ -1,0 +1,26 @@
+{
+  "schema": "local-llm.runners-lock/v1",
+  "runners": {
+    "llama.cpp-cpu": {
+      "version": "b11295",
+      "kind": "archive",
+      "licence": {
+        "name": "MIT",
+        "url": "https://github.com/ggml-org/llama.cpp/blob/b11295/LICENSE",
+        "source": "https://github.com/ggml-org/llama.cpp",
+        "requiresAcceptance": false
+      },
+      "files": [
+        {
+          "name": "llama-b11295-bin-ubuntu-x64.tar.gz",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11295/llama-b11295-bin-ubuntu-x64.tar.gz",
+          "size": 17531126,
+          "sha256": "cd54d7dcf8818acc69c54dfc559b36da5f693d30b223e8dde87b4da4570664ed"
+        }
+      ],
+      "check": {
+        "executable": "llama-server"
+      }
+    }
+  }
+}

@@ -11,6 +11,7 @@ export function controllerHandlers(controller) {
         cancelDownload: () => controller.cancelDownload(),
         deleteWeights: (args) => controller.deleteWeights(args),
         addModel: (args) => controller.addModel(args.model),
+        lookupModel: (args) => controller.lookupModel(args),
         updateModel: (args) => controller.updateModel(args.model),
         removeModel: (args) => controller.removeModel(args),
         installRunner: (args) => controller.installRunner(args),

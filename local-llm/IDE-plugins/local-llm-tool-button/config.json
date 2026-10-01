@@ -7,7 +7,7 @@
   ],
   "locationOrder": 295,
   "label": "Local LLMs",
-  "tooltip": "Run open-weight models on this workspace's GPU",
+  "tooltip": "Run open-weight models on this workspace's GPU, or on its CPU when it has no usable NVIDIA GPU",
   "icon": "./icon.svg",
   "presenter": "LocalLlmToolButton",
   "type": "embedded",

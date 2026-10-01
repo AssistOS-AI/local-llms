@@ -26,14 +26,17 @@ export const CATALOG_SCHEMA = 'local-llm.catalog/v3';
 
 
 const ID_RE = /^[a-z0-9][a-z0-9._-]{1,63}$/;
-const HF_REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}\/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
-const HF_FILE_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/;
-const HF_REVISION_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/;
+export const HF_REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}\/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
+export const HF_FILE_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/;
+export const HF_REVISION_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/;
 const COMMIT_RE = /^[0-9a-f]{40}$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const GIT_OID_RE = /^[0-9a-f]{40}$/;
 const OLLAMA_TAG_RE = /^[a-z0-9][a-z0-9._-]{0,63}(?:\/[a-z0-9][a-z0-9._-]{0,63})?(?::[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$/;
 const TEXT_MAX = 400;
+// Where an entry's sizing fields (contextLength, memory.layers, memory.kvBytesPerToken) came from (DS002): the GGUF header
+// read at lookup (read again from the verified file after the download), the pinned config.json of a snapshot, or typed by hand.
+export const SIZING_SOURCES = Object.freeze(['gguf-header', 'config.json', 'manual']);
 
 function invalid(message, field) {
     return new LocalLlmError('invalid_model', message, { field });
@@ -300,6 +303,7 @@ export function validateModel(value, { seed = false } = {}) {
     onlyKeys(value, [
         'id', 'displayName', 'description', 'license', 'architecture', 'totalParams', 'activeParams',
         'contextLength', 'requiresJinja', 'mtp', 'profiles', 'sources', 'memory', 'recommended', 'validated', 'unified', 'seed',
+        'sizingSource',
     ], 'model');
     // A capability of the weights (a multi-token-prediction head), not a
     // measurement, so a user entry may declare it too. Without it, MTP is
@@ -324,7 +328,7 @@ export function validateModel(value, { seed = false } = {}) {
     const profiles = value.profiles === undefined ? [...PROFILES] : value.profiles;
     if (!Array.isArray(profiles) || profiles.length === 0 || profiles.some((profile) => !PROFILES.includes(profile))
         || new Set(profiles).size !== profiles.length) {
-        throw invalid(`profiles must list one or both of ${PROFILES.join(', ')}`, 'profiles');
+        throw invalid(`profiles must list one or more of ${PROFILES.join(', ')}`, 'profiles');
     }
     const recommended = validatePerProfile(value.recommended, 'recommended', (entry, field) => {
         if (!plainObject(entry)) throw invalid(`${field} must be an object of parameters`, field);
@@ -335,6 +339,7 @@ export function validateModel(value, { seed = false } = {}) {
     });
     const validated = validatePerProfile(value.validated, 'validated', (entry, field) => optionalText(entry, field, 600));
     if (!seed) assertNoCertification(value, validated);
+    const sizingSource = validateSizingSource(value.sizingSource, sources);
     return Object.freeze({
         id: value.id,
         displayName: optionalText(value.displayName, 'displayName', 120) || value.id,
@@ -352,8 +357,19 @@ export function validateModel(value, { seed = false } = {}) {
         recommended,
         validated,
         unified: validateUnified(value.unified),
+        ...(sizingSource ? { sizingSource } : {}),
         seed,
     });
+}
+
+// The sizing source must match a source the entry has, so its warning and the re-read after a download never describe
+// a file the entry does not use.
+function validateSizingSource(value, sources) {
+    if (value === undefined || value === null) return undefined;
+    if (!SIZING_SOURCES.includes(value)) throw invalid(`sizingSource must be one of ${SIZING_SOURCES.join(', ')}`, 'sizingSource');
+    if (value === 'gguf-header' && !sources.gguf) throw invalid('sizingSource gguf-header needs a gguf source', 'sizingSource');
+    if (value === 'config.json' && !sources.hf && !sources.exl3) throw invalid('sizingSource config.json needs an hf or exl3 source', 'sizingSource');
+    return value;
 }
 
 // A user entry cannot certify itself. Stored user entries carry the empty
@@ -440,14 +456,23 @@ export function loadSeedCatalog(file = path.join(import.meta.dirname, '..', '..'
  * or an earlier user entry (two can exist after a downgrade hid one).
  */
 /**
- * Registry entries the catalog cannot read (an earlier schema, or invalid),
- * with the reason, so the overview can say so instead of hiding them silently.
+ * Registry entries the catalog cannot read (an earlier schema, or invalid) and
+ * valid ones a seed's id hides (a seed added after the entry was), with the
+ * reason, so the overview can say so instead of hiding them silently.
  */
-export function unsupportedRegistryEntries(registry = []) {
+export function unsupportedRegistryEntries(registry = [], seed = []) {
+    const seedIds = new Set(seed.map((model) => model.id));
     const unsupported = [];
     for (const entry of registry) {
         try {
-            validateModel(entry, { seed: false });
+            const model = validateModel(entry, { seed: false });
+            if (seedIds.has(model.id)) {
+                unsupported.push({
+                    id: model.id,
+                    // A seed is offered only in the profiles it lists, so this says nothing about where it is offered.
+                    reason: 'its id is also the id of a model that ships with this agent, which takes the id, so this entry is not offered; remove it, or add the model again under another id',
+                });
+            }
         } catch (error) {
             unsupported.push({ id: typeof entry?.id === 'string' ? entry.id.slice(0, 64) : null, reason: error.message });
         }

@@ -245,29 +245,68 @@ function optionalNumber(value) {
     return Number.isInteger(number) ? number : text;
 }
 
+// Where the form's sizing values came from (DS002); the same three the agent accepts in `sizingSource`.
+const SIZING_SOURCES = Object.freeze(['gguf-header', 'config.json', 'manual']);
+// The weight format the lookup tool is asked for, by the form's Source kind.
+const LOOKUP_FORMATS = Object.freeze({ huggingface: 'gguf', hf: 'hf', exl3: 'exl3' });
+const SIZING_FIELDS = Object.freeze(['contextLength', 'layers', 'kvBytesPerToken']);
+
+const COMMIT_RE = /^[a-f0-9]{40}$/;
+
 /**
- * A user registry entry from the Add model form: one GGUF file from a
- * Hugging Face repository (the gguf format), or one Ollama library tag, and
- * the optional sizing data the memory estimate uses (contextLength,
- * memory.layers, memory.kvBytesPerToken) and whether its weights have a
- * multi-token-prediction head (mtp).
+ * Text from Hugging Face or a model file, for display: without the bidirectional controls (U+202A to U+202E and
+ * U+2066 to U+2069) that can reorder the text around them. HTML escaping is separate and still applies.
+ */
+export function stripBidi(value = '') {
+    return String(value ?? '').replace(/[\u202A-\u202E\u2066-\u2069]/g, '');
+}
+
+/** The lookup tool's `format` for a Source kind, or null for a kind with no lookup (an Ollama tag). */
+export function lookupFormatFor(kind) {
+    return Object.hasOwn(LOOKUP_FORMATS, kind) ? LOOKUP_FORMATS[kind] : null;
+}
+
+// The revision of a Hugging Face source: the commit a lookup read (`raw.commit`, 40 hex), so Add pins exactly the files whose
+// sizing the form showed even if the branch moved since; otherwise the revision as typed, main when empty.
+function revision(raw) {
+    if (typeof raw.commit === 'string' && COMMIT_RE.test(raw.commit)) return raw.commit;
+    return String(raw.revision || '').trim() || 'main';
+}
+
+/**
+ * A user registry entry from the Add model form. The Source kind is one of:
+ * `huggingface` (one GGUF file, read by llama.cpp and every other GGUF runner),
+ * `hf` (a safetensors snapshot, read by vLLM), `exl3` (an EXL3 snapshot, read
+ * by TabbyAPI) or `ollama` (one library tag). The optional sizing data is what
+ * the memory estimate uses (contextLength, memory.layers,
+ * memory.kvBytesPerToken); `sizingSource` says where it came from when a
+ * lookup filled it (gguf-header, config.json), or manual when it was changed
+ * by hand afterwards. `commit`, when a lookup filled the form, replaces the
+ * revision. `mtp` says whether the weights have a multi-token-prediction head.
  */
 export function modelEntryFromForm(raw = {}) {
     const id = String(raw.id || '').trim().toLowerCase();
     const displayName = String(raw.displayName || '').trim();
-    const kind = raw.sourceKind === 'ollama' ? 'ollama' : 'huggingface';
+    const kind = ['ollama', 'hf', 'exl3'].includes(raw.sourceKind) ? raw.sourceKind : 'huggingface';
     const entry = { id, architecture: raw.architecture === 'moe' ? 'moe' : 'dense', sources: {} };
     if (displayName) entry.displayName = displayName;
     const license = String(raw.license || '').trim();
     if (license) entry.license = license;
     if (kind === 'ollama') {
         entry.sources.ollama = { type: 'ollama', tag: String(raw.tag || '').trim() };
+    } else if (kind === 'hf' || kind === 'exl3') {
+        // A snapshot is every top-level model file of the repository at one commit; the agent pins them when the entry is added.
+        entry.sources[kind] = {
+            type: 'hf-snapshot',
+            repo: String(raw.repo || '').trim(),
+            revision: revision(raw),
+        };
     } else {
         const source = {
             type: 'huggingface',
             repo: String(raw.repo || '').trim(),
             file: String(raw.file || '').trim(),
-            revision: String(raw.revision || '').trim() || 'main',
+            revision: revision(raw),
         };
         const quantization = String(raw.quantization || '').trim();
         if (quantization) source.quantization = quantization;
@@ -283,7 +322,57 @@ export function modelEntryFromForm(raw = {}) {
     const kvBytesPerToken = optionalNumber(raw.kvBytesPerToken);
     if (kvBytesPerToken !== undefined) memory.kvBytesPerToken = kvBytesPerToken;
     if (Object.keys(memory).length) entry.memory = memory;
+    // Only a source the entry has: a GGUF header sizes a GGUF entry, a config.json a snapshot.
+    const fits = { 'gguf-header': kind === 'huggingface', 'config.json': kind === 'hf' || kind === 'exl3', manual: true };
+    if (SIZING_SOURCES.includes(raw.sizingSource) && fits[raw.sizingSource]) entry.sizingSource = raw.sizingSource;
     return entry;
+}
+
+// Whether the form still names what the lookup read: the same repository, revision and (for a GGUF lookup) file.
+function sameLookupSource(raw, lookup) {
+    const text = (value) => String(value ?? '').trim();
+    return text(raw.repo) === lookup.repo && (text(raw.revision) || 'main') === lookup.revision
+        && (lookup.file === undefined || text(raw.file) === lookup.file);
+}
+
+/**
+ * The `sizingSource` to record for the form as it stands. `lookup` is what the
+ * last lookup filled in: `{ source, repo, revision, file, architecture, commit,
+ * values: { contextLength, layers, kvBytesPerToken } }`, or null. Values that
+ * are still the looked-up ones, for the same repository, revision and file,
+ * keep the lookup's source. Values changed by hand afterwards, or for another
+ * source, are `manual`. With no lookup the entry keeps today's shape (no
+ * `sizingSource`), whatever was typed.
+ */
+export function sizingSourceFor(raw = {}, lookup = null) {
+    if (!lookup || !SIZING_SOURCES.includes(lookup.source)) return undefined;
+    const text = (value) => String(value ?? '').trim();
+    const typed = SIZING_FIELDS.some((name) => text(raw[name]) !== '');
+    if (!typed) return undefined;
+    const sameSource = sameLookupSource(raw, lookup) && (raw.architecture === 'moe' ? 'moe' : 'dense') === lookup.architecture;
+    const unchanged = SIZING_FIELDS.every((name) => text(raw[name]) === text(lookup.values?.[name]));
+    return sameSource && unchanged ? lookup.source : 'manual';
+}
+
+/**
+ * The commit to add: the one the lookup read, while the form still names the repository, revision and file it read, whatever was
+ * done to the sizing values. Undefined otherwise (another repository, or no lookup), and the typed revision is pinned as before.
+ */
+export function lookupCommitFor(raw = {}, lookup = null) {
+    if (!lookup || typeof lookup.commit !== 'string' || !COMMIT_RE.test(lookup.commit)) return undefined;
+    return sameLookupSource(raw, lookup) ? lookup.commit : undefined;
+}
+
+/** A model id (2-64 lowercase letters, digits, dot, dash, underscore) suggested from a repository and a quantization. */
+export function suggestModelId(repo, quantization = '') {
+    const name = String(repo || '').split('/').pop() || 'model';
+    const id = `${name}${quantization ? `-${quantization}` : ''}`.toLowerCase()
+        .replace(/[^a-z0-9._-]+/g, '-')
+        .replace(/-{2,}/g, '-')
+        .replace(/^[^a-z0-9]+/, '')
+        .slice(0, 64)
+        .replace(/[^a-z0-9]+$/, '');
+    return id.length >= 2 ? id : 'model';
 }
 
 /** Merge newly received log lines, keeping the most recent ones. */

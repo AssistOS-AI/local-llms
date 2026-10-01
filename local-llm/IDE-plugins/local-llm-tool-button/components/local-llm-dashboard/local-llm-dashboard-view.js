@@ -11,14 +11,19 @@ import {
     formatMiB,
     progressPercent,
     runnerLabel,
+    stripBidi,
 } from '../../../local-llm-settings/local-llm-settings-model.js';
 
 export const ACTIVE_PHASES = new Set(['downloading', 'copying', 'verifying', 'pulling', 'starting', 'loading', 'ready', 'stopping']);
 const DOWNLOAD_PHASES = new Set(['downloading', 'copying', 'verifying', 'pulling', 'paused']);
 
-/** The runners that get a column in the Models table: those that can run here, and that this deployment's operator did not leave off. */
+/**
+ * The runners that get a column in the Models table: those that can run here, that this deployment's
+ * operator did not leave off, and that have a policy for the hardware profile (DS005).
+ */
 export function tableRunners(runners = []) {
-    return (Array.isArray(runners) ? runners : []).filter((runner) => runner?.supported && runner.enabled !== false);
+    return (Array.isArray(runners) ? runners : [])
+        .filter((runner) => runner?.supported && runner.enabled !== false && !runner.profileUnsupportedReason);
 }
 
 function labelOf(runnerId, runners = []) {
@@ -58,8 +63,43 @@ function statCard(name, title, value, meta = '', extra = '') {
         </div>`;
 }
 
-/** The GPU, RAM and disk cards, or on a GPU that shares system memory, one unified-memory card and disk. `gpu` may come from a fresher status poll. */
-export function hardwareCardsHtml(hardware = {}, gpuOverride = null) {
+// Why no NVIDIA GPU is used, led by the cause of the profile decision (DS005).
+const CPU_LEADS = Object.freeze({
+    absent: 'no NVIDIA GPU is attached',
+    unusable: 'the NVIDIA GPU cannot be used',
+    mismatch: 'this image\'s CUDA runners were not built for this GPU',
+    'unreadable-timeout': 'the NVIDIA GPU could not be read for 60 s',
+});
+
+// The cpu profile: the compute device and why it is the CPU, the memory pool with the floor kept free, and the disk.
+function cpuCardsHtml(hardware, decision, limits) {
+    const memory = hardware.memory || {};
+    const disk = hardware.disk || {};
+    const cores = Number.isFinite(hardware.cores) ? hardware.cores : (Number.isFinite(hardware.cpus) ? hardware.cpus : null);
+    const lead = CPU_LEADS[decision?.cause] || 'no NVIDIA GPU is used';
+    const why = String(decision?.reason || '').replace(/\.+\s*$/, '');
+    // A container memory limit caps the pool, so the controller says what the pool and what is available are.
+    const pool = Number.isFinite(limits?.poolBytes) ? limits.poolBytes : memory.totalBytes;
+    const available = Number.isFinite(limits?.availableBytes) ? limits.availableBytes : memory.availableBytes;
+    const used = Number.isFinite(pool) && Number.isFinite(available) ? pool - available : null;
+    return [
+        statCard('compute', 'Compute', cores === null ? 'CPU' : `CPU · ${cores} ${cores === 1 ? 'core' : 'cores'}`,
+            `No NVIDIA GPU is used: ${lead}${why ? `. ${why}` : ''}.`),
+        statCard('memory', 'Memory available', `${formatMiB(available)} of ${formatMiB(pool)}`,
+            Number.isFinite(limits?.floorBytes) ? `keeps ${formatMiB(limits.floorBytes)} free for the workspace` : '',
+            meter({ label: 'Memory in use', value: used, max: pool, text: `${formatMiB(used)} in use` })),
+        statCard('disk', 'Disk free', formatBytes(disk.freeBytes),
+            Number.isFinite(disk.totalBytes) ? `of ${formatBytes(disk.totalBytes)}, for model weights` : 'for model weights'),
+    ].join('');
+}
+
+/**
+ * The GPU, RAM and disk cards; on a GPU that shares system memory, one unified-memory card and disk; on the
+ * cpu profile (`profile`, with the controller's `decision` and pool `limits`), the Compute, Memory and disk
+ * cards. `gpu` may come from a fresher status poll.
+ */
+export function hardwareCardsHtml(hardware = {}, gpuOverride = null, { profile = null, decision = null, limits = null } = {}) {
+    if (profile === 'cpu') return cpuCardsHtml(hardware, decision, limits);
     const gpu = gpuOverride?.available ? { ...(hardware.gpu || {}), ...gpuOverride } : (hardware.gpu || {});
     const cards = [];
     const memory = hardware.memory || {};
@@ -129,7 +169,7 @@ export function statusCardHtml(status = {}) {
     const report = status.runnerReport || {};
     const reportParts = [
         report.device ? `device ${report.device}` : '',
-        report.offloaded ? `${report.offloaded.layers}/${report.offloaded.of} layers on the GPU` : '',
+        report.offloaded?.layers > 0 ? `${report.offloaded.layers}/${report.offloaded.of} layers on the GPU` : '',
         Number.isFinite(report.totalMiB) ? `buffers ${report.totalMiB.toLocaleString('en-US')} MiB` : '',
     ].filter(Boolean);
     if (reportParts.length) lines.push(`<div class="settings-card-meta">${escapeHtml(reportParts.join(' · '))}</div>`);
@@ -290,6 +330,29 @@ function installProgress(state) {
 }
 
 /**
+ * The Runners tab's intro, from the overview: the runners the image itself
+ * contains, and whether any other runner can be installed here. Plain text.
+ */
+export function runnersIntroText(runners = [], { profile = null } = {}) {
+    const list = (Array.isArray(runners) ? runners : []).filter(Boolean);
+    if (!list.length) return '';
+    const inImage = list.filter((runner) => runner.supported !== false && !runner.install)
+        .map((runner) => runner.displayName || runner.id);
+    const inImageText = inImage.length ? `In this image: ${inImage.join(', ')}.` : 'No runner is part of this image.';
+    // On the cpu profile only the runners with a CPU policy (a parameter schema for it) run models.
+    const onCpu = list.filter((runner) => runner.supported !== false && runner.paramSchema).map((runner) => runner.displayName || runner.id);
+    const first = profile === 'cpu' && onCpu.length ? `${inImageText} On this machine models run on the CPU, with: ${onCpu.join(', ')}.` : inImageText;
+    // Install is offered only for a runner with a policy for the profile, so the intro says so only then.
+    const onDemand = list.filter((runner) => runner.install);
+    const second = onDemand.some((runner) => !runner.profileUnsupportedReason)
+        ? 'Other runners are installed here, only when you press Install: their pinned files are downloaded, checked and set up on this workspace\'s disk.'
+        : onDemand.length
+            ? 'No other runner can be installed while models run on the CPU.'
+            : 'No other runner can be installed on this image.';
+    return `${first} ${second}`;
+}
+
+/**
  * The Runners tab: every runner with its state. Runners in the image have no
  * actions; on-demand runners show their size, licence and install progress,
  * with Install or Uninstall (never a second Install while one runs).
@@ -299,11 +362,14 @@ export function runnersPanelHtml(runners = []) {
     const cards = runners.map((runner) => {
         const install = runner.install;
         const off = runner.enabled === false;
-        const status = off
+        // A runner the image lacks says so in the platform's words, never through
+        // the version probe's "Executable not found" (that is `reason`).
+        const lacking = (runner.supported === false ? runner.unsupportedReason : '') || runner.profileUnsupportedReason || '';
+        const status = lacking || (off
             ? `${runner.installed ? 'installed · ' : ''}not enabled on this deployment`
             : runner.installed
                 ? `${runner.version || install?.version || ''} · installed`
-                : (install ? 'not installed' : (runner.reason || 'not available'));
+                : (install ? 'not installed' : (runner.reason || 'not available')));
         let body = '';
         let actions = '';
         if (install) {
@@ -320,7 +386,7 @@ export function runnersPanelHtml(runners = []) {
                 ${state.phase === 'error' && state.error ? `<div class="settings-status error">${escapeHtml(state.error)}</div>` : ''}`;
             if (install.installed && !install.installing) {
                 actions = `<button type="button" class="gray-button" data-local-action="uninstallRunner ${escapeHtml(runner.id)}">Uninstall</button>`;
-            } else if (!install.installing && !busy && !off) {
+            } else if (!install.installing && !busy && !off && !runner.profileUnsupportedReason) {
                 actions = `<button type="button" class="general-button" data-local-action="installRunner ${escapeHtml(runner.id)}">Install</button>`;
             }
         }
@@ -359,12 +425,16 @@ export function installMessage(runner = {}) {
     return `${head}${terms} ${notice}${accepts}`.trimEnd();
 }
 
-/** GPU and RAM estimate meters for the run form. */
-export function estimateHtml({ admission = null, context = null, error = '' } = {}, hardware = {}) {
+/**
+ * GPU and RAM estimate meters for the run form. On the cpu profile the controller's pool `limits` say
+ * what is available under a container memory limit, which the host's figure does not.
+ */
+export function estimateHtml({ admission = null, context = null, error = '' } = {}, hardware = {}, { limits = null } = {}) {
     if (error) return `<div class="settings-status error">${escapeHtml(error)}</div>`;
     const estimate = admission?.estimate || {};
     const gpu = hardware.gpu || {};
-    const memory = hardware.memory || {};
+    const memory = { ...(hardware.memory || {}) };
+    if (Number.isFinite(limits?.availableBytes)) memory.availableBytes = limits.availableBytes;
     const parts = [];
     if (Number.isFinite(estimate.unifiedBytes) && Number.isFinite(memory.totalBytes)) {
         // Unified memory: one estimate against the shared pool (DS005).
@@ -385,7 +455,8 @@ export function estimateHtml({ admission = null, context = null, error = '' } = 
     if (Number.isFinite(estimate.ramBytes) && Number.isFinite(memory.availableBytes)) {
         parts.push(`
             <div class="local-llm-estimate-row">
-                <span class="settings-card-meta">RAM about ${escapeHtml(formatMiB(estimate.ramBytes))} of ${escapeHtml(formatMiB(memory.availableBytes))} available</span>
+                <span class="settings-card-meta">RAM about ${escapeHtml(formatMiB(estimate.ramBytes))} of ${escapeHtml(formatMiB(memory.availableBytes))} available${
+    Number.isFinite(estimate.floorBytes) ? escapeHtml(`, keeps ${formatMiB(estimate.floorBytes)} free`) : ''}</span>
                 ${meter({ label: 'Estimated RAM', value: estimate.ramBytes, max: memory.availableBytes, text: `RAM about ${formatMiB(estimate.ramBytes)}` })}
             </div>`);
     }
@@ -395,4 +466,83 @@ export function estimateHtml({ admission = null, context = null, error = '' } = 
         ${parts.join('')}
         ${context ? `<div class="settings-card-meta">Context: ${escapeHtml(contextLabel(context))}</div>` : ''}
         ${summary ? `<div class="settings-card-meta">${escapeHtml(summary)}</div>` : ''}`;
+}
+
+const GATED_LABELS = Object.freeze({
+    auto: 'Gated (access is granted automatically)',
+    manual: 'Gated (access needs approval)',
+});
+
+function gatedLabel(gated) {
+    if (gated === false) return 'Not gated';
+    if (Object.hasOwn(GATED_LABELS, gated)) return GATED_LABELS[gated];
+    return typeof gated === 'string' && gated ? `Gated (${gated})` : 'Gated status unknown';
+}
+
+const count = (value) => (Number.isFinite(value) ? value.toLocaleString('en-US') : '—');
+
+// What was read for the sizing, in one line; every value is data from Hugging Face or from a file, so it is escaped.
+function sizingLine(sizing) {
+    if (!sizing || typeof sizing !== 'object') return '';
+    const from = sizing.source === 'gguf-header' ? 'the GGUF header' : sizing.source === 'config.json' ? 'config.json' : 'the model files';
+    const memory = sizing.memory || {};
+    const parts = [
+        `${count(memory.layers)} layers`,
+        `context ${count(sizing.contextLength)} tokens`,
+        Number.isFinite(memory.kvBytesPerToken) ? `KV cache ${count(memory.kvBytesPerToken)} bytes per token (f16)` : 'KV cache size not read, so the estimate uses its default',
+        String(sizing.architecture) === 'moe' ? 'mixture of experts' : 'dense',
+    ];
+    // A note can repeat a key name from the model's own files, so it loses bidi controls like the licence does.
+    const notes = Array.isArray(sizing.notes) ? sizing.notes.filter((note) => typeof note === 'string' && note).map((note) => stripBidi(note)) : [];
+    return `<div class="settings-card-meta">Read from ${escapeHtml(from)}: ${escapeHtml(parts.join(' · '))}${notes.length ? escapeHtml(` (${notes.join('; ')})`) : ''}</div>`;
+}
+
+/**
+ * The Add model form's lookup results (DS002): what `local_llm_model_lookup`
+ * returned, or its error. A GGUF lookup lists one radio row per file or split
+ * set, `file · quantization · size`, with the repository's gated status; a
+ * snapshot lookup lists a summary. Everything in `result` is text from Hugging
+ * Face or from a model file, so every value is escaped; a row's action names
+ * its index in `result.files`, never a file name.
+ */
+export function lookupResultsHtml(result = {}, { selectedFile = '' } = {}) {
+    if (result?.error) return `<div class="settings-status error">${escapeHtml(result.error)}</div>`;
+    if (result?.message) return `<div class="settings-card-meta">${escapeHtml(result.message)}</div>`;
+    const files = Array.isArray(result?.files) ? result.files : [];
+    const gated = result?.gated === 'auto' || result?.gated === 'manual' || (typeof result?.gated === 'string' && result.gated !== '');
+    const badges = [
+        `<span class="status-badge">${escapeHtml(gatedLabel(result?.gated))}</span>`,
+        result?.license ? `<span class="status-badge">Licence ${escapeHtml(stripBidi(result.license))}</span>` : '',
+    ].filter(Boolean).join('');
+    const head = `
+        <div class="settings-card-meta">${escapeHtml(result?.repo ?? '')} at commit ${escapeHtml(String(result?.commit ?? '').slice(0, 12))}</div>
+        <div class="local-llm-lookup-badges">${badges}</div>
+        ${gated ? '<div class="settings-card-meta">Downloading a gated model needs a token: run `ploinky var HF_TOKEN &lt;token&gt;` on the host, then restart local-llm.</div>' : ''}`;
+    const cut = result?.truncated
+        ? '<div class="settings-card-meta">The list is cut short: the repository has more files or folders than a lookup reads.</div>' : '';
+    if (result?.format === 'hf' || result?.format === 'exl3') {
+        const weights = files.filter((entry) => String(entry?.file).endsWith('.safetensors'));
+        const total = files.reduce((sum, entry) => sum + (Number.isFinite(entry?.size) ? entry.size : 0), 0);
+        return `${head}
+        <div class="settings-card-meta">${escapeHtml(`${files.length} files, ${weights.length} of them safetensors · ${formatBytes(total)} in all`)}</div>
+        ${sizingLine(result.sizing) || '<div class="settings-card-meta">No config.json to size the model from: the estimate uses its defaults.</div>'}${cut}`;
+    }
+    if (files.length === 0) {
+        return `${head}
+        <div class="settings-card-meta">No GGUF file in this repository can be added (a file must be stored with Git LFS, and a split file needs all of its parts).</div>${cut}`;
+    }
+    const rows = files.map((entry, index) => {
+        const shards = Array.isArray(entry?.shards) ? `${entry.shards.length} parts` : '';
+        const text = [entry?.quantization || 'quantization unknown', formatBytes(entry?.size), shards].filter(Boolean).join(' · ');
+        return `
+            <li class="local-llm-lookup-row">
+                <label>
+                    <input type="radio" name="lookupFile" value="${index}" data-local-action="pickLookupFile ${index}"${entry?.file === selectedFile ? ' checked' : ''}>
+                    <span class="local-llm-lookup-file">${escapeHtml(entry?.file ?? '')}</span>
+                    <span class="settings-card-meta">${escapeHtml(text)}${gated ? '<span class="status-badge">gated</span>' : ''}</span>
+                </label>
+            </li>`;
+    }).join('');
+    return `${head}
+        <ul class="local-llm-lookup-files" role="radiogroup" aria-label="GGUF files">${rows}</ul>${sizingLine(result.sizing)}${cut}`;
 }

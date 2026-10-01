@@ -1,0 +1,184 @@
+# The install check of the agent's own runner lock (local-llm/catalog/runners.lock.linux-<arch>.json, DS004).
+#
+# An entry of that lock reaches workspaces with the repository revision they
+# run, not with an image that was proven and promoted. This workflow is what
+# stands in for that promotion: it installs every entry of the platform's lock
+# inside the published image, on that architecture's own runner, exactly as the
+# agent does (download, verify, unpack, then the checks of the binary and of the
+# library links), and a change that adds or edits an entry must pass it on both
+# architectures.
+#
+# It runs for every pull request and on demand, and never on a push, so pushing
+# a branch starts nothing. It has no workflow-level path filter, so it can be a
+# required status check without blocking pull requests that touch none of this:
+# the first job looks at what the pull request changes and, when it touches no
+# lock, not this workflow and nothing the install check loads or launches (all of
+# local-llm/src/controller/, local-llm/src/runners/, local-llm/src/errors.mjs and
+# local-llm/tools/), the per-architecture jobs are skipped and the
+# `runner-lock-check` job at the end still reports success. THE GATE HOLDS ONLY
+# ONCE `runner-lock-check` IS A REQUIRED STATUS CHECK ON `main` (a repository
+# setting, not something this file can turn on); until then an entry is held back
+# by review alone.
+
+name: runner-lock-check
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Does this change touch the runner locks or their installer?
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      needed: ${{ steps.detect.outputs.needed }}
+    env:
+      EVENT: ${{ github.event_name }}
+    steps:
+      - name: Checkout this revision
+        # Two commits deep: for a pull request this is GitHub's merge commit, whose first parent is the base.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Detect
+        id: detect
+        # On demand, the check always runs. For a pull request it runs when the diff against the base touches a lock, the
+        # workflow itself, or any file the install check loads or launches: everything under src/controller/ (the
+        # installer, the lock reader, the downloader and what they import), src/runners/ (the adapters whose launch
+        # paths the locks name), src/errors.mjs and tools/. If the diff cannot be read, or grep fails, it runs: the
+        # only way to "not needed" is a diff that was read and had no such file.
+        # The names go to a file, never through a pipe: `grep -q` leaves at its first match, and a writer still
+        # feeding it dies of SIGPIPE, which `pipefail` turns into "no match" once the list is bigger than a pipe's
+        # buffer (about 64 KiB of names), and a change to a lock would pass as "not needed". They are NUL-separated
+        # and never quoted (`-z`, core.quotePath=false): by default git writes a path with non-ASCII characters
+        # as "local-llm/tools/\303\274ber.mjs", which no pattern anchored on a name would match.
+        run: |
+          set -euo pipefail
+          needed=true
+          if [ "$EVENT" = pull_request ]; then
+            list="$(mktemp)"
+            trap 'rm -f "$list"' EXIT
+            if git -c core.quotePath=false diff --name-only -z HEAD^1 HEAD > "$list"; then
+              found=0
+              LC_ALL=C grep -z -E '^(local-llm/src/(controller|runners)/.+|local-llm/src/errors\.mjs|local-llm/tools/.+|local-llm/catalog/runners\.lock\.linux-[a-z0-9]+\.json|\.github/workflows/runner-lock-check\.yml)$' "$list" > /dev/null || found=$?
+              case "$found" in
+                1) needed=false ;;
+                *) needed=true ;;
+              esac
+            fi
+          fi
+          echo "needed=$needed" | tee -a "$GITHUB_OUTPUT"
+
+  install-check:
+    name: Install every agent-lock entry on ${{ matrix.arch }}
+    needs: changes
+    if: ${{ needs.changes.outputs.needed == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: ubuntu-24.04
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 90
+    env:
+      IMAGE: docker.io/assistos/local-llm:latest
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - name: Checkout this revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Free runner disk
+        # An archive is downloaded, staged, decompressed and unpacked inside the container.
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Pull the published image
+        run: |
+          set -euo pipefail
+          docker pull -q "$IMAGE"
+          mkdir -p "$RUNNER_TEMP/runner-lock-check"
+          docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE" | tee "$RUNNER_TEMP/runner-lock-check/image.txt"
+
+      - name: Install each lock entry, one at a time
+        # Each runner is installed in its own container, removed afterwards,
+        # with the repository's local-llm directory mounted read-only as /code:
+        # the same installer code, lock and tool the agent runs. The check
+        # requires every archive entry to name the file its adapter launches
+        # (check.executable), and proves it: the file is there and executable,
+        # ldd finds its libraries, and --version runs under the CPU environment
+        # and names the pinned version. A proprietary entry is never downloaded
+        # here (installing it would accept its terms on behalf of whoever runs
+        # CI); it is validated from the lock with no network. A lock with no
+        # entries has nothing to check.
+        run: |
+          set -euo pipefail
+          lock="local-llm/catalog/runners.lock.linux-${ARCH}.json"
+          test -f "$lock"
+          evidence="$RUNNER_TEMP/runner-lock-check"
+          status=0
+          for runner in $(node -e 'for (const id of Object.keys(require(process.argv[1]).runners)) console.log(id)' "$PWD/$lock"); do
+            df -h / >> "$evidence/disk.txt"
+            net=(); mode=()
+            if node -e 'process.exit(require(process.argv[2]).runners[process.argv[1]].licence.proprietary === true ? 0 : 1)' "$runner" "$PWD/$lock"; then
+              net=(--network=none); mode=(--validate-only)
+            fi
+            if docker run --rm "${net[@]}" --cap-drop=ALL --security-opt=no-new-privileges \
+                -v "$PWD/local-llm:/code:ro" "$IMAGE" \
+                node /code/tools/runner_install_check.mjs "$runner" "${mode[@]}" --require-executable \
+                --lock "/code/catalog/runners.lock.linux-${ARCH}.json" > "$evidence/$runner.json" \
+                && { [ "${#mode[@]}" -eq 0 ] || grep -q '"downloaded": false' "$evidence/$runner.json"; }; then
+              echo "$runner: passed${mode[*]:+ (validated, not downloaded)}"
+            else
+              echo "$runner: failed"
+              status=1
+            fi
+            cat "$evidence/$runner.json"
+          done
+          df -h / >> "$evidence/disk.txt"
+          exit "$status"
+
+      - name: Upload install report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runner-lock-check-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-lock-check
+          if-no-files-found: ignore
+          retention-days: 30
+
+  runner-lock-check:
+    # The one job to require: a skipped matrix job would leave its per-architecture name pending forever, so this one
+    # always runs and is red only when the change needed the install check and it did not pass on every architecture.
+    name: runner-lock-check
+    needs: [changes, install-check]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      DETECTED: ${{ needs.changes.result }}
+      NEEDED: ${{ needs.changes.outputs.needed }}
+      INSTALLED: ${{ needs.install-check.result }}
+    steps:
+      - name: Report
+        run: |
+          set -euo pipefail
+          echo "detect: $DETECTED; install check needed: ${NEEDED:-unknown}; install check: $INSTALLED"
+          [ "$DETECTED" = success ] || { echo "the change could not be classified"; exit 1; }
+          if [ "$NEEDED" = true ]; then
+            [ "$INSTALLED" = success ] || { echo "the install check did not pass on every architecture"; exit 1; }
+          else
+            echo "this change touches no runner lock, not this workflow and nothing the install check loads or launches: nothing to install"
+          fi

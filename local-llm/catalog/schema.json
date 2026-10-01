@@ -137,6 +137,12 @@
               "additionalProperties": {
                 "type": "object"
               }
+            },
+            "cpu": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object"
+              }
             }
           }
         },
@@ -158,6 +164,13 @@
                 "type": "string",
                 "maxLength": 600
               }
+            },
+            "cpu": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 600
+              }
             }
           }
         },
@@ -168,10 +181,19 @@
           "items": {
             "enum": [
               "dedicated",
-              "unified"
+              "unified",
+              "cpu"
             ]
           },
-          "description": "The hardware profiles in which the model is offered (default: both)."
+          "description": "The hardware profiles in which the model is offered (default: every profile)."
+        },
+        "sizingSource": {
+          "enum": [
+            "gguf-header",
+            "config.json",
+            "manual"
+          ],
+          "description": "Where contextLength, memory.layers and memory.kvBytesPerToken came from: the GGUF header read at lookup (read again from the verified file after the download), the pinned config.json of a snapshot, or typed by hand. Optional; gguf-header needs a gguf source and config.json an hf or exl3 source."
         },
         "unified": {
           "type": "object",

@@ -94,6 +94,7 @@ local-llm-dashboard .local-llm-add-form[hidden],
 local-llm-dashboard .local-llm-detail-info[hidden],
 local-llm-dashboard .settings-empty-state[hidden],
 local-llm-dashboard .local-llm-field[hidden],
+local-llm-dashboard .settings-card-meta[hidden],
 local-llm-dashboard .local-llm-advanced[hidden] {
     display: none;
 }
@@ -212,6 +213,45 @@ local-llm-dashboard .local-llm-field {
 
 local-llm-dashboard .local-llm-field .form-label {
     margin-bottom: 0;
+}
+
+local-llm-dashboard .local-llm-lookup {
+    display: grid;
+    gap: var(--space-sm);
+    min-width: 0;
+}
+
+local-llm-dashboard .local-llm-lookup:empty {
+    display: none;
+}
+
+local-llm-dashboard .local-llm-lookup-files {
+    display: grid;
+    gap: var(--space-xs);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+local-llm-dashboard .local-llm-lookup-row label {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: var(--space-xs) var(--space-sm);
+    align-items: center;
+}
+
+local-llm-dashboard .local-llm-lookup-row .settings-card-meta {
+    grid-column: 2;
+}
+
+local-llm-dashboard .local-llm-lookup-file {
+    overflow-wrap: anywhere;
+}
+
+local-llm-dashboard .local-llm-lookup-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-xs);
 }
 
 local-llm-dashboard .local-llm-estimate,

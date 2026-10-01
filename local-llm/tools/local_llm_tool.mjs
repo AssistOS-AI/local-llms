@@ -36,6 +36,7 @@ export const TOOL_OPERATIONS = Object.freeze({
         }),
     },
     local_llm_model_add: { op: 'addModel', args: (input) => ({ model: input.model }) },
+    local_llm_model_lookup: { op: 'lookupModel', args: (input) => ({ ...input }) },
     local_llm_model_update: { op: 'updateModel', args: (input) => ({ model: input.model }) },
     local_llm_model_remove: { op: 'removeModel', args: (input) => ({ modelId: input.modelId }) },
     // Who accepted a licence comes from the verified caller, never from input.

@@ -120,12 +120,14 @@ function normalizeParams(params = {}, { model, profile = 'dedicated' } = {}) {
 }
 
 // The operator's switch (DS004) for unified memory. On a dedicated GPU vLLM is
-// not gated. `null` means the profile is not decided and this image could run
-// on unified memory (the controller passes `dedicated` for an image that never
-// can): that fails closed, since the switch is what decides there. A caller
-// that names no profile gets the same fail-closed answer.
+// not gated, and neither is it on the CPU profile: the switch is about unified
+// memory, and vLLM has no CPU policy, so admission refuses it there. `null`
+// means the profile is not decided and this image could run on unified memory
+// (the controller passes `dedicated` for an image that never can): that fails
+// closed, since the switch is what decides there. A caller that names no
+// profile gets the same fail-closed answer.
 function enabled(env = {}, profile = null) {
-    if (profile === 'dedicated' || env[VLLM_UNIFIED_SWITCH] === UNIFIED_SWITCH_VALUE) return { enabled: true, reason: null };
+    if (profile === 'dedicated' || profile === 'cpu' || env[VLLM_UNIFIED_SWITCH] === UNIFIED_SWITCH_VALUE) return { enabled: true, reason: null };
     const turnOn = `The operator can turn it on with ploinky var ${VLLM_UNIFIED_SWITCH} ${UNIFIED_SWITCH_VALUE}; `
         + 'it has not been measured on this hardware.';
     return {

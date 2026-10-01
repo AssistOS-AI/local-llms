@@ -26,6 +26,39 @@ test('every tool is admin-tagged, runs from /code, and names itself', () => {
     }
 });
 
+// The keywords Ploinky's AgentServer accepts in a tool's inputSchema, per type (ploinky Agent/server/inputSchema.mjs,
+// `commonKeywords` and `keywordsByType`). Any other keyword makes AgentServer refuse to build the schema, the MCP
+// handshake then fails, and the agent never becomes ready: a `default` on a string did exactly that.
+const AGENT_SERVER_KEYWORDS = Object.freeze({
+    common: ['type', 'description', 'enum'],
+    object: ['properties', 'required', 'additionalProperties', 'minProperties', 'maxProperties'],
+    array: ['items', 'minItems', 'maxItems', 'uniqueItems'],
+    string: ['minLength', 'maxLength', 'pattern', 'format'],
+    number: ['minimum', 'maximum'],
+    integer: ['minimum', 'maximum'],
+    boolean: [],
+    null: [],
+});
+
+function unsupportedKeywords(spec, at) {
+    const allowed = AGENT_SERVER_KEYWORDS[spec?.type];
+    if (!allowed || spec.type === 'common') return [`${at}: no supported type`];
+    const found = Object.keys(spec).filter((key) => !AGENT_SERVER_KEYWORDS.common.includes(key) && !allowed.includes(key)).map((key) => `${at}: ${key}`);
+    for (const [name, field] of Object.entries(spec.type === 'object' ? spec.properties || {} : {})) found.push(...unsupportedKeywords(field, `${at}.properties.${name}`));
+    if (spec.type === 'array' && spec.items) found.push(...unsupportedKeywords(spec.items, `${at}.items`));
+    return found;
+}
+
+test('every tool inputSchema uses only the keywords Ploinky AgentServer accepts, so the agent completes its MCP handshake', () => {
+    const config = read('mcp-config.json');
+    for (const tool of config.tools) {
+        assert.deepEqual(unsupportedKeywords(tool.inputSchema, '$'), [], tool.name);
+    }
+    // The rule itself: a default on a string, or a keyword of another type, is caught.
+    assert.deepEqual(unsupportedKeywords({ type: 'object', properties: { f: { type: 'string', enum: ['a'], default: 'a' } } }, '$'), ['$.properties.f: default']);
+    assert.deepEqual(unsupportedKeywords({ type: 'array', items: { type: 'integer', pattern: 'x' } }, '$'), ['$.items: pattern']);
+});
+
 test('the manifest declares GPU access and its own shared memory, nothing else, and closes the agent-port relay', () => {
     const manifest = read('manifest.json');
     // containerSecurity.gpu implies the one CDI device (Ploinky D14), so no
@@ -334,4 +367,73 @@ test('with no GPU in the container, the reason says what to run on the host', as
         env: { PLOINKY_GPU_STATUS: 'unavailable', PLOINKY_GPU_REASON: revoked },
     });
     assert.equal(told.reason, `No GPU is attached to this agent: ${revoked}`);
+});
+
+// The JSON Schema keywords the tools' input schemas use; any other keyword that could decide a value is refused,
+// so a schema cannot be accepted by a check that does not understand it.
+const ANNOTATIONS = new Set(['description', 'title', 'default']);
+
+function violations(schema, value, where = 'input') {
+    const found = [];
+    const kind = (candidate) => (Array.isArray(candidate) ? 'array' : candidate === null ? 'null' : typeof candidate);
+    for (const keyword of Object.keys(schema)) {
+        if (!['type', 'enum', 'properties', 'required', 'additionalProperties', 'pattern', 'minLength', 'maxLength', 'minimum', 'maximum'].includes(keyword) && !ANNOTATIONS.has(keyword)) {
+            found.push(`${where}: unsupported keyword ${keyword}`);
+        }
+    }
+    if (schema.type === 'integer' ? !Number.isInteger(value) : schema.type && kind(value) !== schema.type) found.push(`${where}: not ${schema.type}`);
+    if (schema.enum && !schema.enum.includes(value)) found.push(`${where}: ${JSON.stringify(value)} is not one of ${schema.enum.join(', ')}`);
+    if (typeof value === 'string') {
+        if (schema.pattern && !new RegExp(schema.pattern).test(value)) found.push(`${where}: does not match ${schema.pattern}`);
+        if (schema.minLength !== undefined && value.length < schema.minLength) found.push(`${where}: too short`);
+        if (schema.maxLength !== undefined && value.length > schema.maxLength) found.push(`${where}: too long`);
+    }
+    if (typeof value === 'number') {
+        if (schema.minimum !== undefined && value < schema.minimum) found.push(`${where}: below ${schema.minimum}`);
+        if (schema.maximum !== undefined && value > schema.maximum) found.push(`${where}: above ${schema.maximum}`);
+    }
+    if (kind(value) === 'object' && schema.properties) {
+        for (const key of schema.required || []) if (!Object.hasOwn(value, key)) found.push(`${where}.${key}: required`);
+        for (const [key, inner] of Object.entries(value)) {
+            if (Object.hasOwn(schema.properties, key)) found.push(...violations(schema.properties[key], inner, `${where}.${key}`));
+            else if (schema.additionalProperties === false) found.push(`${where}.${key}: not allowed`);
+        }
+    }
+    return found;
+}
+
+test('install, preview and Run accept llama.cpp-cpu through the tool contract', async () => {
+    const config = read('mcp-config.json');
+    const schemaOf = (name) => config.tools.find((tool) => tool.name === name).inputSchema;
+    const seen = [];
+    const call = async (op, args) => { seen.push([op, args]); return { ok: true }; };
+    const authInfo = { user: { roles: ['admin'], email: 'admin@example.com' } };
+    const inputs = {
+        local_llm_runner_install: { runnerId: 'llama.cpp-cpu' },
+        local_llm_overview: { preview: { modelId: 'small-cpu', runnerId: 'llama.cpp-cpu' } },
+        local_llm_run: { requestId: 'request-cpu-0001', modelId: 'small-cpu', runnerId: 'llama.cpp-cpu', params: { ctxSize: 2048 } },
+        local_llm_weights_delete: { modelId: 'small-cpu', runnerId: 'llama.cpp-cpu' },
+        local_llm_runner_uninstall: { runnerId: 'llama.cpp-cpu' },
+    };
+    for (const [name, input] of Object.entries(inputs)) {
+        // The schema the Router enforces takes the id, and the tool hands it to the controller as it is.
+        assert.deepEqual(violations(schemaOf(name), input), [], name);
+        await handleTool(name, input, { authInfo, call });
+    }
+    assert.deepEqual(seen, [
+        ['installRunner', { runnerId: 'llama.cpp-cpu', acceptLicence: false, acceptedBy: 'admin@example.com' }],
+        ['overview', { preview: { modelId: 'small-cpu', runnerId: 'llama.cpp-cpu' } }],
+        ['run', { requestId: 'request-cpu-0001', modelId: 'small-cpu', runnerId: 'llama.cpp-cpu', params: { ctxSize: 2048 }, replace: false }],
+        ['deleteWeights', { modelId: 'small-cpu', runnerId: 'llama.cpp-cpu' }],
+        ['uninstallRunner', { runnerId: 'llama.cpp-cpu' }],
+    ]);
+    // The check is not vacuous: a runner no enum lists, a bad id and an extra field are all refused.
+    for (const name of ['local_llm_run', 'local_llm_weights_delete']) {
+        assert.notDeepEqual(violations(schemaOf(name), { ...inputs[name], runnerId: 'llama.cpp-gpu' }), [], name);
+    }
+    assert.notDeepEqual(violations(schemaOf('local_llm_overview'), { preview: { modelId: 'small-cpu', runnerId: 'llama.cpp-gpu' } }), [], 'local_llm_overview');
+    for (const name of ['local_llm_runner_install', 'local_llm_runner_uninstall']) {
+        assert.notDeepEqual(violations(schemaOf(name), { runnerId: 'Not A Runner' }), [], name);
+        assert.notDeepEqual(violations(schemaOf(name), { ...inputs[name], url: 'https://evil.example.com/x' }), [], name);
+    }
 });
