@@ -466,8 +466,7 @@
               "hf",
               "exl3"
             ],
-            "default": "gguf",
-            "description": "gguf lists GGUF files; hf and exl3 list a snapshot's files."
+            "description": "gguf (when left out) lists GGUF files; hf and exl3 list a snapshot's files."
           },
           "file": {
             "type": "string",

@@ -574,7 +574,9 @@ test('lookup refuses bad repository, revision and file input before any request'
     assert.equal(properties.revision.pattern, HF_REVISION_RE.source);
     assert.equal(properties.revision.maxLength, 128);
     assert.deepEqual(properties.format.enum, ['gguf', 'hf', 'exl3']);
-    assert.equal(properties.format.default, 'gguf');
+    // No `default` in the schema: Ploinky AgentServer refuses that keyword on a string and the agent never becomes ready.
+    // The default lives in the code instead, which the normalisation above shows (no format gives gguf).
+    assert.equal(Object.hasOwn(properties.format, 'default'), false);
     assert.deepEqual(properties.provider.enum, ['huggingface']);
     assert.equal(properties.file.maxLength, 512);
     assert.ok(new RegExp(properties.file.pattern).test('dir/M-Q4_K_M.gguf') && !new RegExp(properties.file.pattern).test('../x.gguf'));

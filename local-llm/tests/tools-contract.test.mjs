@@ -26,6 +26,39 @@ test('every tool is admin-tagged, runs from /code, and names itself', () => {
     }
 });
 
+// The keywords Ploinky's AgentServer accepts in a tool's inputSchema, per type (ploinky Agent/server/inputSchema.mjs,
+// `commonKeywords` and `keywordsByType`). Any other keyword makes AgentServer refuse to build the schema, the MCP
+// handshake then fails, and the agent never becomes ready: a `default` on a string did exactly that.
+const AGENT_SERVER_KEYWORDS = Object.freeze({
+    common: ['type', 'description', 'enum'],
+    object: ['properties', 'required', 'additionalProperties', 'minProperties', 'maxProperties'],
+    array: ['items', 'minItems', 'maxItems', 'uniqueItems'],
+    string: ['minLength', 'maxLength', 'pattern', 'format'],
+    number: ['minimum', 'maximum'],
+    integer: ['minimum', 'maximum'],
+    boolean: [],
+    null: [],
+});
+
+function unsupportedKeywords(spec, at) {
+    const allowed = AGENT_SERVER_KEYWORDS[spec?.type];
+    if (!allowed || spec.type === 'common') return [`${at}: no supported type`];
+    const found = Object.keys(spec).filter((key) => !AGENT_SERVER_KEYWORDS.common.includes(key) && !allowed.includes(key)).map((key) => `${at}: ${key}`);
+    for (const [name, field] of Object.entries(spec.type === 'object' ? spec.properties || {} : {})) found.push(...unsupportedKeywords(field, `${at}.properties.${name}`));
+    if (spec.type === 'array' && spec.items) found.push(...unsupportedKeywords(spec.items, `${at}.items`));
+    return found;
+}
+
+test('every tool inputSchema uses only the keywords Ploinky AgentServer accepts, so the agent completes its MCP handshake', () => {
+    const config = read('mcp-config.json');
+    for (const tool of config.tools) {
+        assert.deepEqual(unsupportedKeywords(tool.inputSchema, '$'), [], tool.name);
+    }
+    // The rule itself: a default on a string, or a keyword of another type, is caught.
+    assert.deepEqual(unsupportedKeywords({ type: 'object', properties: { f: { type: 'string', enum: ['a'], default: 'a' } } }, '$'), ['$.properties.f: default']);
+    assert.deepEqual(unsupportedKeywords({ type: 'array', items: { type: 'integer', pattern: 'x' } }, '$'), ['$.items: pattern']);
+});
+
 test('the manifest declares GPU access and its own shared memory, nothing else, and closes the agent-port relay', () => {
     const manifest = read('manifest.json');
     // containerSecurity.gpu implies the one CDI device (Ploinky D14), so no
