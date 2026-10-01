@@ -141,8 +141,19 @@ test('LL.known-zero', () => {
 test('LL.unknown-distinct', () => {
     const none = observeMemoryBudget({ maxText: 'max\n', currentText: '123\n' });
     assert.deepEqual({ ...none }, { memoryReadState: 'known', finiteMemoryBytes: null, headroomBytes: null, reasonCode: null });
-    // An unreadable limit is not a limit, unless a finite one was established.
-    assert.equal(observeMemoryBudget({ maxText: null, currentText: null }).finiteMemoryBytes, null);
+    // An absent memory.max (undefined) is no limit, as on hosts without one.
+    assert.deepEqual({ ...observeMemoryBudget({ maxText: undefined, currentText: undefined }) },
+        { memoryReadState: 'known', finiteMemoryBytes: null, headroomBytes: null, reasonCode: null });
+    // A memory.max that exists but cannot be read (null) or is malformed is
+    // unknown, never unlimited, even with no limit established before.
+    for (const maxText of [null, '', 'abc', '-1', '1.5', ' 12 34', 'MAX']) {
+        assert.deepEqual({ ...observeMemoryBudget({ maxText, currentText: '1' }) },
+            { memoryReadState: 'unknown', finiteMemoryBytes: null, headroomBytes: null, reasonCode: 'budget_unreadable' }, String(maxText));
+    }
+    // An established finite limit is kept whether the file vanished or broke.
+    for (const maxText of [undefined, null, 'garbage']) {
+        assert.equal(observeMemoryBudget({ maxText, currentText: '1', established: 4 * GIB }).finiteMemoryBytes, 4 * GIB, String(maxText));
+    }
     const established = observeMemoryBudget({ maxText: null, currentText: '1', established: 4 * GIB });
     assert.deepEqual({ ...established }, { memoryReadState: 'unknown', finiteMemoryBytes: 4 * GIB, headroomBytes: null, reasonCode: 'budget_unreadable' });
     // Missing or malformed current use under a finite limit: unknown, null, never 0.
@@ -160,6 +171,14 @@ test('LL.unknown-distinct', () => {
     const gone = fakeFs({});
     assert.equal(readCgroupMemoryObservation({ fsApi: gone }).memoryReadState, 'known', 'a fresh reader without a limit has none');
     assert.equal(readCgroupMemoryObservation({ fsApi: gone, established: 4 * GIB }).memoryReadState, 'unknown');
+    // A memory.max that exists but cannot be read (EACCES, EIO) is unknown.
+    for (const code of ['EACCES', 'EIO']) {
+        const denied = { readFileSync(file) { throw Object.assign(new Error(`${code}: ${file}`), { code }); } };
+        const observation = readCgroupMemoryObservation({ fsApi: denied, established: null });
+        assert.deepEqual([observation.memoryReadState, observation.reasonCode], ['unknown', 'budget_unreadable'], code);
+    }
+    // The legacy projection stays byte-identical: any read failure is null.
+    assert.equal(readCgroupMemory({ fsApi: { readFileSync() { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); } } }), null);
     // Legacy-only snapshots: a finite limit with unknown current is unknown, too.
     assert.equal(memoryBudgetOf({ cgroupMemory: { maxBytes: 4 * GIB, currentBytes: null } }).memoryReadState, 'unknown');
     assert.equal(memoryBudgetOf({ cgroupMemory: null }).finiteMemoryBytes, null);

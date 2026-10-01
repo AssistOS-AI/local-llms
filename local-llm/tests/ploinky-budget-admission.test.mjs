@@ -73,11 +73,14 @@ export const PATHS = Object.freeze({
     'unified-vllm': { gpu: UNIFIED_GPU, runnerId: 'vllm', modelId: 'qwen3-4b-awq-unified', params: { gpuMemoryUtilization: 0.3 }, need: 'unifiedBytes', reserve: 'poolFloor' },
 });
 
+// A file value of {error: CODE} exists but cannot be read; undefined is absent.
 function cgroupFs({ max, current }) {
     const files = { '/sys/fs/cgroup/memory.max': max, '/sys/fs/cgroup/memory.current': current };
     return {
         readFileSync(file) {
-            if (files[file] !== undefined) return files[file];
+            const value = files[file];
+            if (value && typeof value === 'object') throw Object.assign(new Error(`${value.error}: ${file}`), { code: value.error });
+            if (value !== undefined) return value;
             throw Object.assign(new Error(`ENOENT: ${file}`), { code: 'ENOENT' });
         },
     };
@@ -280,6 +283,35 @@ test('LL.controller-unknown-no-launch', async (t) => {
         await assertRefusedNow(h, `request-unknown-${name.replace(/\W/g, '')}`, { reasonCode: 'budget_unreadable' });
         await assert.rejects(() => h.run('request-unknown-again'), (error) => {
             assert.match(error.message, /current memory use cannot be read/);
+            assert.doesNotMatch(error.message, /never|cannot run/i, 'not a permanent incompatibility');
+            return true;
+        });
+    }
+});
+
+test('LL.controller-limit-absent-admitted', async (t) => {
+    // No memory.max at all (ENOENT), as on hosts without a container limit:
+    // admitted exactly as before, no budget applied.
+    for (const name of ['llama', 'cpu-llama']) {
+        const h = harness(t, PATHS[name], { max: undefined, current: undefined });
+        const accepted = await h.run(`request-absent-${name.replace(/\W/g, '')}`);
+        assert.equal(accepted.accepted, true);
+        assert.equal(h.controller.state.deployment.admission.status, 'ok', h.controller.state.deployment.admission.reason);
+        assert.equal(h.controller.state.deployment.admission.reasonCode, undefined);
+        await until(() => h.started.length === 1);
+        await h.controller.stop();
+    }
+});
+
+test('LL.controller-limit-unreadable-no-launch', async (t) => {
+    // memory.max exists but cannot be read (EACCES, EIO) or holds garbage:
+    // the limit is unknown, never unlimited, so a new start is refused before
+    // any runner dispatch, as a temporary condition.
+    for (const max of [{ error: 'EACCES' }, { error: 'EIO' }, 'garbage\n', '\n']) {
+        const h = harness(t, PATHS.llama, { max, current: `${GIB}\n` });
+        await assertRefusedNow(h, 'request-limit-unreadable', { reasonCode: 'budget_unreadable' });
+        await assert.rejects(() => h.run('request-limit-unreadable-again'), (error) => {
+            assert.match(error.message, /container memory limit cannot be read/);
             assert.doesNotMatch(error.message, /never|cannot run/i, 'not a permanent incompatibility');
             return true;
         });

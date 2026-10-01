@@ -320,6 +320,17 @@ export function readCgroupMemory({ fsApi = fs } = {}) {
     return { maxBytes, currentBytes: bytes('/sys/fs/cgroup/memory.current') };
 }
 
+// A cgroup file's text; undefined when it does not exist (ENOENT), null when
+// it exists but cannot be read (EACCES, EIO, ...). The legacy readers above
+// keep collapsing both to null.
+function readObservedText(fsApi, file) {
+    try {
+        return fsApi.readFileSync(file, 'utf8');
+    } catch (error) {
+        return error?.code === 'ENOENT' ? undefined : null;
+    }
+}
+
 // The finite memory limit this process has seen, per filesystem reader (the
 // real one in production): a later failure to read memory.max never turns an
 // established limit into unlimited.
@@ -333,8 +344,8 @@ const establishedMemoryLimits = new WeakMap();
  */
 export function readCgroupMemoryObservation({ fsApi = fs, established = establishedMemoryLimits.get(fsApi) ?? null } = {}) {
     const observation = observeMemoryBudget({
-        maxText: readText(fsApi, '/sys/fs/cgroup/memory.max'),
-        currentText: readText(fsApi, '/sys/fs/cgroup/memory.current'),
+        maxText: readObservedText(fsApi, '/sys/fs/cgroup/memory.max'),
+        currentText: readObservedText(fsApi, '/sys/fs/cgroup/memory.current'),
         established,
     });
     if (Number.isSafeInteger(observation.finiteMemoryBytes)) establishedMemoryLimits.set(fsApi, observation.finiteMemoryBytes);

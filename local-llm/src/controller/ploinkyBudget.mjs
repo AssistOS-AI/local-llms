@@ -7,7 +7,10 @@
 // of zero or more, so a finite zero is known (no headroom), while a missing,
 // malformed, negative or non-finite reading is unknown and is never taken for
 // zero or for unlimited. A cgroup file that says exactly `max` is unlimited,
-// which is not the same as a file that cannot be read.
+// which is not the same as a file that cannot be read. An absent memory.max
+// (no cgroup v2 memory file, as on hosts without a container limit) is no
+// limit; a memory.max that exists but cannot be read, or holds anything but
+// `max` or a byte count, is unknown.
 
 const UNREADABLE_REASON = 'budget_unreadable';
 
@@ -43,22 +46,28 @@ export function parseCpuQuota(text) {
 
 /**
  * The internal memory-budget observation: {memoryReadState, finiteMemoryBytes,
- * headroomBytes, reasonCode}. `established` is a finite limit seen before: a
- * later failure to read the limit never turns it into unlimited.
+ * headroomBytes, reasonCode}. `maxText` is the file's text, `undefined` when
+ * memory.max does not exist, or `null` when it exists but cannot be read.
+ * `established` is a finite limit seen before: a later failure to read the
+ * limit never turns it into unlimited.
  */
 export function observeMemoryBudget({ maxText, currentText, established = null }) {
+    if (maxText === undefined) {
+        // No memory.max at all: no container limit (legacy), unless a finite
+        // one was already established.
+        return knownByte(established) ? unknownBudget(established) : noBudget();
+    }
     const max = parseCgroupBytes(maxText);
     if (max.state === 'unlimited') return noBudget();
     // A limit beyond any real memory (all digits, past the safe range) is none,
     // as the legacy projection reads it.
     if (max.state === 'unknown' && typeof maxText === 'string' && /^\d+$/.test(maxText.trim())) return noBudget();
-    let finite = max.state === 'known' ? max.bytes : null;
-    if (finite === null) {
-        // Unreadable limit: no budget unless a finite one was established.
-        if (!knownByte(established)) return noBudget();
-        finite = established;
-        return unknownBudget(finite);
+    if (max.state !== 'known') {
+        // memory.max exists but cannot be read or is malformed: the limit is
+        // unknown, never unlimited (an established one is kept).
+        return unknownBudget(knownByte(established) ? established : null);
     }
+    const finite = max.bytes;
     const current = parseCgroupBytes(currentText);
     if (current.state !== 'known') return unknownBudget(finite);
     return Object.freeze({
@@ -150,6 +159,9 @@ export const BUDGET_UNREADABLE_MESSAGE = 'This agent has a container memory limi
     + 'so no model is started on unverified headroom. Retry in a moment; if it persists, check the container\'s cgroup '
     + '(memory.current) and restart local-llm.';
 
+export const BUDGET_LIMIT_UNREADABLE_MESSAGE = 'This agent\'s container memory limit cannot be read, so no model is started on an '
+    + 'unknown budget. Retry in a moment; if it persists, check the container\'s cgroup (memory.max) and restart local-llm.';
+
 /**
  * The refusal before any runner dispatch, including the CPU profile: a known
  * finite limit whose current use cannot be read. Temporary (insufficient-now),
@@ -157,7 +169,8 @@ export const BUDGET_UNREADABLE_MESSAGE = 'This agent has a container memory limi
  */
 export function budgetGuard(observation, result) {
     if (observation?.memoryReadState !== 'unknown') return null;
-    return result('insufficient-now', BUDGET_UNREADABLE_MESSAGE, {}, [], UNREADABLE_REASON);
+    const message = knownByte(observation.finiteMemoryBytes) ? BUDGET_UNREADABLE_MESSAGE : BUDGET_LIMIT_UNREADABLE_MESSAGE;
+    return result('insufficient-now', message, {}, [], UNREADABLE_REASON);
 }
 
 /**
