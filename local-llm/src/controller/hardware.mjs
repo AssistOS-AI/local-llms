@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 
 import { HARDWARE_QUERY_REAP_MS } from '../drainBudget.mjs';
-import { attachCpuQuota, attachMemoryBudget, observeMemoryBudget, parseCpuQuota } from './ploinkyBudget.mjs';
+import { attachCpuQuota, attachGpuBudget, attachMemoryBudget, observeMemoryBudget, parseCpuQuota, parseMpsBudget } from './ploinkyBudget.mjs';
 
 // The Box GPU wiring binds the host nvidia-smi here (the override is a test seam).
 export const NVIDIA_SMI = process.env.LOCAL_LLM_NVIDIA_SMI || '/usr/local/nvidia/bin/nvidia-smi';
@@ -476,11 +476,11 @@ export async function readDisk(dataDir, { statfs = (target) => fs.promises.statf
  * the GPU queries are killed (readGpu), and the free-disk read, which cannot
  * be cancelled, is not waited for; its late answer is dropped.
  */
-export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signal } = {}) {
+export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signal, env = process.env } = {}) {
     if (signal?.aborted) throw stoppedError();
     // Read alongside the GPU queries; it never rejects.
     const pendingDisk = readDisk(dataDir, { statfs }).catch((error) => ({ freeBytes: null, totalBytes: null, error: error.message }));
-    const gpu = await readGpu({ execFileImpl, signal });
+    const gpu = await readGpu({ execFileImpl, signal, env });
     const disk = await untilStopped(pendingDisk, signal);
     const snapshot = {
         at: new Date().toISOString(),
@@ -493,5 +493,6 @@ export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signa
     };
     // Internal budget facts (ploinkyBudget.mjs), not published with the snapshot.
     attachCpuQuota(snapshot, readCpuQuota({ fsApi }));
+    attachGpuBudget(snapshot, parseMpsBudget(env));
     return attachMemoryBudget(snapshot, readCgroupMemoryObservation({ fsApi }));
 }

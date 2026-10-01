@@ -42,7 +42,7 @@ import {
     untilStopped,
 } from './hardware.mjs';
 import { lookupHuggingFaceModel } from './modelLookup.mjs';
-import { BUDGET_UNREADABLE, cpuQuotaOf, memoryBudgetOf, overviewBudget } from './ploinkyBudget.mjs';
+import { BUDGET_UNREADABLE, MPS_VARIABLES, cpuQuotaOf, gpuBudgetOf, memoryBudgetOf, mpsRunnerEnvironment, overviewBudget } from './ploinkyBudget.mjs';
 import {
     UNIFIED,
     UNREADABLE_COMMIT_MS,
@@ -145,7 +145,10 @@ export function createController({
     stateStore = createStateStore({ dataDir }),
     runners = RUNNERS,
     // A snapshot's queries stop when `signal` aborts (a Stop, a Cancel or the drain).
-    snapshot = ({ signal } = {}) => readSnapshot({ dataDir, signal }),
+    snapshot = ({ signal } = {}) => readSnapshot({ dataDir, signal, env }),
+    // Trusted test seam only. Production's qualification resolver reads its
+    // packaged reviewed matrix; no API or environment value supplies approval.
+    qualificationDataProvider = undefined,
     // Stopped hardware queries that have not exited yet (logged by the drain),
     // and a promise that settles once every stopped query has exited or been recorded.
     unreapedQueries = hardwareUnreaped,
@@ -393,7 +396,7 @@ export function createController({
     function limitsFor(snap) {
         // The container budget Ploinky set (exact fractional CPUs, the memory
         // limit), only when there is one: unlimited overviews are unchanged.
-        const budget = overviewBudget({ observation: memoryBudgetOf(snap), cpuQuota: cpuQuotaOf(snap) });
+        const budget = overviewBudget({ observation: memoryBudgetOf(snap), cpuQuota: cpuQuotaOf(snap), gpuShare: gpuBudgetOf(snap, env).gpuShare });
         const withBudget = (limits) => (budget ? { ...(limits || {}), budget } : limits);
         if (profile === 'unified') return withBudget({ floorBytes: UNIFIED.floorBytes, hostReserveBytes: UNIFIED.hostReserveBytes });
         if (profile !== 'cpu') return withBudget(null);
@@ -542,6 +545,8 @@ export function createController({
         return admit({
             runner: definition, model, source, params, snapshot: snap, remainingDownloadBytes, profile: selected || undefined,
             decision: selected === 'cpu' ? decisionForAdmission(snap) : undefined,
+            gpuBudget: gpuBudgetOf(snap, env),
+            runnerContext: { runnerLockEntry: runnerLocks?.runners?.[definition.id], qualificationDataProvider },
         });
     }
 
@@ -922,16 +927,19 @@ export function createController({
         throw new LocalLlmError('start_timeout', `The runner did not become ready within ${readyTimeoutMs / 1000} s.`);
     }
 
-    function runnerEnv(launchEnv) {
+    function runnerEnv(launchEnv, selectedProfile) {
         // Only what the runner needs: never the agent's secrets or tokens. The
         // CUDA driver's JIT cache stays in the container's own filesystem, never
         // in /data, which other workspace processes can write (DS004).
+        const adapterEnvironment = { ...launchEnv };
+        for (const key of MPS_VARIABLES) delete adapterEnvironment[key];
         return {
             PATH: env.PATH || '/usr/local/nvidia/bin:/usr/local/bin:/usr/bin:/bin',
             HOME: path.join(dataDir, 'home'),
             LANG: 'C.UTF-8',
             CUDA_CACHE_PATH: cudaCachePath,
-            ...launchEnv,
+            ...adapterEnvironment,
+            ...mpsRunnerEnvironment(env, selectedProfile),
         };
     }
 
@@ -965,7 +973,7 @@ export function createController({
         lastCompletion = null;
         log.append('controller', `starting ${launch.command} ${launch.args.join(' ')}`);
         const process = startRunner({
-            command: launch.command, args: launch.args, env: runnerEnv(launch.env), cwd: launch.cwd || '/', log,
+            command: launch.command, args: launch.args, env: runnerEnv(launch.env, deployment.profile), cwd: launch.cwd || '/', log,
             filter: launch.outputFilter || null,
         });
         runner = {

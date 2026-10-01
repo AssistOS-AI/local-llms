@@ -177,11 +177,54 @@ export function budgetGuard(observation, result) {
  * The optional overview budget: exact fractional CPUs and the finite memory
  * limit, only when one is set; null otherwise (unlimited overviews unchanged).
  */
-export function overviewBudget({ observation, cpuQuota = null }) {
+export function overviewBudget({ observation, cpuQuota = null, gpuShare = null }) {
     const memoryBytes = knownByte(observation?.finiteMemoryBytes) ? observation.finiteMemoryBytes : null;
     const cpus = Number.isFinite(cpuQuota) && cpuQuota > 0 ? cpuQuota : null;
-    if (memoryBytes === null && cpus === null) return null;
-    return Object.freeze({ cpus, memoryBytes, source: 'ploinky' });
+    if (memoryBytes === null && cpus === null && !gpuShare) return null;
+    return Object.freeze({ cpus, memoryBytes, source: 'ploinky', ...(gpuShare ? { gpuShare: Object.freeze({ ...gpuShare, assurance: 'best-effort' }) } : {}) });
+}
+
+export const MPS_VARIABLES = Object.freeze(['CUDA_MPS_PIPE_DIRECTORY', 'CUDA_MPS_ACTIVE_THREAD_PERCENTAGE', 'CUDA_MPS_PINNED_DEVICE_MEM_LIMIT']);
+export const MPS_BUDGET_INVALID_MESSAGE = 'The Ploinky GPU budget is incomplete or invalid. It requires the managed MPS pipe, an SM percentage of 1–100, and device 0 memory in whole MiB. Repair the GPU share through Ploinky and restart local-llm.';
+
+export function parseMpsBudget(env = {}) {
+    const present = MPS_VARIABLES.filter((key) => env[key] !== undefined);
+    if (!present.length) return Object.freeze({ state: 'none', gpuShare: null, environment: null });
+    const sm = env.CUDA_MPS_ACTIVE_THREAD_PERCENTAGE;
+    const memory = typeof env.CUDA_MPS_PINNED_DEVICE_MEM_LIMIT === 'string' ? /^0=([0-9]+)M$/.exec(env.CUDA_MPS_PINNED_DEVICE_MEM_LIMIT) : null;
+    const smPercent = typeof sm === 'string' && /^[0-9]+$/.test(sm) ? Number(sm) : NaN;
+    const vramMiB = memory ? Number(memory[1]) : NaN;
+    const vramBytes = vramMiB * 1024 * 1024;
+    if (present.length !== 3 || env.CUDA_MPS_PIPE_DIRECTORY !== '/run/ploinky-mps-pipe'
+        || !Number.isInteger(smPercent) || smPercent < 1 || smPercent > 100 || !Number.isSafeInteger(vramMiB) || vramMiB < 512 || !knownByte(vramBytes)) {
+        return Object.freeze({ state: 'unknown', gpuShare: null, environment: null, reason: MPS_BUDGET_INVALID_MESSAGE, reasonCode: 'gpu_budget_invalid' });
+    }
+    return Object.freeze({
+        state: 'known', gpuShare: Object.freeze({ smPercent, vramBytes }),
+        environment: Object.freeze({ CUDA_MPS_PIPE_DIRECTORY: '/run/ploinky-mps-pipe', CUDA_MPS_ACTIVE_THREAD_PERCENTAGE: String(smPercent), CUDA_MPS_PINNED_DEVICE_MEM_LIMIT: `0=${vramMiB}M` }),
+    });
+}
+
+export function attachGpuBudget(snapshot, budget) {
+    if (snapshot && typeof snapshot === 'object') Object.defineProperty(snapshot, 'gpuBudget', { value: budget, enumerable: false, configurable: true });
+    return snapshot;
+}
+
+export function gpuBudgetOf(snapshot, env = {}) {
+    return snapshot?.gpuBudget || parseMpsBudget(env);
+}
+
+export function effectiveGpu(gpu, budget) {
+    if (budget?.state !== 'known') return gpu;
+    const totalBytes = Math.min(gpu.totalBytes, budget.gpuShare.vramBytes);
+    return { ...gpu, totalBytes, freeBytes: Math.min(gpu.freeBytes, totalBytes), deviceTotalBytes: gpu.totalBytes, budgetBytes: budget.gpuShare.vramBytes };
+}
+
+export function mpsRunnerEnvironment(env, profile) {
+    if (profile === 'cpu') return {};
+    const budget = parseMpsBudget(env);
+    if (budget.state === 'unknown') throw Object.assign(new Error(budget.reason), { code: budget.reasonCode });
+    return budget.environment || {};
 }
 
 export { UNREADABLE_REASON as BUDGET_UNREADABLE };

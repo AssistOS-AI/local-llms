@@ -99,6 +99,7 @@ function budgetCardHtml(budget) {
     const parts = [];
     if (Number.isFinite(budget.cpus) && budget.cpus > 0) parts.push(`${budget.cpus} ${budget.cpus === 1 ? 'CPU' : 'CPUs'}`);
     if (Number.isFinite(budget.memoryBytes)) parts.push(`${formatMiB(budget.memoryBytes)} RAM`);
+    if (budget.gpuShare?.assurance === 'best-effort') parts.push(`${budget.gpuShare.smPercent}% GPU SM, ${formatMiB(budget.gpuShare.vramBytes)} per CUDA process (best-effort)`);
     if (!parts.length) return '';
     return statCard('budget', 'Limits from Ploinky', parts.join(' · '),
         'Models are sized against this container budget; a temporary shortage clears when memory is released.');

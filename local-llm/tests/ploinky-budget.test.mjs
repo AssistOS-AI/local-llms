@@ -9,6 +9,13 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { admit } from '../src/controller/admission.mjs';
+import { GPU_TEST_LOCK, GPU_MODEL, MPS_ENV, TEST_GPU, gpuHarness, testQualification, waitForLaunch } from './ploinkyGpuFixture.mjs';
+import { createVllmMpsQualificationResolver, resolveVllmMpsQualification, vllmRunnerLockDigest } from '../src/controller/vllmMpsQualification.mjs';
+import { MPS_VARIABLES, attachGpuBudget, effectiveGpu, parseMpsBudget } from '../src/controller/ploinkyBudget.mjs';
+import { validateModel } from '../src/controller/catalog.mjs';
+import { createRunnerInstaller } from '../src/controller/runnerInstaller.mjs';
+import { loadRunnerLocks } from '../src/controller/runnerLock.mjs';
+import { collectOverviews, collectOllamaRuns } from './overview-scenarios.mjs';
 import { loadSeedCatalog } from '../src/controller/catalog.mjs';
 import { createController } from '../src/controller/deployments.mjs';
 import {
@@ -334,4 +341,155 @@ test('LL.unified-physical-denominator', () => {
         snapshot: { gpu: structuredClone(UNIFIED_GPU), memory: { totalBytes: physical, availableBytes: 120 * GIB }, disk: { freeBytes: 1024 * GIB } } });
     assert.equal(plain.estimate.budgetBytes, Math.round(0.3 * physical));
     assert.equal(plain.estimate.poolBytes, physical);
+});
+
+test('LL.vllm-qualification-absent', async (t) => {
+    const h = gpuHarness(t, { qualificationDataProvider: null, env: { ...MPS_ENV, LOCAL_LLM_VLLM_MPS_QUALIFIED: 'true' } });
+    await assert.rejects(h.run({ maxModelLen: 512 }), (error) => error.code === 'admission_incompatible' && error.details?.admission?.reasonCode === 'vllm_mps_unqualified');
+    assert.equal(h.started.length, 0);
+    const { denominator, evidenceDigest, ...tuple } = testQualification();
+    assert.equal(resolveVllmMpsQualification(tuple).qualified, false);
+    assert.equal(resolveVllmMpsQualification({ ...tuple, qualified: true }).qualified, false);
+});
+
+test('LL.vllm-qualification-mismatch', async (t) => {
+    for (const [field, value] of [['runnerLockDigest', 'b'.repeat(64)], ['driverVersion', '999.2'], ['gpuPciDeviceId', '0x987610DE'], ['computeCapability', '9.8'], ['deviceTotalBytes', 7 * GIB]]) {
+        await t.test(field, async (t) => {
+            const h = gpuHarness(t, { qualificationDataProvider: () => [{ ...testQualification(), [field]: value }] });
+            await assert.rejects(h.run({ maxModelLen: 512 }), (error) => error.details?.admission?.reasonCode === 'vllm_mps_unqualified');
+            assert.equal(h.started.length, 0);
+        });
+    }
+});
+
+test('LL.vllm-qualification-match', async (t) => {
+    const entry = GPU_TEST_LOCK.runners.vllm;
+    assert.equal(vllmRunnerLockDigest(entry), vllmRunnerLockDigest({ ...entry, check: { ...entry.check } }));
+    assert.notEqual(vllmRunnerLockDigest(entry), vllmRunnerLockDigest({ ...entry, files: [{ ...entry.files[0], sha256: 'b'.repeat(64) }] }));
+    assert.equal(vllmRunnerLockDigest({ id: 'vllm', digest: 'a'.repeat(64) }), null);
+    const resolve = createVllmMpsQualificationResolver(() => [testQualification()]);
+    assert.deepEqual(resolve(testQualification()), { qualified: true, denominator: 'physical-device', evidenceDigest: 'e'.repeat(64) });
+    const h = gpuHarness(t);
+    assert.equal((await h.run({ maxModelLen: 512 })).accepted, true);
+    await waitForLaunch(h);
+    assert.equal(h.controller.state.deployment.admission.status, 'ok');
+});
+
+test('LL.vllm-six-three-two', async (t) => {
+    const h = gpuHarness(t);
+    assert.equal((await h.run({ maxModelLen: 512 })).accepted, true);
+    const launch = await waitForLaunch(h);
+    const admission = h.controller.state.deployment.admission;
+    assert.equal(admission.estimate.gpuBytes, 2 * GIB);
+    const fraction = Number(launch.args[launch.args.indexOf('--gpu-memory-utilization') + 1]);
+    assert.equal(fraction, admission.estimate.gpuMemoryUtilization);
+    assert.ok(fraction * 6 * GIB <= 3 * GIB);
+    assert.ok(fraction * 6 * GIB * 0.94 >= 2 * GIB, 'the physical denominator avoids multiplying the share twice');
+    const overview = await h.controller.overview();
+    assert.deepEqual(overview.limits.budget.gpuShare, { smPercent: 50, vramBytes: 3 * GIB, assurance: 'best-effort' });
+    assert.equal(overview.hardware.gpu.totalBytes, 6 * GIB, 'raw telemetry is physical');
+    assert.equal(JSON.stringify(overview.hardware).includes('gpuBudget'), false);
+});
+
+test('LL.vllm-over-cap-incompatible', async (t) => {
+    const h = gpuHarness(t);
+    await assert.rejects(h.run({ maxModelLen: 512, gpuMemoryUtilization: 0.6 }), (error) => error.code === 'admission_incompatible' && /Ploinky GPU share/.test(error.message));
+    assert.equal(h.started.length, 0);
+});
+
+test('LL.vllm-free-shortage-temporary', async (t) => {
+    const h = gpuHarness(t, { gpu: { ...TEST_GPU, freeBytes: 2 * GIB } });
+    await assert.rejects(h.run({ maxModelLen: 512, gpuMemoryUtilization: 0.4 }), (error) => error.code === 'admission_insufficient_now');
+    assert.equal(h.started.length, 0);
+    h.setGpu({ ...TEST_GPU, freeBytes: 3 * GIB });
+    assert.equal((await h.run({ maxModelLen: 512, gpuMemoryUtilization: 0.4 }, { requestId: 'gpu-budget-release-retry' })).accepted, true);
+    await waitForLaunch(h);
+});
+
+test('LL.ollama-pinned-over-cap', async (t) => {
+    const raw = structuredClone(Object.fromEntries(Object.entries(SEED.find((model) => model.id === 'gpt-oss-20b')).filter(([key]) => !['seed', 'recommended'].includes(key))));
+    raw.id = 'budget-pinned-ollama';
+    const expectedBytes = Math.round(4.445 * GIB);
+    raw.sources = { ollama: { ...raw.sources.ollama, size: expectedBytes - 200 * MIB - raw.memory.kvBytesPerToken * 512 - raw.memory.fixedKvBytes } };
+    const model = validateModel(raw, { seed: true });
+    const h = gpuHarness(t, { seedCatalog: [model] });
+    await assert.rejects(h.run({ numGpu: 24, numCtx: 512 }, { runnerId: 'ollama', modelId: model.id }), (error) => {
+        assert.equal(error.code, 'admission_incompatible');
+        assert.equal(error.details.admission.estimate.gpuBytes, expectedBytes);
+        return true;
+    });
+    assert.equal(h.started.length, 0);
+});
+
+test('LL.ollama-auto-free', async (t) => {
+    const h = gpuHarness(t);
+    assert.equal((await h.run({ numGpu: null }, { runnerId: 'ollama', modelId: 'gpt-oss-20b' })).accepted, true);
+    await waitForLaunch(h);
+    const estimate = h.controller.state.deployment.admission.estimate;
+    assert.equal(estimate.ramBytes, Math.max(0, estimate.totalBytes - (3 * GIB - 256 * MIB)) + 768 * MIB);
+});
+
+test('LL.gpu-minimal-env-all-adapters', async (t) => {
+    const gpu = { ...TEST_GPU, totalBytes: 24 * GIB, freeBytes: 24 * GIB, usedBytes: 0 };
+    const env = { ...MPS_ENV, CUDA_MPS_PINNED_DEVICE_MEM_LIMIT: '0=16384M' };
+    for (const [runnerId, modelId] of [['llama.cpp', 'qwen2.5-0.5b-instruct-q4_k_m'], ['ik_llama.cpp', 'qwen2.5-0.5b-instruct-q4_k_m'], ['lmstudio', 'qwen2.5-0.5b-instruct-q4_k_m'], ['ollama', 'gpt-oss-20b'], ['vllm', GPU_MODEL.id], ['tabbyapi', 'qwen3-8b-exl3']]) {
+        await t.test(runnerId, async (t) => {
+            const h = gpuHarness(t, { gpu, env });
+            const params = runnerId === 'vllm' ? { maxModelLen: 512 } : {};
+            assert.equal((await h.run(params, { runnerId, modelId })).accepted, true);
+            const launch = await waitForLaunch(h);
+            assert.deepEqual(Object.fromEntries(MPS_VARIABLES.map((key) => [key, launch.env[key]])), env);
+            assert.equal(Object.hasOwn(launch.env, 'PRIVATE_AGENT_SECRET'), false);
+            assert.equal(Object.keys(launch.env).filter((key) => key.startsWith('CUDA_MPS_')).length, 3);
+        });
+    }
+});
+
+test('LL.cpu-no-mps-env', async (t) => {
+    for (const [runnerId, modelId] of [['llama.cpp', 'qwen2.5-0.5b-instruct-q4_k_m'], ['llama.cpp-cpu', 'qwen2.5-0.5b-instruct-q4_k_m'], ['ollama', 'gpt-oss-20b']]) {
+        await t.test(runnerId, async (t) => {
+            const h = gpuHarness(t, { gpu: { available: false, state: 'absent', reason: 'No GPU.' }, profile: 'cpu', qualificationDataProvider: null });
+            assert.equal((await h.run({}, { runnerId, modelId })).accepted, true);
+            const launch = await waitForLaunch(h);
+            assert.equal(Object.keys(launch.env).some((key) => key.startsWith('CUDA_MPS_')), false);
+        });
+    }
+});
+
+test('LL.partial-mps-refused', async (t) => {
+    const vectors = [
+        { CUDA_MPS_PIPE_DIRECTORY: MPS_ENV.CUDA_MPS_PIPE_DIRECTORY },
+        { ...MPS_ENV, CUDA_MPS_ACTIVE_THREAD_PERCENTAGE: undefined },
+        { ...MPS_ENV, CUDA_MPS_ACTIVE_THREAD_PERCENTAGE: '0' },
+        { ...MPS_ENV, CUDA_MPS_ACTIVE_THREAD_PERCENTAGE: '101' },
+        { ...MPS_ENV, CUDA_MPS_PINNED_DEVICE_MEM_LIMIT: '1=3072M' },
+        { ...MPS_ENV, CUDA_MPS_PINNED_DEVICE_MEM_LIMIT: '0=3072M,1=1M' },
+        { ...MPS_ENV, CUDA_MPS_PINNED_DEVICE_MEM_LIMIT: '0=9007199254740991M' },
+        { ...MPS_ENV, CUDA_MPS_PIPE_DIRECTORY: '/secret-path-do-not-echo' },
+    ];
+    for (const [index, env] of vectors.entries()) await t.test(`invalid vector ${index}`, async (t) => {
+        const h = gpuHarness(t, { env });
+        await assert.rejects(h.run({ maxModelLen: 512 }), (error) => error.details?.admission?.reasonCode === 'gpu_budget_invalid' && !error.message.includes('secret-path'));
+        assert.equal(h.started.length, 0);
+    });
+});
+
+test('LL.unified-share-refused', async (t) => {
+    const h = gpuHarness(t, { gpu: { ...TEST_GPU, memoryModel: 'unified', totalBytes: null, freeBytes: null } });
+    await assert.rejects(h.run({}, { runnerId: 'llama.cpp', modelId: 'qwen2.5-0.5b-instruct-q4_k_m' }), (error) => error.details?.admission?.reasonCode === 'gpu_share_unsupported');
+    assert.equal(h.started.length, 0);
+});
+
+test('LL.gpu-unlimited-golden', async () => {
+    const gpu = structuredClone(TEST_GPU);
+    assert.equal(effectiveGpu(gpu, parseMpsBudget({})), gpu);
+    const plain = { gpu, memory: { totalBytes: 128 * GIB, availableBytes: 120 * GIB }, cgroupMemory: null };
+    const before = JSON.stringify(plain);
+    attachGpuBudget(plain, parseMpsBudget({}));
+    assert.equal(JSON.stringify(plain), before);
+    const golden = JSON.parse(fs.readFileSync(new URL('./overview-golden-a84617d.json', import.meta.url), 'utf8'));
+    const makeInstaller = ({ imageLockFile, dataDir }) => createRunnerInstaller({ lock: loadRunnerLocks({ image: imageLockFile, agent: null }), cacheRoot: path.join(dataDir, 'runners'), runRoot: path.join(dataDir, 'opt') });
+    const args = { createController, createStateStore, validateModel, makeInstaller };
+    assert.equal(JSON.stringify(await collectOverviews(args)), JSON.stringify(golden.scenarios));
+    assert.equal(JSON.stringify(await collectOllamaRuns(args)), JSON.stringify(golden.ollamaRuns));
 });

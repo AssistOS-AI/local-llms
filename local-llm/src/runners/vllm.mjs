@@ -15,6 +15,7 @@ import path from 'node:path';
 
 import { admissionResult, admitVllm } from '../controller/admission.mjs';
 import { admitUnifiedVllm } from '../controller/profiles.mjs';
+import { createVllmMpsQualificationResolver, resolveVllmMpsQualification, vllmRunnerLockDigest } from '../controller/vllmMpsQualification.mjs';
 import {
     ParamError,
     assertAbsolutePath,
@@ -301,6 +302,15 @@ const vllmRuntime = Object.freeze({
     chatModel: (deployment) => deployment.modelId,
     enabled,
     admit: admitVllm,
+    qualifyMps({ gpu, runnerLockEntry, qualificationDataProvider }) {
+        const resolve = typeof qualificationDataProvider === 'function'
+            ? createVllmMpsQualificationResolver(qualificationDataProvider) : resolveVllmMpsQualification;
+        return resolve({
+            runnerLockDigest: vllmRunnerLockDigest(runnerLockEntry), driverVersion: gpu?.driverVersion,
+            gpuPciDeviceId: gpu?.device?.pciDeviceId, computeCapability: gpu?.device?.computeCapability,
+            deviceTotalBytes: gpu?.totalBytes,
+        });
+    },
     admitUnified: (input) => admitUnifiedVllm(input, admissionResult),
     parseReport,
 });

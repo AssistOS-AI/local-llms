@@ -9,7 +9,7 @@
 // Strict RAM readings (ploinkyBudget.mjs): zero is a known value (no headroom),
 // not an absent one; an unknown reading under a finite limit is refused before
 // any policy runs (budgetGuard).
-import { budgetGuard, effectiveMemory, knownByte, memoryBudgetOf } from './ploinkyBudget.mjs';
+import { budgetGuard, effectiveGpu, effectiveMemory, gpuBudgetOf, knownByte, memoryBudgetOf } from './ploinkyBudget.mjs';
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
@@ -195,6 +195,9 @@ export function admitOllama({ model, source, params, gpu, memory, disk, remainin
         return result('insufficient-now', `Only ${gib(gpu.freeBytes)} of GPU memory is free${otherGpuUsers(gpu)}.`,
             withRam, warnings);
     }
+    if (gpu.budgetBytes != null && estimate.gpuBytes !== null && estimate.gpuBytes > gpu.freeBytes - GPU_MARGIN_BYTES) {
+        return result('insufficient-now', `Pinned GPU layers need about ${gib(estimate.gpuBytes)}; only ${gib(gpu.freeBytes)} of the Ploinky GPU budget is free now.`, withRam, warnings);
+    }
     if (knownByte(memory.availableBytes) && ramBytes > memory.availableBytes - RAM_MARGIN_BYTES) {
         return result('insufficient-now', `Needs about ${gib(ramBytes)} of RAM; `
             + `${gib(memory.availableBytes)} is available now.`, withRam, warnings);
@@ -244,8 +247,9 @@ export function admitVllm({ model, source, params, gpu, memory, disk, remainingD
     const kvFactor = params.kvCacheDtype === 'fp8' ? 0.5 : 1;
     const kvBytes = Math.round((model.memory?.kvBytesPerToken || DEFAULT_KV_BYTES_PER_TOKEN) * params.maxModelLen * kvFactor);
     const gpuBytes = gpuWeightsBytes + kvBytes + VLLM_OVERHEAD_BYTES;
-    const usable = (share) => share * gpu.totalBytes * VLLM_USABLE_SHARE;
-    const fromFree = Math.floor(Math.min(VLLM_MAX_UTILIZATION, (gpu.freeBytes - 2 * GPU_MARGIN_BYTES) / gpu.totalBytes) * 100) / 100;
+    const denominator = gpu.deviceTotalBytes ?? gpu.totalBytes;
+    const usable = (share) => share * denominator * VLLM_USABLE_SHARE;
+    const fromFree = Math.floor(Math.min(VLLM_MAX_UTILIZATION, (gpu.freeBytes - 2 * GPU_MARGIN_BYTES) / denominator) * 100) / 100;
     const gpuMemoryUtilization = params.gpuMemoryUtilization ?? fromFree;
     const ramBytes = offloadBytes > 0
         ? Math.round((offloadBytes * VLLM_OFFLOAD_RAM_FACTOR + VLLM_OFFLOAD_RESIDENT_BYTES) * VLLM_OFFLOAD_RAM_MARGIN)
@@ -262,6 +266,9 @@ export function admitVllm({ model, source, params, gpu, memory, disk, remainingD
         ...(offloadBytes > 0 ? { ramFloorBytes: Math.round(ramFloor) } : {}),
     };
     const warnings = ramWarning(ramBytes, memory);
+    if (gpu.budgetBytes != null && params.gpuMemoryUtilization != null && gpuMemoryUtilization * denominator > gpu.totalBytes) {
+        return result('incompatible', `gpuMemoryUtilization ${gpuMemoryUtilization} allocates ${gib(gpuMemoryUtilization * denominator)} against physical GPU memory, exceeding the ${gib(gpu.totalBytes)} Ploinky GPU share. Lower gpuMemoryUtilization or clear the share.`, estimate, warnings);
+    }
     if (offloadBytes > 0) {
         warnings.push(`Offloading ${gib(offloadBytes)} of weights to system RAM makes generation much slower: `
             + 'every token reads them over PCIe.');
@@ -270,7 +277,7 @@ export function admitVllm({ model, source, params, gpu, memory, disk, remainingD
         return result('incompatible', `cpuOffloadGb (${gib(offloadBytes)}) is larger than the model (${gib(size)}).`, estimate, warnings);
     }
     // Whether it can ever fit: at the admin's share when set, else at vLLM's usual maximum.
-    const ceiling = params.gpuMemoryUtilization ?? VLLM_MAX_UTILIZATION;
+    const ceiling = params.gpuMemoryUtilization ?? Math.min(VLLM_MAX_UTILIZATION, gpu.totalBytes / denominator);
     if (gpuBytes > usable(ceiling)) {
         if (params.gpuMemoryUtilization !== null && params.gpuMemoryUtilization !== undefined) {
             return result('incompatible', `Needs about ${gib(gpuBytes)} of GPU memory; gpuMemoryUtilization ${params.gpuMemoryUtilization} `
@@ -293,7 +300,7 @@ export function admitVllm({ model, source, params, gpu, memory, disk, remainingD
     }
     // Busy now: the share does not fit in the free memory, or what is free
     // leaves vLLM less than its minimum share (a large GPU mostly in use).
-    if (gpuMemoryUtilization < 0.1 || gpuMemoryUtilization * gpu.totalBytes > gpu.freeBytes - GPU_MARGIN_BYTES
+    if (!Number.isFinite(gpuMemoryUtilization) || gpuMemoryUtilization < 0.1 || gpuMemoryUtilization * denominator > gpu.freeBytes - GPU_MARGIN_BYTES
         || gpuBytes > usable(gpuMemoryUtilization)) {
         return result('insufficient-now', `Needs about ${gib(gpuBytes)} of GPU memory; ${gib(gpu.freeBytes)} is free now`
             + `${otherGpuUsers(gpu)}.`, estimate, warnings);
@@ -370,7 +377,8 @@ export function admitTabbyApi({ model, source, params, gpu, memory, disk, remain
  * @param {{ runner, model, source, params, snapshot, remainingDownloadBytes?, profile?, decision? }} input
  * @returns {{ status: 'ok'|'incompatible'|'insufficient-now', reason, estimate, warnings }}
  */
-export function admit({ runner, model, source, params, snapshot, remainingDownloadBytes = 0, profile = undefined, decision = undefined }) {
+export function admit({ runner, model, source, params, snapshot, remainingDownloadBytes = 0, profile = undefined, decision = undefined,
+    gpuBudget = gpuBudgetOf(snapshot), runnerContext = {} }) {
     // A runner that is for some profiles only (llama.cpp's CPU build) has no GPU policy, only `admitCpu`.
     const policy = profile === 'cpu' ? typeof runner.admitCpu === 'function' || typeof runner.admit === 'function' : typeof runner.admit === 'function';
     if (!runner.supported || !policy) {
@@ -385,6 +393,7 @@ export function admit({ runner, model, source, params, snapshot, remainingDownlo
     const budget = memoryBudgetOf(snapshot);
     const unreadableBudget = budgetGuard(budget, result);
     if (unreadableBudget) return unreadableBudget;
+    if (gpuBudget.state === 'unknown') return result('incompatible', gpuBudget.reason, {}, [], gpuBudget.reasonCode);
     if (profile === 'cpu') {
         if (typeof runner.admitCpu !== 'function') {
             return result('incompatible', `${runner.displayName} needs an NVIDIA GPU in this release; `
@@ -395,7 +404,8 @@ export function admit({ runner, model, source, params, snapshot, remainingDownlo
             disk: snapshot?.disk, remainingDownloadBytes, decision,
         });
     }
-    const gpu = snapshot?.gpu;
+    const rawGpu = snapshot?.gpu;
+    let gpu = rawGpu;
     if (!gpu?.available) {
         const why = gpu?.reason || 'No GPU is available to this agent.';
         // A GPU profile was committed and its GPU is gone now: every Run is refused until local-llm
@@ -411,6 +421,19 @@ export function admit({ runner, model, source, params, snapshot, remainingDownlo
     if (selected !== current) {
         return result('incompatible', `The GPU now reports ${current} memory, but this agent started with the ${selected} profile; `
             + 'restart local-llm to use it.', {});
+    }
+    if (gpuBudget.state === 'known') {
+        if (selected !== 'dedicated' || gpu.memoryModel !== 'dedicated') {
+            return result('incompatible', 'Ploinky GPU sharing requires a verified dedicated-memory GPU. Unified or unknown memory-model GPUs cannot use this MPS share; clear it through Ploinky.', {}, [], 'gpu_share_unsupported');
+        }
+        if (![gpu.totalBytes, gpu.freeBytes].every((bytes) => Number.isFinite(bytes) && bytes >= 0 && bytes <= Number.MAX_SAFE_INTEGER) || gpu.totalBytes <= 0) {
+            return result('insufficient-now', 'The physical GPU capacity or current free memory cannot be read under this Ploinky share. Retry after repairing GPU telemetry.', {}, [], 'gpu_budget_unreadable');
+        }
+        if (typeof runner.qualifyMps === 'function') {
+            const qualification = runner.qualifyMps({ ...runnerContext, gpu: rawGpu });
+            if (!qualification.qualified) return result('incompatible', qualification.fix, {}, [], qualification.code);
+        }
+        gpu = effectiveGpu(rawGpu, gpuBudget);
     }
     if (selected === 'unified') {
         if (typeof runner.admitUnified !== 'function') {

@@ -32,9 +32,10 @@ The declaration asks for that CDI device and nothing else. Ploinky attaches it o
 | Total and available RAM | `/proc/meminfo` |
 | Physical CPU cores | `physicalCoreCount()` (`cores`; DS005) |
 | The container's memory limit and use, when a limit is set | cgroup v2 `memory.max` and `memory.current` (`cgroupMemory`; null for `max` or when unreadable; DS005). Admission reads the limit separately: an absent `memory.max` is no limit, while one that exists but cannot be read or is malformed is unknown, and a new model is refused with `budget_unreadable` rather than run as unlimited |
+| Ploinky GPU budget, when present | Validated `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` and device 0 of `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT`; configured best-effort per-process budget, separate from physical device capacity (DS005). |
 | Free disk under `/data` | `statfs` |
 
-Admission keeps physical capacity separate from the effective Ploinky budget. Dedicated and unified policies use RAM constrained by the container limit and current headroom; the CPU policy retains its existing cap provenance. Known zero headroom is exhausted memory, not an unknown value. A GPU that gives no memory figures and is not known to share system memory is reported unusable with a reason that names the GPU and the values it gave, and models run on the CPU (DS005); when the device query fails, the GPU counts as unreadable instead. Without this rule every memory comparison was false and any model was admitted, whatever its size. A GPU that shares system memory (NVIDIA GB10 in DGX Spark) is detected as such and uses the unified profile (DS005); a GPU that reports numbers gives the same values as before.
+Admission keeps physical capacity separate from the effective Ploinky budget. Dedicated and unified policies use RAM constrained by the container limit and current headroom; the CPU policy retains its existing cap provenance. GPU policies use the effective share/free budget while preserving the physical denominator required by runner utilization parameters. Known zero headroom is exhausted memory, not an unknown value. A GPU that gives no memory figures and is not known to share system memory is reported unusable with a reason that names the GPU and the values it gave, and models run on the CPU (DS005); when the device query fails, the GPU counts as unreadable instead. Without this rule every memory comparison was false and any model was admitted, whatever its size. A GPU that shares system memory (NVIDIA GB10 in DGX Spark) is detected as such and uses the unified profile (DS005); a GPU that reports numbers gives the same values as before.
 
 ### llama-server load mode
 
@@ -84,6 +85,18 @@ The retired repository specification is kept at commit [`03697765`](https://gith
 | GPU passthrough is an operator runtime flag; the manifest cannot express it | Replaced by the manifest declaration `containerSecurity.gpu` with the operator's grant and revoke as override (DS010 Question #1, option 3: manifest field plus operator control) |
 | `nvidia-smi` and `/dev/nvidia0` as GPU signals | Kept as the hardware snapshot source, read from the granted paths |
 | One loaded model at a time to limit contention | Kept: one deployment at a time; Ollama runs with `OLLAMA_MAX_LOADED_MODELS=1` |
+
+### Ploinky GPU budgets
+
+The SM percentage and device-memory share are parsed together with the managed MPS pipe. A missing value, unsupported device selector, malformed number, overflowing byte count or unsupported pipe produces one bounded `gpu_budget_invalid` reason before runner admission. Unified-memory or unknown-memory-model GPUs refuse a configured share. Raw hardware telemetry remains unchanged; the effective dedicated GPU view is capped to the configured share, while `deviceTotalBytes` retains physical capacity.
+
+GPU runners additionally receive the validated `CUDA_MPS_PIPE_DIRECTORY`, `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` and `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT` values. CPU-profile runners receive none. No other agent environment or credential is forwarded. The controller adds those three values through the existing minimal runner environment for every GPU adapter.
+
+Dedicated vLLM calculates utilization against physical device memory. A fraction exceeding the effective share is permanently incompatible; a fraction that fits but cannot be allocated against current effective free memory is insufficient-now. Defaults reserve the existing margins and do not multiply the share twice. Ollama explicit layers must fit the effective capacity and current free budget. Automatic layers spill to RAM according to effective free bytes.
+
+vLLM under MPS requires an exact reviewed tuple of canonical selected runner-lock entry digest, driver version, PCI device id, compute capability and physical device bytes. The selected lock entry contains pinned files and checks, and the installer verifies its runnable copy. The packaged qualification data is currently empty. Missing or mismatched facts yield `vllm_mps_unqualified` before launch, with a fix to use a qualified runner or clear the GPU share. There is no environment, model parameter or public API override. Normal vLLM without MPS is unchanged. Only approved calibration followed by normal model readiness, text-response and cleanup evidence for the exact tuple can add a production qualification. Unit-test providers do not qualify hardware.
+
+The overview adds `limits.budget.gpuShare={smPercent,vramBytes,assurance:"best-effort"}` only when configured. The dashboard adds a Limits from Ploinky line with the per-CUDA-process scope. Unlimited overview, runner argv and telemetry shapes retain their previous output.
 
 ## Decisions & Questions
 
