@@ -15,7 +15,7 @@ import test from 'node:test';
 import { RAM_MARGIN_BYTES } from '../src/controller/admission.mjs';
 import { loadSeedCatalog, validateModel } from '../src/controller/catalog.mjs';
 import { createController } from '../src/controller/deployments.mjs';
-import { readCgroupMemory, readCgroupMemoryObservation } from '../src/controller/hardware.mjs';
+import { readCgroupMemory, readCgroupMemoryObservation, readMemory } from '../src/controller/hardware.mjs';
 import { attachMemoryBudget } from '../src/controller/ploinkyBudget.mjs';
 import { createStateStore } from '../src/controller/stateStore.mjs';
 import { RUNNERS } from '../src/runners/index.mjs';
@@ -68,6 +68,7 @@ export const PATHS = Object.freeze({
     'vllm-offload': { gpu: DEDICATED_GPU, runnerId: 'vllm', modelId: 'qwen3-4b-awq', params: { cpuOffloadGb: 1 }, need: 'ramBytes', reserve: 'offloadFloor' },
     tabby: { gpu: DEDICATED_GPU, runnerId: 'tabbyapi', modelId: 'qwen3-8b-exl3', need: 'ramBytes', reserve: 'margin' },
     'cpu-llama': { gpu: NO_GPU, runnerId: 'llama.cpp', modelId: 'qwen2.5-0.5b-instruct-q4_k_m', need: 'ramBytes', reserve: 'poolFloor' },
+    'cpu-llama-build': { gpu: NO_GPU, runnerId: 'llama.cpp-cpu', modelId: 'qwen2.5-0.5b-instruct-q4_k_m', need: 'ramBytes', reserve: 'poolFloor' },
     'cpu-ollama': { gpu: NO_GPU, runnerId: 'ollama', modelId: 'gpt-oss-20b', need: 'ramBytes', reserve: 'poolFloor' },
     'unified-llama': { gpu: UNIFIED_GPU, runnerId: 'llama.cpp', modelId: 'qwen2.5-0.5b-instruct-q4_k_m', need: 'unifiedBytes', reserve: 'poolFloor' },
     'unified-vllm': { gpu: UNIFIED_GPU, runnerId: 'vllm', modelId: 'qwen3-4b-awq-unified', params: { gpuMemoryUtilization: 0.3 }, need: 'unifiedBytes', reserve: 'poolFloor' },
@@ -88,10 +89,10 @@ function cgroupFs({ max, current }) {
 
 // The snapshot the controller sees: the production readers parse the cgroup
 // files; the internal observation is attached as readSnapshot attaches it.
-function budgetSnapshot(gpu, cgroup) {
+function budgetSnapshot(gpu, cgroup, memory = RAW) {
     const fsApi = cgroupFs(cgroup);
     const snap = {
-        gpu: structuredClone(gpu), memory: { ...RAW }, disk: { freeBytes: 1024 * GIB, totalBytes: 2048 * GIB }, cpus: 20, cores: 10,
+        gpu: structuredClone(gpu), memory: { ...memory }, disk: { freeBytes: 1024 * GIB, totalBytes: 2048 * GIB }, cpus: 20, cores: 10,
         cgroupMemory: readCgroupMemory({ fsApi }),
     };
     return attachMemoryBudget(snap, readCgroupMemoryObservation({ fsApi, established: null }));
@@ -101,7 +102,8 @@ const withHeadroom = (headroom) => ({ max: `${CAP}\n`, current: `${CAP - headroo
 
 function harness(t, spec, initialCgroup) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-budget-'));
-    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    let controller = null;
+    t.after(async () => { await controller?.stop(); fs.rmSync(root, { recursive: true, force: true }); });
     const dataDir = path.join(root, 'data');
     const weights = path.join(root, 'weights.gguf');
     fs.writeFileSync(weights, 'x');
@@ -117,6 +119,8 @@ function harness(t, spec, initialCgroup) {
         lmstudio: Object.freeze({ ...RUNNERS.lmstudio, start: (ctx) => RUNNERS.lmstudio.start(ctx, { procDir }) }),
     });
     let cgroup = initialCgroup;
+    let memory = spec.memory || RAW;
+    let beforeVerify = null;
     const started = [];
     const downloads = [];
     const installer = {
@@ -126,7 +130,7 @@ function harness(t, spec, initialCgroup) {
         entryFor: (id) => ({ id, version: 'test' }),
         pathsFor: () => ({ runDir }),
     };
-    const controller = createController({
+    controller = createController({
         dataDir,
         // The operator switches for the runners that need one (vLLM on unified memory, LM Studio).
         env: {
@@ -136,12 +140,14 @@ function harness(t, spec, initialCgroup) {
         seedCatalog: [...SEED, AWQ_UNIFIED],
         runners,
         stateStore: createStateStore({ dataDir }),
-        snapshot: async () => budgetSnapshot(spec.gpu, cgroup),
+        snapshot: async () => budgetSnapshot(spec.gpu, cgroup, memory),
         download: async ({ artifact }) => { downloads.push(artifact); return { status: 'complete', path: weights, bytesTransferred: 0 }; },
         inspect: async () => ({ state: 'absent', bytes: 0 }),
         remove: async () => 0,
         inspectSnapshot: async () => ({ state: 'complete', bytes: 1 }),
         downloadSnapshot: async () => { downloads.push('snapshot'); return { status: 'complete', bytesTransferred: 0 }; },
+        verify: async () => { beforeVerify?.(); return { notes: [] }; },
+        verifySnapshot: async () => { beforeVerify?.(); return { notes: [] }; },
         installer,
         startRunner({ command, args, env }) {
             let running = true;
@@ -163,7 +169,7 @@ function harness(t, spec, initialCgroup) {
         fileExists: () => true,
         sharedModelsRoot: null,
         shmDir: path.join(root, 'shm'),
-        readMemory: () => ({ ...RAW }),
+        readMemory: () => ({ ...memory }),
         readPressure: () => 0,
         readBudget: () => readCgroupMemoryObservation({ fsApi: cgroupFs(cgroup), established: null }),
         unifiedGuardMs: 60_000,
@@ -176,6 +182,8 @@ function harness(t, spec, initialCgroup) {
     return {
         controller, started, downloads,
         setCgroup(next) { cgroup = next; },
+        setMemory(next) { memory = next; },
+        setBeforeVerify(callback) { beforeVerify = callback; },
         run: (requestId) => controller.run({ modelId: spec.modelId, runnerId: spec.runnerId, requestId, ...(spec.params ? { params: spec.params } : {}) }),
     };
 }
@@ -327,4 +335,48 @@ for (const name of Object.keys(PATHS)) {
     for (const [vector, run] of Object.entries(VECTORS)) {
         test(`LL-RAM.${name}.${vector}`, async (t) => run(t, name));
     }
+}
+
+function rawReadings(field, state) {
+    const values = { MemTotal: String(RAW.totalBytes / 1024), MemAvailable: String(RAW.availableBytes / 1024) };
+    if (state === 'missing') delete values[field];
+    else values[field] = 'not-a-number';
+    const text = Object.entries(values).map(([name, value]) => `${name}: ${value} kB`).join('\n');
+    return readMemory({ fsApi: { readFileSync: () => text } });
+}
+
+for (const name of Object.keys(PATHS)) {
+    for (const [field, property] of [['MemTotal', 'total'], ['MemAvailable', 'available']]) {
+        for (const state of ['missing', 'malformed']) {
+            test(`LL-RAM.${name}.raw-${property}-${state}`, async (t) => {
+                const memory = rawReadings(field, state);
+                assert.equal(memory[property === 'total' ? 'totalBytes' : 'availableBytes'], null);
+                const h = harness(t, { ...PATHS[name], memory }, withHeadroom(DERIVE_HEADROOM));
+                await assertRefusedNow(h, `raw-${property}-${state}-${name.replace(/\W/g, '')}`, { reasonCode: 'budget_unreadable' });
+                await assert.rejects(h.run('raw-memory-unknown-retry'), (error) => {
+                    assert.match(error.message, /physical total or available RAM cannot be read/);
+                    assert.ok(error.message.length < 1024);
+                    return error.code === 'admission_insufficient_now';
+                });
+                h.setMemory(RAW);
+                const accepted = await h.run(`raw-memory-recovered-${name.replace(/\W/g, '')}`);
+                assert.equal(accepted.accepted, true);
+                await until(() => h.started.length === 1);
+                assert.equal(h.controller.state.deployment.admission.status, 'ok');
+                await h.controller.stop();
+            });
+        }
+    }
+}
+
+for (const name of ['llama', 'vllm', 'cpu-llama', 'unified-vllm']) {
+    test(`LL-RAM.${name}.raw-unknown-at-launch-recheck`, async (t) => {
+        const h = harness(t, PATHS[name], withHeadroom(DERIVE_HEADROOM));
+        h.setBeforeVerify(() => h.setMemory(rawReadings('MemAvailable', 'malformed')));
+        assert.equal((await h.run(`raw-late-${name.replace(/\W/g, '')}`)).accepted, true);
+        await until(() => h.controller.state.deployment?.phase === 'error');
+        assert.equal(h.controller.state.deployment.admission.reasonCode, 'budget_unreadable');
+        assert.equal(h.controller.state.deployment.admission.status, 'insufficient-now');
+        assert.equal(h.started.length, 0, 'fresh launch-time admission refuses before process creation');
+    });
 }

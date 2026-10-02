@@ -142,9 +142,11 @@ export function effectiveMemory(memory, observation) {
     const raw = memory || {};
     const rawTotal = knownByte(raw.totalBytes) ? raw.totalBytes : null;
     const rawAvailable = knownByte(raw.availableBytes) ? raw.availableBytes : null;
-    const totalBytes = rawTotal === null ? observation.finiteMemoryBytes : Math.min(rawTotal, observation.finiteMemoryBytes);
-    const candidates = [totalBytes, observation.headroomBytes];
-    if (rawAvailable !== null) candidates.push(rawAvailable);
+    // A cap is not a reading of physical RAM. Admission refuses this unknown
+    // view; never turn a missing host reading into fabricated capacity.
+    if (rawTotal === null || rawAvailable === null || !knownByte(observation.headroomBytes)) return memory;
+    const totalBytes = Math.min(rawTotal, observation.finiteMemoryBytes);
+    const candidates = [rawAvailable, totalBytes, observation.headroomBytes];
     return {
         ...raw,
         totalBytes,
@@ -162,15 +164,23 @@ export const BUDGET_UNREADABLE_MESSAGE = 'This agent has a container memory limi
 export const BUDGET_LIMIT_UNREADABLE_MESSAGE = 'This agent\'s container memory limit cannot be read, so no model is started on an '
     + 'unknown budget. Retry in a moment; if it persists, check the container\'s cgroup (memory.max) and restart local-llm.';
 
+export const BUDGET_HOST_MEMORY_UNREADABLE_MESSAGE = 'This agent has a finite container memory limit, but physical total or available RAM cannot be read. '
+    + 'No model starts on fabricated capacity or headroom. Check /proc/meminfo and retry after its readings recover.';
+
 /**
  * The refusal before any runner dispatch, including the CPU profile: a known
- * finite limit whose current use cannot be read. Temporary (insufficient-now),
+ * finite limit whose current use or required raw RAM readings cannot be read. Temporary (insufficient-now),
  * never a permanent incompatibility. Null when admission may proceed.
  */
-export function budgetGuard(observation, result) {
-    if (observation?.memoryReadState !== 'unknown') return null;
-    const message = knownByte(observation.finiteMemoryBytes) ? BUDGET_UNREADABLE_MESSAGE : BUDGET_LIMIT_UNREADABLE_MESSAGE;
-    return result('insufficient-now', message, {}, [], UNREADABLE_REASON);
+export function budgetGuard(observation, result, memory) {
+    if (observation?.memoryReadState === 'unknown') {
+        const message = knownByte(observation.finiteMemoryBytes) ? BUDGET_UNREADABLE_MESSAGE : BUDGET_LIMIT_UNREADABLE_MESSAGE;
+        return result('insufficient-now', message, {}, [], UNREADABLE_REASON);
+    }
+    if (knownByte(observation?.finiteMemoryBytes) && (!knownByte(memory?.totalBytes) || !knownByte(memory?.availableBytes))) {
+        return result('insufficient-now', BUDGET_HOST_MEMORY_UNREADABLE_MESSAGE, {}, [], UNREADABLE_REASON);
+    }
+    return null;
 }
 
 /**

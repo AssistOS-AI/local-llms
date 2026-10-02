@@ -391,7 +391,7 @@ export function admit({ runner, model, source, params, snapshot, remainingDownlo
     // every profile, the CPU one included, before any policy runs: temporary,
     // never a permanent incompatibility, and no model starts on guessed headroom.
     const budget = memoryBudgetOf(snapshot);
-    const unreadableBudget = budgetGuard(budget, result);
+    const unreadableBudget = budgetGuard(budget, result, snapshot?.memory);
     if (unreadableBudget) return unreadableBudget;
     if (gpuBudget.state === 'unknown') return result('incompatible', gpuBudget.reason, {}, [], gpuBudget.reasonCode);
     if (profile === 'cpu') {

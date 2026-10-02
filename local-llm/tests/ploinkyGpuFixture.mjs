@@ -7,6 +7,7 @@ import { createController } from '../src/controller/deployments.mjs';
 import { createStateStore } from '../src/controller/stateStore.mjs';
 import { validateRunnerLock } from '../src/controller/runnerLock.mjs';
 import { vllmRunnerLockDigest } from '../src/controller/vllmMpsQualification.mjs';
+import { observeMemoryBudget } from '../src/controller/ploinkyBudget.mjs';
 import { RUNNERS } from '../src/runners/index.mjs';
 import { IMAGE_LOCK } from './overview-scenarios.mjs';
 
@@ -33,7 +34,8 @@ export function testQualification(gpu = TEST_GPU) {
         denominator: 'physical-device', evidenceDigest: 'e'.repeat(64) };
 }
 
-export function gpuHarness(t, { gpu = TEST_GPU, env = MPS_ENV, qualificationDataProvider = () => [testQualification(gpu)], profile = null, seedCatalog = null } = {}) {
+export function gpuHarness(t, { gpu = TEST_GPU, env = MPS_ENV, qualificationDataProvider = () => [testQualification(gpu)], profile = null, seedCatalog = null,
+    cgroupMemory = null, readMemory = () => ({ totalBytes: 128 * GIB, availableBytes: 120 * GIB }), guardSampleMs = 60_000 } = {}) {
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-gpu-budget-')));
     const dataDir = path.join(root, 'data');
     const weights = path.join(root, 'weights.gguf');
@@ -54,19 +56,20 @@ export function gpuHarness(t, { gpu = TEST_GPU, env = MPS_ENV, qualificationData
         dataDir, env: { PATH: '/usr/bin', LOCAL_LLM_VLLM_UNIFIED: 'experimental', LOCAL_LLM_LMSTUDIO: 'internal-use', LOCAL_LLM_RUN_ROOT: path.join(root, 'opt', 'runners'), PRIVATE_AGENT_SECRET: 'do-not-forward', ...env },
         seedCatalog: seedCatalog || [...SEED, GPU_MODEL], runners, runnerLocks: GPU_TEST_LOCK, qualificationDataProvider, installer,
         stateStore: createStateStore({ dataDir }), profile,
-        snapshot: async () => ({ gpu: structuredClone(currentGpu), memory: { totalBytes: 128 * GIB, availableBytes: 120 * GIB }, disk: { freeBytes: 1024 * GIB, totalBytes: 2048 * GIB }, cpus: 20, cores: 10, cgroupMemory: null }),
+        snapshot: async () => ({ gpu: structuredClone(currentGpu), memory: { totalBytes: 128 * GIB, availableBytes: 120 * GIB }, disk: { freeBytes: 1024 * GIB, totalBytes: 2048 * GIB }, cpus: 20, cores: 10, cgroupMemory }),
         download: async () => ({ status: 'complete', path: weights, bytesTransferred: 0 }), inspect: async () => ({ state: 'absent', bytes: 0 }), remove: async () => 0,
         inspectSnapshot: async () => ({ state: 'complete', bytes: 1 }), downloadSnapshot: async () => ({ status: 'complete', bytesTransferred: 0 }),
         fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}), text: async () => '{}' }), apiKeyFactory: () => 'k'.repeat(43),
         detectRunner: (definition) => ({ installed: definition.supported, version: definition.pinnedVersion || 'test', reason: null }), imageContract: null,
-        fileExists: () => true, sharedModelsRoot: null, shmDir: path.join(root, 'shm'), readMemory: () => ({ totalBytes: 128 * GIB, availableBytes: 120 * GIB }),
-        readPressure: () => 0, unifiedGuardMs: 60_000, memoryGuardLoadMs: 60_000, memoryGuardReadyMs: 60_000, dropCache: () => true, pollMs: 2, stopGraceMs: 20,
+        fileExists: () => true, sharedModelsRoot: null, shmDir: path.join(root, 'shm'), readMemory,
+        readBudget: () => observeMemoryBudget({ maxText: cgroupMemory ? String(cgroupMemory.maxBytes) : undefined, currentText: cgroupMemory ? String(cgroupMemory.currentBytes) : undefined }),
+        readPressure: () => 0, unifiedGuardMs: guardSampleMs, memoryGuardLoadMs: guardSampleMs, memoryGuardReadyMs: guardSampleMs, dropCache: () => true, pollMs: 2, stopGraceMs: 20,
         startRunner({ command, args, env: runnerEnv }) {
             let running = true;
             let finish;
             const handle = { pid: 6000 + started.length, command, args, env: runnerEnv, exited: new Promise((resolve) => { finish = resolve; }), get running() { return running; },
-                async stop() { running = false; finish({ code: 0, signal: 'SIGTERM', error: null }); return handle.exited; },
-                async kill() { running = false; finish({ code: null, signal: 'SIGKILL', error: null }); return handle.exited; } };
+                async stop() { running = false; handle.stopped = 'SIGTERM'; finish({ code: 0, signal: 'SIGTERM', error: null }); return handle.exited; },
+                async kill() { running = false; handle.stopped = 'SIGKILL'; finish({ code: null, signal: 'SIGKILL', error: null }); return handle.exited; } };
             started.push(handle);
             return handle;
         },

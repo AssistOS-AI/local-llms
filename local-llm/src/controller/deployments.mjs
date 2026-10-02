@@ -42,7 +42,7 @@ import {
     untilStopped,
 } from './hardware.mjs';
 import { lookupHuggingFaceModel } from './modelLookup.mjs';
-import { BUDGET_UNREADABLE, MPS_VARIABLES, cpuQuotaOf, gpuBudgetOf, memoryBudgetOf, mpsRunnerEnvironment, overviewBudget } from './ploinkyBudget.mjs';
+import { BUDGET_UNREADABLE, MPS_VARIABLES, cpuQuotaOf, gpuBudgetOf, knownByte, memoryBudgetOf, mpsRunnerEnvironment, overviewBudget } from './ploinkyBudget.mjs';
 import {
     UNIFIED,
     UNREADABLE_COMMIT_MS,
@@ -1055,10 +1055,12 @@ export function createController({
         };
         // The available memory within the container budget, or undefined when
         // the budget's current use could not be read (counted, then stopped).
-        const withinBudget = (available) => {
+        const withinBudget = (available, memory) => {
             if (!budgeted) return available;
             const observation = sampleBudget();
-            if (observation?.memoryReadState !== 'known') {
+            if (observation?.memoryReadState !== 'known'
+                || (knownByte(observation.finiteMemoryBytes)
+                    && (!knownByte(memory?.totalBytes) || !knownByte(memory?.availableBytes) || !knownByte(observation.headroomBytes)))) {
                 unreadableBudgetSamples += 1;
                 return undefined;
             }
@@ -1071,7 +1073,7 @@ export function createController({
                 schedule();
                 return;
             }
-            breach(`stopped: ${BUDGET_UNREADABLE}: the container memory limit's current use could not be read twice in a row, `
+            breach(`stopped: ${BUDGET_UNREADABLE}: a required host or container memory reading could not be read twice in a row, `
                 + 'so the runner cannot be watched', { kill: true });
         };
         const tick = () => {
@@ -1079,15 +1081,17 @@ export function createController({
             // or Replace too (the exit cancels the guard). Dedicated: while current.
             if (cancelled || (!pooled && runner !== current)) return;
             let available = null;
+            let memory = null;
             try {
-                available = readMemory().availableBytes;
+                memory = readMemory();
+                available = memory.availableBytes;
             } catch {}
             // An unreadable /proc/meminfo stops a pooled runner at once, before the budget is sampled.
             if (pooled && !Number.isFinite(available)) {
                 breach('stopped: host memory cannot be read (/proc/meminfo), so the runner cannot be watched');
                 return;
             }
-            available = withinBudget(available);
+            available = withinBudget(available, memory);
             if (available === undefined) {
                 budgetUnreadable();
                 return;
