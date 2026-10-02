@@ -63,6 +63,28 @@ const SIZING_DIRECTORIES = Object.freeze(['v1/worker', 'utils']);
 const MAX_SIZING_FILES = 120;
 const MAX_SIZING_LINES = 40;
 
+// The sizing semantics a qualification may rest on, reviewed per EXACT vLLM version. A keyword in a
+// file is never proof: the installed source must hold both statements below. `request`: the memory
+// vLLM asks for is the device's total memory times gpu_memory_utilization (the denominator is
+// whatever `total` is). `total`: that total is read from the CUDA runtime's mem_get_info, which is
+// what the tool measures under two MPS limits. The entry for a version records what review expects
+// of that version's source; it is confirmed only by a stage 1 document whose `sizing.rules` hold the
+// matching lines of the installed wheel. A version without an entry has no reviewed sizing
+// semantics, so no calibration of it is qualifiable.
+export const REVIEWED_SIZING = Object.freeze({
+    '0.30.0': Object.freeze({
+        expectation: 'requested = total_memory * gpu_memory_utilization, with total_memory from mem_get_info()',
+        request: Object.freeze([
+            String.raw`\b[\w.]*total_memory\s*\*\s*[\w.]*gpu_memory_utilization\b`,
+            String.raw`\b[\w.]*gpu_memory_utilization\s*\*\s*[\w.]*total_memory\b`,
+        ]),
+        total: Object.freeze([
+            String.raw`\b[\w.]*total[\w.]*\s*=\s*(?:torch\.cuda|current_platform)\.mem_get_info\(`,
+            String.raw`,\s*[\w.]*total[\w.]*\s*=\s*(?:torch\.cuda|current_platform)\.mem_get_info\(`,
+        ]),
+    }),
+});
+
 // ---------------------------------------------------------------------------
 // Canonical JSON and the evidence digest.
 
@@ -342,9 +364,17 @@ export function compareIdentities({ entry, installedVersion, ready, torch, distr
     return { matches: mismatches.length === 0, mismatches, observed: { vllm: installedVersion ?? null, readyDigest: ready?.digest ?? null, torch: torch?.share?.torch ?? null, torchCuda: torch?.share?.torchCuda ?? null, distributions: distributions ?? null } };
 }
 
-/** The source lines that size vLLM's request against the device, with file and line (bounded). */
-export function scanSizingSource({ fsApi = fs, root }) {
-    const lines = []; let scanned = 0; let truncated = false;
+/**
+ * The source lines that size vLLM's request against the device, with file and line (bounded), and,
+ * from the whole scan, the lines that hold each statement of the reviewed rules for `version`.
+ * `truncated` means the SCAN was cut short (the file bound, or a file that cannot be read): an
+ * incomplete scan proves nothing. `linesOmitted` only counts evidence lines beyond the bound.
+ */
+export function scanSizingSource({ fsApi = fs, root, version = null }) {
+    const reviewed = version !== null && Object.hasOwn(REVIEWED_SIZING, version) ? REVIEWED_SIZING[version] : null;
+    const compiled = reviewed ? Object.fromEntries(['request', 'total'].map((name) => [name, reviewed[name].map((source) => new RegExp(source))])) : { request: [], total: [] };
+    const lines = []; const rules = { request: [], total: [] };
+    let scanned = 0; let truncated = false; let unreadable = 0; let omitted = 0;
     for (const directory of SIZING_DIRECTORIES) {
         let names = [];
         try { names = fsApi.readdirSync(path.join(root, directory)).filter((name) => name.endsWith('.py')).sort(); } catch { names = []; }
@@ -352,15 +382,38 @@ export function scanSizingSource({ fsApi = fs, root }) {
             if (scanned >= MAX_SIZING_FILES) { truncated = true; break; }
             scanned += 1;
             let text;
-            try { text = fsApi.readFileSync(path.join(root, directory, name), 'utf8'); } catch { continue; }
+            try { text = fsApi.readFileSync(path.join(root, directory, name), 'utf8'); } catch { unreadable += 1; truncated = true; continue; }
             text.split('\n').forEach((line, index) => {
+                const hit = { file: `${directory}/${name}`, line: index + 1, text: line.trim().slice(0, 160) };
+                for (const rule of ['request', 'total']) {
+                    if (rules[rule].length < 4 && compiled[rule].some((pattern) => pattern.test(line))) rules[rule].push(hit);
+                }
                 if (!SIZING_PATTERN.test(line)) return;
-                if (lines.length >= MAX_SIZING_LINES) { truncated = true; return; }
-                lines.push({ file: `${directory}/${name}`, line: index + 1, text: line.trim().slice(0, 160) });
+                if (lines.length >= MAX_SIZING_LINES) { omitted += 1; return; }
+                lines.push(hit);
             });
         }
     }
-    return { root, filesScanned: scanned, lines, truncated };
+    return { root, filesScanned: scanned, lines, linesOmitted: omitted, truncated, unreadable, rules };
+}
+
+/**
+ * Whether the sizing evidence supports a qualification: the source belongs to the vLLM version the
+ * lock pins, that exact version's sizing semantics were reviewed, the scan was complete, and the
+ * source holds BOTH reviewed statements. Anything else says precisely what is missing.
+ */
+export function sizingVerdict({ installedVersion, lockVersion, scan }) {
+    const reasons = [];
+    const reviewed = Object.hasOwn(REVIEWED_SIZING, String(lockVersion));
+    if (typeof installedVersion !== 'string' || installedVersion !== lockVersion) reasons.push(`the sizing source belongs to vLLM ${installedVersion ?? 'unknown'}, but the lock pins ${lockVersion}`);
+    if (!reviewed) reasons.push(`the sizing expression of vLLM ${lockVersion} has not been reviewed`);
+    if (!scan || scan.filesScanned === 0) reasons.push('no sizing source files were found in the installed package');
+    else if (scan.truncated) reasons.push(`the sizing scan was cut short (${scan.unreadable} unreadable files, or more than ${MAX_SIZING_FILES} files)`);
+    if (reviewed && scan && scan.filesScanned > 0) {
+        if (!scan.rules?.request?.length) reasons.push('no statement computes the requested memory as the device total times gpu_memory_utilization');
+        if (!scan.rules?.total?.length) reasons.push('no statement reads the device total from mem_get_info');
+    }
+    return { ok: reasons.length === 0, reasons, lockVersion, installedVersion: installedVersion ?? null, reviewed, expectation: reviewed ? REVIEWED_SIZING[lockVersion].expectation : null };
 }
 
 function vllmPackage({ fsApi = fs, runnerDir }) {
@@ -480,7 +533,8 @@ export async function calibrationReport({
     for (const [name, reply] of Object.entries({ torchShare, torchTight, ctypesShare, ctypesTight, distributions })) {
         if (!reply.ok) block('query_failed', `The bounded ${name} query did not return a document: ${String(reply.error).slice(0, 200)}`, { query: name, status: reply.status });
     }
-    const sizing = scanSizingSource({ fsApi, root: installed.root });
+    const sizing = scanSizingSource({ fsApi, root: installed.root, version: entry.version });
+    const sizingCheck = sizingVerdict({ installedVersion: installed.version, lockVersion: entry.version, scan: sizing });
 
     const identity = compareIdentities({ entry, installedVersion: installed.version, ready, torch: { share: torchShare.value, tight: torchTight.value }, distributions: distributions.value });
     const torchTotal = torchShare.value?.memGetInfo?.total ?? null;
@@ -504,6 +558,7 @@ export async function calibrationReport({
         admissionFits: admission.status === 'ok',
         argvBuilt: launch !== null,
         identityMatchesLock: identity.matches,
+        sizingEvidence: sizingCheck.ok,
         hostAgrees: hostNvmlBytes === null || hostNvmlBytes === raw.totalBytes,
     };
     const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([name]) => name);
@@ -520,7 +575,7 @@ export async function calibrationReport({
         },
         denominator: classification,
         identity,
-        sizing,
+        sizing: { ...sizing, verdict: sizingCheck },
         argv: launch ? { command: launch.command, args: launch.args, envNames: Object.keys(launch.env).sort(), mpsEnvironment: budget.environment } : { error: launchError, mpsEnvironment: budget.environment },
         admission: { status: admission.status, reason: admission.reason, reasonCode: admission.reasonCode ?? null, estimate: admission.estimate },
         verdict: { qualifiable: failed.length === 0 && blockers.length === 0, denominator: classification.denominator, checks, failed },
@@ -543,6 +598,8 @@ export function renderQualificationEntry(evidence) {
     const fail = (message) => { throw new Error(`Cannot render a qualification entry: ${message}`); };
     if (!evidence || evidence.schema !== CALIBRATION_SCHEMA) fail('the document is not a stage-1 calibration');
     if (evidence.verdict?.qualifiable !== true || evidence.verdict?.denominator !== 'physical-device') fail('the calibration did not establish the physical-device denominator');
+    // The evidence must hold the reviewed sizing semantics of the exact version it was calibrated for.
+    if (evidence.verdict?.checks?.sizingEvidence !== true || evidence.sizing?.verdict?.ok !== true) fail('the evidence holds no reviewed sizing expression of the locked vLLM version');
     // The evidence must itself show that what was installed and queried is what the lock pins.
     if (evidence.verdict?.checks?.identityMatchesLock !== true || evidence.identity?.matches !== true || evidence.identity?.mismatches?.length) fail('the installed identities were not shown to equal the lock\'s pins');
     const digest = evidenceDigest(evidence);

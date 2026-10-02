@@ -19,7 +19,7 @@ import { createVllmMpsQualificationResolver, resolveVllmMpsQualification, vllmRu
 import { vllmMpsTuple, vllmRunner } from '../src/runners/vllm.mjs';
 import {
     CALIBRATION_SCHEMA, CTYPES_QUERY, DIST_QUERY, TORCH_QUERY, TUPLE_FIELDS, applyQualificationEntry, calibrationReport, canonicalJson, classifyDenominator, compareIdentities, evidenceDigest,
-    main, prerequisiteReport, renderQualificationEntry, scanSizingSource, wheelPythonTag,
+    REVIEWED_SIZING, main, prerequisiteReport, renderQualificationEntry, scanSizingSource, sizingVerdict, wheelPythonTag,
 } from '../tools/vllm_mps_calibration.mjs';
 
 const MIB = 1024 * 1024;
@@ -67,7 +67,8 @@ function scratch(t) {
 }
 
 // An installed vLLM under <root>/vllm/0.30.0 with a venv, its package source and its ready marker.
-function installVllm(root, { sizing = true, version = '0.30.0', ready = { digest: ENTRY.digest } } = {}) {
+// `sizing`: true writes the reviewed statements, false writes no sizing file, or an object { worker, utils } gives the two files' text.
+function installVllm(root, { sizing = true, version = '0.30.0', ready = { digest: ENTRY.digest }, extraFiles = 0 } = {}) {
     const runner = path.join(root, 'vllm', '0.30.0');
     const site = path.join(runner, 'venv', 'lib', 'python3.13', 'site-packages');
     fs.mkdirSync(path.join(runner, 'venv', 'bin'), { recursive: true });
@@ -77,9 +78,14 @@ function installVllm(root, { sizing = true, version = '0.30.0', ready = { digest
     fs.mkdirSync(path.join(site, `vllm-${version}.dist-info`), { recursive: true });
     if (version !== null) fs.writeFileSync(path.join(site, `vllm-${version}.dist-info`, 'METADATA'), `Metadata-Version: 2.4\nName: vllm\nVersion: ${version}\n`);
     if (sizing) {
-        fs.writeFileSync(path.join(site, 'vllm', 'v1', 'worker', 'gpu_worker.py'), 'def request_memory(snapshot, cache_config):\n    requested_memory = snapshot.total_memory * cache_config.gpu_memory_utilization\n    return requested_memory\n');
-        fs.writeFileSync(path.join(site, 'vllm', 'utils', 'mem_utils.py'), 'free, total = torch.cuda.mem_get_info()\n');
+        const text = typeof sizing === 'object' ? sizing : {
+            worker: 'def request_memory(snapshot, cache_config):\n    requested_memory = snapshot.total_memory * cache_config.gpu_memory_utilization\n    return requested_memory\n',
+            utils: 'class MemorySnapshot:\n    def measure(self):\n        self.free_memory, self.total_memory = torch.cuda.mem_get_info()\n',
+        };
+        fs.writeFileSync(path.join(site, 'vllm', 'v1', 'worker', 'gpu_worker.py'), text.worker);
+        fs.writeFileSync(path.join(site, 'vllm', 'utils', 'mem_utils.py'), text.utils);
     }
+    for (let index = 0; index < extraFiles; index += 1) fs.writeFileSync(path.join(site, 'vllm', 'utils', `zz_extra_${String(index).padStart(3, '0')}.py`), '# nothing\n');
     if (ready !== null) fs.writeFileSync(path.join(runner, '.ready.json'), JSON.stringify(ready));
     return runner;
 }
@@ -264,6 +270,10 @@ test('CAL.calibration-runs-bounded-queries-under-both-limits-compares-with-nvml-
     assert.equal(evidence.install.packageVersion, '0.30.0');
     assert.ok(evidence.sizing.lines.some((line) => line.file === 'v1/worker/gpu_worker.py' && line.line === 2 && /gpu_memory_utilization/.test(line.text)), JSON.stringify(evidence.sizing));
     assert.ok(evidence.sizing.lines.some((line) => /mem_get_info/.test(line.text)));
+    // The reviewed statements of this exact version were found, with file and line: that is the sizing evidence.
+    assert.deepEqual(evidence.sizing.rules.request.map((hit) => [hit.file, hit.line]), [['v1/worker/gpu_worker.py', 2]]);
+    assert.deepEqual(evidence.sizing.rules.total.map((hit) => [hit.file, hit.line]), [['utils/mem_utils.py', 3]]);
+    assert.deepEqual([evidence.sizing.verdict.ok, evidence.sizing.verdict.reviewed, evidence.sizing.verdict.installedVersion, evidence.sizing.verdict.lockVersion], [true, true, '0.30.0', '0.30.0']);
     // The verdict and the digest.
     assert.equal(evidence.denominator.denominator, 'physical-device');
     assert.deepEqual(evidence.verdict, { qualifiable: true, denominator: 'physical-device', checks: evidence.verdict.checks, failed: [] });
@@ -477,7 +487,9 @@ test('CAL.identities-are-compared-with-the-selected-lock-entry-and-any-mismatch-
         assert.ok(evidence.verdict.failed.includes('identityMatchesLock'), `${label}: ${evidence.verdict.failed}`);
         assert.equal(evidence.verdict.checks.identityMatchesLock, false, label);
         // Independent: nothing else failed because of it, and the real observations stay in the document.
-        assert.deepEqual(evidence.verdict.failed.filter((name) => name !== 'identityMatchesLock'), [], `${label}: only the identity check failed`);
+        // A package that is not the locked version also fails the sizing evidence: its source belongs to that other version (CAL2).
+        const consequences = what === 'vLLM package version' || what === null ? ['sizingEvidence'] : [];
+        assert.deepEqual(evidence.verdict.failed.filter((name) => name !== 'identityMatchesLock' && !consequences.includes(name)), [], `${label}: only the identity check failed`);
         if (what) {
             const found = evidence.identity.mismatches.find((entry) => entry.what === what);
             assert.ok(found, `${label}: ${JSON.stringify(evidence.identity.mismatches)}`);
@@ -510,4 +522,65 @@ test('CAL.the-identity-comparison-is-pure-and-names-a-lock-without-pins-or-cuda'
         const result = compareIdentities({ ...base, ...change });
         assert.equal(result.matches, false, label); assert.ok(result.mismatches.some((entry) => entry.what === what), `${label}: ${JSON.stringify(result.mismatches)}`);
     }
+});
+
+// --- CAL2: the sizing evidence of the exact locked version -------------------------------------------------
+test('CAL.qualification-needs-the-reviewed-sizing-statements-of-the-locked-version-and-a-keyword-is-never-proof', async (t) => {
+    const control = await calibrate(t);
+    assert.equal(control.report.evidence.verdict.qualifiable, true, JSON.stringify(control.report.evidence.verdict));
+    assert.equal(control.report.evidence.verdict.checks.sizingEvidence, true);
+    const REQUEST = 'requested_memory = snapshot.total_memory * cache_config.gpu_memory_utilization\n';
+    const TOTAL = 'self.free_memory, self.total_memory = torch.cuda.mem_get_info()\n';
+    const cases = [
+        ['no sizing file at all', { install: { sizing: false } }, /no sizing source files were found/],
+        ['keyword hits that state nothing', { install: { sizing: { worker: '# gpu_memory_utilization is the fraction of total_memory that is used\n', utils: '# see mem_get_info for the free and total memory\n' } } }, /no statement computes the requested memory/],
+        ['the product without the total', { install: { sizing: { worker: REQUEST, utils: '# mem_get_info\nvalue = total_memory\n' } } }, /no statement reads the device total from mem_get_info/],
+        ['the total without the product', { install: { sizing: { worker: 'requested = gpu_memory_utilization\n', utils: TOTAL } } }, /no statement computes the requested memory/],
+        ['a statement that takes the total from another source', { install: { sizing: { worker: REQUEST, utils: 'self.free_memory, self.total_memory = some_cache.read()\n' } } }, /no statement reads the device total from mem_get_info/],
+        ['a scan that was cut short', { install: { extraFiles: 130 } }, /sizing scan was cut short/],
+    ];
+    for (const [label, options, reason] of cases) {
+        const { report } = await calibrate(t, options);
+        const evidence = report.evidence;
+        assert.equal(evidence.verdict.qualifiable, false, `${label} must not be qualifiable`);
+        assert.ok(evidence.verdict.failed.includes('sizingEvidence'), `${label}: ${evidence.verdict.failed}`);
+        assert.deepEqual(evidence.verdict.failed.filter((name) => name !== 'sizingEvidence'), [], `${label}: only the sizing check failed`);
+        assert.ok(evidence.sizing.verdict.reasons.some((entry) => reason.test(entry)), `${label}: ${JSON.stringify(evidence.sizing.verdict.reasons)}`);
+        assert.equal(report.proposed, undefined, label); assert.throws(() => renderQualificationEntry(evidence), /Cannot render a qualification entry/, label);
+    }
+    // Keyword evidence stays in the document, but it is evidence, not the verdict.
+    const keywords = await calibrate(t, { install: { sizing: { worker: '# gpu_memory_utilization total_memory\n', utils: '# mem_get_info\n' } } });
+    assert.ok(keywords.report.evidence.sizing.lines.length >= 2); assert.deepEqual(keywords.report.evidence.sizing.rules, { request: [], total: [] });
+    // A source of another version than the lock pins, and a version whose sizing was never reviewed.
+    const other = await calibrate(t, { install: { version: '0.29.0' } });
+    assert.ok(other.report.evidence.sizing.verdict.reasons.some((entry) => /belongs to vLLM 0\.29\.0, but the lock pins 0\.30\.0/.test(entry)));
+    assert.ok(other.report.evidence.verdict.failed.includes('sizingEvidence') && other.report.evidence.verdict.failed.includes('identityMatchesLock'));
+    assert.equal(sizingVerdict({ installedVersion: '0.31.0', lockVersion: '0.31.0', scan: scanSizingSource({ root: '/nonexistent', version: '0.31.0' }) }).ok, false);
+    const unreviewed = sizingVerdict({ installedVersion: '0.31.0', lockVersion: '0.31.0', scan: { filesScanned: 2, truncated: false, rules: { request: [{}], total: [{}] } } });
+    assert.equal(unreviewed.ok, false); assert.ok(unreviewed.reasons.some((entry) => /vLLM 0\.31\.0 has not been reviewed/.test(entry)), 'a version without reviewed semantics is never qualifiable, whatever the scan found');
+    assert.deepEqual(Object.keys(REVIEWED_SIZING), ['0.30.0']);
+    // The helper refuses evidence without the sizing evidence, even when it was re-digested.
+    const doctored = structuredClone(control.report.evidence);
+    doctored.sizing.verdict.ok = false; doctored.verdict.checks.sizingEvidence = false; delete doctored.evidenceDigest;
+    assert.throws(() => renderQualificationEntry(doctored), /holds no reviewed sizing expression/);
+});
+
+test('CAL.the-sizing-scan-is-complete-reports-where-each-statement-was-found-and-treats-unreadable-files-as-truncation', (t) => {
+    const root = scratch(t);
+    installVllm(root);
+    const site = path.join(root, 'vllm', '0.30.0', 'venv', 'lib', 'python3.13', 'site-packages', 'vllm');
+    const scan = scanSizingSource({ root: site, version: '0.30.0' });
+    assert.equal(scan.truncated, false); assert.equal(scan.unreadable, 0); assert.equal(scan.filesScanned, 2);
+    assert.deepEqual([scan.rules.request[0].file, scan.rules.total[0].file], ['v1/worker/gpu_worker.py', 'utils/mem_utils.py']);
+    // The evidence lines are bounded without making the scan incomplete: the rules come from the whole scan.
+    fs.writeFileSync(path.join(site, 'utils', 'aaa_noise.py'), `${'x = total_memory\n'.repeat(200)}`);
+    const noisy = scanSizingSource({ root: site, version: '0.30.0' });
+    assert.equal(noisy.lines.length, 40); assert.ok(noisy.linesOmitted > 100); assert.equal(noisy.truncated, false); assert.ok(noisy.rules.request.length >= 1 && noisy.rules.total.length >= 1);
+    // A file that cannot be read cuts the scan short.
+    const spy = new Proxy(fs, { get: (target, name) => (name === 'readFileSync' ? (file, ...rest) => { if (String(file).endsWith('mem_utils.py')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); return target.readFileSync(file, ...rest); } : target[name]) });
+    const blocked = scanSizingSource({ fsApi: spy, root: site, version: '0.30.0' });
+    assert.deepEqual([blocked.truncated, blocked.unreadable], [true, 1]);
+    assert.equal(sizingVerdict({ installedVersion: '0.30.0', lockVersion: '0.30.0', scan: blocked }).ok, false);
+    // Without a reviewed version no rule is applied at all.
+    assert.deepEqual(scanSizingSource({ root: site, version: '9.9.9' }).rules, { request: [], total: [] });
 });
