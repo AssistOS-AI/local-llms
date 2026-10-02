@@ -266,6 +266,9 @@ test('CAL.calibration-runs-bounded-queries-under-both-limits-compares-with-nvml-
     assert.deepEqual(evidence.verdict, { qualifiable: true, denominator: 'physical-device', checks: evidence.verdict.checks, failed: [] });
     assert.ok(Object.values(evidence.verdict.checks).every(Boolean), JSON.stringify(evidence.verdict.checks));
     assert.equal(evidence.evidenceDigest, evidenceDigest(evidence)); assert.equal(evidence.schema, CALIBRATION_SCHEMA);
+    // A qualifiable calibration proposes the reviewed entry for its own evidence, rendered by the same helper.
+    assert.deepEqual(report.proposed, { entry: renderQualificationEntry(evidence).entry, digest: evidence.evidenceDigest, source: renderQualificationEntry(evidence).source });
+    assert.equal(report.proposed.entry.evidenceDigest, evidence.evidenceDigest);
     assert.ok(Buffer.byteLength(JSON.stringify(report)) < 48 * 1024, 'the document fits the output bound');
 });
 
@@ -292,6 +295,7 @@ test('CAL.a-share-denominator-or-a-failed-check-is-not-qualifiable-and-renders-n
     assert.equal(share.evidence.verdict.qualifiable, false);
     assert.ok(share.evidence.verdict.failed.includes('denominatorIsPhysical') && share.evidence.verdict.failed.includes('matchesIntended'), share.evidence.verdict.failed.join(','));
     assert.throws(() => renderQualificationEntry(share.evidence), /did not establish the physical-device denominator/);
+    assert.equal(share.proposed, undefined, 'a share denominator proposes nothing');
     // Every other check fails the verdict by itself.
     for (const [label, options, failed] of [
         ['a device the wheel does not support', { torch: { archList: ['sm_70', 'sm_75'] } }, 'archSupported'],

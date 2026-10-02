@@ -365,7 +365,7 @@ export async function calibrationReport({
 } = {}) {
     const blockers = [];
     const block = (code, message, evidence = {}) => blockers.push({ code, message, evidence });
-    const result = (document = null) => ({ schema: CALIBRATION_SCHEMA, ok: blockers.length === 0 && Boolean(document), blockers, evidence: document });
+    const result = (document = null, proposed = null) => ({ schema: CALIBRATION_SCHEMA, ok: blockers.length === 0 && Boolean(document), blockers, evidence: document, ...(proposed ? { proposed } : {}) });
 
     const budget = parseMpsBudget(env);
     if (budget.state !== 'known') { block('no_mps_share', 'This agent has no complete Ploinky GPU share, so there is nothing to calibrate under MPS.', { state: budget.state, reason: budget.reason ?? null }); return result(); }
@@ -478,7 +478,13 @@ export async function calibrationReport({
         verdict: { qualifiable: failed.length === 0 && blockers.length === 0, denominator: classification.denominator, checks, failed },
     };
     document.evidenceDigest = evidenceDigest(document);
-    return result(document);
+    // The reviewed entry this evidence supports, rendered and checked by production's own resolver: only for a qualifiable result.
+    let proposed = null;
+    if (document.verdict.qualifiable) {
+        const rendered = renderQualificationEntry(document);
+        proposed = { entry: rendered.entry, digest: rendered.digest, source: rendered.source };
+    }
+    return result(document, proposed);
 }
 
 // ---------------------------------------------------------------------------
