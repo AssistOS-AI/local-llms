@@ -230,7 +230,7 @@ const VLLM_RUNNER_RAM_BYTES = 3 * GIB;
 // The experimental unified vLLM policy (profiles.mjs) reuses the share cap, the
 // overhead inside the share and the runner's resident RAM; on GB10 all three
 // are unmeasured.
-export { VLLM_MAX_UTILIZATION, VLLM_OVERHEAD_BYTES, VLLM_RUNNER_RAM_BYTES };
+export { VLLM_MAX_UTILIZATION, VLLM_OVERHEAD_BYTES, VLLM_RUNNER_RAM_BYTES, VLLM_USABLE_SHARE };
 const VLLM_OFFLOAD_RAM_FACTOR = 1.81;
 const VLLM_OFFLOAD_RESIDENT_BYTES = 3 * GIB;
 const VLLM_OFFLOAD_RAM_MARGIN = 1.15;

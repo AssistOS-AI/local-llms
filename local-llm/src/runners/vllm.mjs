@@ -281,6 +281,21 @@ function parseReport(lines) {
     return report;
 }
 
+/**
+ * The tuple a qualification entry must match (vllmMpsQualification.mjs): the
+ * selected lock entry's digest and the physical GPU's driver, PCI device id,
+ * compute capability and total memory. Admission asks for it through
+ * `qualifyMps`; the calibration probe (tools/vllm_mps_calibration.mjs) reads
+ * the very same tuple, so a proposed entry is computed by production's own code.
+ */
+export function vllmMpsTuple({ gpu, runnerLockEntry } = {}) {
+    return {
+        runnerLockDigest: vllmRunnerLockDigest(runnerLockEntry), driverVersion: gpu?.driverVersion,
+        gpuPciDeviceId: gpu?.device?.pciDeviceId, computeCapability: gpu?.device?.computeCapability,
+        deviceTotalBytes: gpu?.totalBytes,
+    };
+}
+
 const vllmRuntime = Object.freeze({
     id: ID,
     displayName: 'vLLM',
@@ -305,11 +320,7 @@ const vllmRuntime = Object.freeze({
     qualifyMps({ gpu, runnerLockEntry, qualificationDataProvider }) {
         const resolve = typeof qualificationDataProvider === 'function'
             ? createVllmMpsQualificationResolver(qualificationDataProvider) : resolveVllmMpsQualification;
-        return resolve({
-            runnerLockDigest: vllmRunnerLockDigest(runnerLockEntry), driverVersion: gpu?.driverVersion,
-            gpuPciDeviceId: gpu?.device?.pciDeviceId, computeCapability: gpu?.device?.computeCapability,
-            deviceTotalBytes: gpu?.totalBytes,
-        });
+        return resolve(vllmMpsTuple({ gpu, runnerLockEntry }));
     },
     admitUnified: (input) => admitUnifiedVllm(input, admissionResult),
     parseReport,
