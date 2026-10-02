@@ -19,7 +19,7 @@ import { createVllmMpsQualificationResolver, resolveVllmMpsQualification, vllmRu
 import { vllmMpsTuple, vllmRunner } from '../src/runners/vllm.mjs';
 import {
     CALIBRATION_SCHEMA, CTYPES_QUERY, DIST_QUERY, TORCH_QUERY, TUPLE_FIELDS, applyQualificationEntry, calibrationReport, canonicalJson, classifyDenominator, compareIdentities, evidenceDigest,
-    REVIEWED_SIZING, main, prerequisiteReport, renderQualificationEntry, scanSizingSource, sizingVerdict, wheelPythonTag,
+    REVIEWED_SIZING, main, prerequisiteReport, renderQualificationEntry, scanSizingSource, sizingVerdict, stripPythonNonCode, wheelPythonTag,
 } from '../tools/vllm_mps_calibration.mjs';
 
 const MIB = 1024 * 1024;
@@ -583,4 +583,73 @@ test('CAL.the-sizing-scan-is-complete-reports-where-each-statement-was-found-and
     assert.equal(sizingVerdict({ installedVersion: '0.30.0', lockVersion: '0.30.0', scan: blocked }).ok, false);
     // Without a reviewed version no rule is applied at all.
     assert.deepEqual(scanSizingSource({ root: site, version: '9.9.9' }).rules, { request: [], total: [] });
+});
+
+// --- CAL2b: only executable statements are sizing evidence ---------------------------------------------------
+const CODE_REQUEST = 'requested_memory = snapshot.total_memory * cache_config.gpu_memory_utilization\n';
+const CODE_TOTAL = 'self.free_memory, self.total_memory = torch.cuda.mem_get_info()\n';
+const sizingOutcome = async (t, sizing) => {
+    const { report } = await calibrate(t, { install: { sizing } });
+    return report.evidence;
+};
+const refusedForSizing = (evidence, label) => {
+    assert.equal(evidence.verdict.qualifiable, false, `${label}: not qualifiable`);
+    assert.deepEqual(evidence.verdict.failed, ['sizingEvidence'], label);
+    assert.deepEqual(evidence.sizing.rules, { request: [], total: [] }, `${label}: no rule is matched`);
+    assert.ok(evidence.sizing.verdict.reasons.some((entry) => /no statement computes the requested memory/.test(entry)) && evidence.sizing.verdict.reasons.some((entry) => /no statement reads the device total/.test(entry)), `${label}: ${JSON.stringify(evidence.sizing.verdict.reasons)}`);
+};
+
+test('CAL.a-commented-out-expression-is-not-a-statement-even-when-unsupported-statements-follow-it', async (t) => {
+    // The shape of the monitor's probe: the old reviewed expressions, commented out, then the actual (unsupported) statements.
+    const worker = '# requested_memory = snapshot.total_memory * cache_config.gpu_memory_utilization\nrequested_memory = snapshot.free_memory - configured_cache_limit\n';
+    const utils = '#   self.free_memory, self.total_memory = torch.cuda.mem_get_info()\nself.free_memory, self.total_memory = configured_cache_limit, configured_cache_limit\n';
+    const evidence = await sizingOutcome(t, { worker, utils });
+    refusedForSizing(evidence, 'commented-out expressions');
+    // The comment is still listed as keyword evidence, and no proposal is made.
+    assert.ok(evidence.sizing.lines.some((line) => line.line === 1 && /gpu_memory_utilization/.test(line.text)));
+    const { report } = await calibrate(t, { install: { sizing: { worker, utils } } });
+    assert.equal(report.proposed, undefined); assert.throws(() => renderQualificationEntry(report.evidence), /Cannot render a qualification entry/);
+    // A comment that only ends a code line behaves the same way.
+    refusedForSizing(await sizingOutcome(t, { worker: `x = 1  # ${CODE_REQUEST}`, utils: `y = 2  # ${CODE_TOTAL}` }), 'trailing comments');
+});
+
+test('CAL.a-quoted-expression-is-not-a-statement-docstrings-and-triple-quoted-blocks-included', async (t) => {
+    const cases = [
+        ['a docstring', { worker: `def f():\n    """\n    ${CODE_REQUEST}    """\n    return None\n`, utils: `def g():\n    '''\n    ${CODE_TOTAL}    '''\n    return None\n` }],
+        ['single-line strings', { worker: 'NOTE = "requested_memory = snapshot.total_memory * cache_config.gpu_memory_utilization"\n', utils: "NOTE = 'self.free_memory, self.total_memory = torch.cuda.mem_get_info()'\n" }],
+        ['strings with escaped quotes', { worker: 'NOTE = "say \\"hi\\"; requested = total_memory * gpu_memory_utilization"\n', utils: "NOTE = 'it\\'s total = torch.cuda.mem_get_info()'\n" }],
+        ['f-strings and prefixed strings', { worker: 'NOTE = f"{x} requested = total_memory * gpu_memory_utilization"\n', utils: "NOTE = rb'total = torch.cuda.mem_get_info()'\n" }],
+        ['a comment inside a string and a string inside a comment', { worker: 'NOTE = "# requested = total_memory * gpu_memory_utilization"\n', utils: "# NOTE = 'total = torch.cuda.mem_get_info()'\n" }],
+    ];
+    for (const [label, sizing] of cases) refusedForSizing(await sizingOutcome(t, sizing), label);
+});
+
+test('CAL.a-real-statement-next-to-comments-and-strings-qualifies-with-its-original-line-number', async (t) => {
+    const worker = ['"""Memory sizing.', `${CODE_REQUEST.trim()} is described here, in the docstring.`, '"""', '# requested_memory = old.total * 0.9', 'def request_memory(snapshot, cache_config):', `    ${CODE_REQUEST.trim()}  # the product of the two`, '    return requested_memory', ''].join('\n');
+    const utils = ["'''", CODE_TOTAL.trim(), "'''", 'class MemorySnapshot:', '    def measure(self):', `        ${CODE_TOTAL.trim()}  # (free, total)`, ''].join('\n');
+    const evidence = await sizingOutcome(t, { worker, utils });
+    assert.equal(evidence.verdict.qualifiable, true, JSON.stringify(evidence.verdict));
+    // The hits are the executable lines, by their line in the original file (the docstring and comment lines are not hits).
+    assert.deepEqual(evidence.sizing.rules.request.map((hit) => [hit.file, hit.line]), [['v1/worker/gpu_worker.py', 6]]);
+    assert.deepEqual(evidence.sizing.rules.total.map((hit) => [hit.file, hit.line]), [['utils/mem_utils.py', 6]]);
+    assert.match(evidence.sizing.rules.request[0].text, /requested_memory = snapshot\.total_memory \* cache_config\.gpu_memory_utilization/);
+});
+
+test('CAL.stripping-blanks-comments-and-literals-and-keeps-every-line', () => {
+    const cases = [
+        ['x = 1  # total_memory\n', 'x = 1  \n'],
+        ['s = "a # b"  # c\n', 's = "     "  \n'],
+        ["t = '''a\nb''' + y\n", "t = ''' \n ''' + y\n"],
+        ['u = "q\\"q"; v = 2\n', 'u = "    "; v = 2\n'],
+        ['w = "unterminated\nz = 3\n', `w = "${' '.repeat(12)}\nz = 3\n`],
+        ['p = rb"\\"" + q\n', 'p = rb"  " + q\n'],
+    ];
+    for (const [input, expected] of cases) {
+        const stripped = stripPythonNonCode(input);
+        assert.equal(stripped, expected, JSON.stringify(input));
+        assert.equal(stripped.split('\n').length, input.split('\n').length, 'every line is kept');
+    }
+    const source = '"""doc\nmore\n"""\nx = total_memory * gpu_memory_utilization  # c\n';
+    assert.equal(stripPythonNonCode(source).split('\n')[3].includes('total_memory * gpu_memory_utilization'), true);
+    assert.equal(stripPythonNonCode(source).split('\n').slice(0, 3).join('').replace(/["\s]/g, ''), '');
 });

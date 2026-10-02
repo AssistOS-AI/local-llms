@@ -64,7 +64,8 @@ const MAX_SIZING_FILES = 120;
 const MAX_SIZING_LINES = 40;
 
 // The sizing semantics a qualification may rest on, reviewed per EXACT vLLM version. A keyword in a
-// file is never proof: the installed source must hold both statements below. `request`: the memory
+// file is never proof: the installed source must hold both statements below, as executable code (comments and string literals are
+// removed first, so a commented-out or quoted expression is not a statement). `request`: the memory
 // vLLM asks for is the device's total memory times gpu_memory_utilization (the denominator is
 // whatever `total` is). `total`: that total is read from the CUDA runtime's mem_get_info, which is
 // what the tool measures under two MPS limits. The entry for a version records what review expects
@@ -365,6 +366,38 @@ export function compareIdentities({ entry, installedVersion, ready, torch, distr
 }
 
 /**
+ * Python source with its comments and string literals (docstrings and triple-quoted blocks included)
+ * blanked, line for line: every newline stays, so line numbers are those of the original file. What is
+ * left is what can execute. A reviewed sizing rule is matched against this, never against raw text, so
+ * a commented-out or quoted expression is not a statement and proves nothing. An unterminated
+ * single-quoted string ends at its line.
+ */
+export function stripPythonNonCode(text) {
+    const source = String(text);
+    let out = '';
+    let at = 0;
+    while (at < source.length) {
+        const char = source[at];
+        if (char === '#') { while (at < source.length && source[at] !== '\n') at += 1; continue; }
+        if (char !== '"' && char !== "'") { out += char; at += 1; continue; }
+        const quote = source.startsWith(char.repeat(3), at) ? char.repeat(3) : char;
+        out += quote; at += quote.length;
+        for (;;) {
+            if (at >= source.length) return out;
+            if (source[at] === '\\') {
+                out += ' '; at += 1;
+                if (at < source.length) { out += source[at] === '\n' ? '\n' : ' '; at += 1; }
+                continue;
+            }
+            if (source.startsWith(quote, at)) { out += quote; at += quote.length; break; }
+            if (source[at] === '\n' && quote.length === 1) { out += '\n'; at += 1; break; }
+            out += source[at] === '\n' ? '\n' : ' '; at += 1;
+        }
+    }
+    return out;
+}
+
+/**
  * The source lines that size vLLM's request against the device, with file and line (bounded), and,
  * from the whole scan, the lines that hold each statement of the reviewed rules for `version`.
  * `truncated` means the SCAN was cut short (the file bound, or a file that cannot be read): an
@@ -383,10 +416,12 @@ export function scanSizingSource({ fsApi = fs, root, version = null }) {
             scanned += 1;
             let text;
             try { text = fsApi.readFileSync(path.join(root, directory, name), 'utf8'); } catch { unreadable += 1; truncated = true; continue; }
+            // The reviewed rules are matched against executable code only: comments and strings never count.
+            const code = stripPythonNonCode(text).split('\n');
             text.split('\n').forEach((line, index) => {
                 const hit = { file: `${directory}/${name}`, line: index + 1, text: line.trim().slice(0, 160) };
                 for (const rule of ['request', 'total']) {
-                    if (rules[rule].length < 4 && compiled[rule].some((pattern) => pattern.test(line))) rules[rule].push(hit);
+                    if (rules[rule].length < 4 && compiled[rule].some((pattern) => pattern.test(code[index] ?? ''))) rules[rule].push(hit);
                 }
                 if (!SIZING_PATTERN.test(line)) return;
                 if (lines.length >= MAX_SIZING_LINES) { omitted += 1; return; }
