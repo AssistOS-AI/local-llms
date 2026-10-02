@@ -309,15 +309,17 @@ function readText(fsApi, file) {
  * read. The CPU profile caps its pool with it (DS005): /proc/meminfo shows the
  * host's memory, not the container's.
  */
-export function readCgroupMemory({ fsApi = fs } = {}) {
-    const bytes = (file) => {
-        const text = readText(fsApi, file);
-        const value = text !== null && /^\d+$/.test(text.trim()) ? Number(text.trim()) : null;
+function projectCgroupMemory(maxText, currentText) {
+    const bytes = (text) => {
+        const value = typeof text === 'string' && /^\d+$/.test(text.trim()) ? Number(text.trim()) : null;
         return Number.isSafeInteger(value) ? value : null;
     };
-    const maxBytes = bytes('/sys/fs/cgroup/memory.max');
-    if (maxBytes === null) return null;
-    return { maxBytes, currentBytes: bytes('/sys/fs/cgroup/memory.current') };
+    const maxBytes = bytes(maxText);
+    return maxBytes === null ? null : { maxBytes, currentBytes: bytes(currentText) };
+}
+
+export function readCgroupMemory({ fsApi = fs } = {}) {
+    return projectCgroupMemory(readText(fsApi, '/sys/fs/cgroup/memory.max'), readText(fsApi, '/sys/fs/cgroup/memory.current'));
 }
 
 // A cgroup file's text; undefined when it does not exist (ENOENT), null when
@@ -342,14 +344,16 @@ const establishedMemoryLimits = new WeakMap();
  * cannot be read, and a finite limit apart from an unreadable `memory.current`.
  * Used by admission and the memory guard; never published in the overview.
  */
-export function readCgroupMemoryObservation({ fsApi = fs, established = establishedMemoryLimits.get(fsApi) ?? null } = {}) {
-    const observation = observeMemoryBudget({
-        maxText: readObservedText(fsApi, '/sys/fs/cgroup/memory.max'),
-        currentText: readObservedText(fsApi, '/sys/fs/cgroup/memory.current'),
-        established,
-    });
+function captureCgroupMemory({ fsApi = fs, established = establishedMemoryLimits.get(fsApi) ?? null } = {}) {
+    const maxText = readObservedText(fsApi, '/sys/fs/cgroup/memory.max');
+    const currentText = readObservedText(fsApi, '/sys/fs/cgroup/memory.current');
+    const observation = observeMemoryBudget({ maxText, currentText, established });
     if (Number.isSafeInteger(observation.finiteMemoryBytes)) establishedMemoryLimits.set(fsApi, observation.finiteMemoryBytes);
-    return observation;
+    return { raw: projectCgroupMemory(maxText, currentText), observation };
+}
+
+export function readCgroupMemoryObservation(options = {}) {
+    return captureCgroupMemory(options).observation;
 }
 
 /** The raw cgroup v2 CPU quota in CPUs (1.5 for `150000 100000`), or null without one. */
@@ -482,6 +486,7 @@ export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signa
     const pendingDisk = readDisk(dataDir, { statfs }).catch((error) => ({ freeBytes: null, totalBytes: null, error: error.message }));
     const gpu = await readGpu({ execFileImpl, signal, env });
     const disk = await untilStopped(pendingDisk, signal);
+    const cgroup = captureCgroupMemory({ fsApi });
     const snapshot = {
         at: new Date().toISOString(),
         gpu,
@@ -489,10 +494,10 @@ export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signa
         disk,
         cpus: os.availableParallelism?.() ?? os.cpus().length,
         cores: physicalCoreCount({ fsApi }),
-        cgroupMemory: readCgroupMemory({ fsApi }),
+        cgroupMemory: cgroup.raw,
     };
     // Internal budget facts (ploinkyBudget.mjs), not published with the snapshot.
     attachCpuQuota(snapshot, readCpuQuota({ fsApi }));
     attachGpuBudget(snapshot, parseMpsBudget(env));
-    return attachMemoryBudget(snapshot, readCgroupMemoryObservation({ fsApi }));
+    return attachMemoryBudget(snapshot, cgroup.observation);
 }

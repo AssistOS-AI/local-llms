@@ -171,8 +171,14 @@ test('LL.unknown-distinct', () => {
         assert.equal(observation.headroomBytes, null);
         assert.equal(observation.reasonCode, 'budget_unreadable');
     }
-    // A limit beyond any real memory is none (as the legacy projection reads it).
-    assert.equal(observeMemoryBudget({ maxText: '9223372036854771712', currentText: '1' }).finiteMemoryBytes, null);
+    // Unsafe numbers are unknown internally, although the legacy raw projection remains null.
+    for (const maxText of ['9223372036854771712', '9'.repeat(400)]) {
+        for (const established of [null, 4 * GIB]) {
+            assert.deepEqual(observeMemoryBudget({ maxText, currentText: '1', established }), {
+                memoryReadState: 'unknown', finiteMemoryBytes: established, headroomBytes: null, reasonCode: 'budget_unreadable',
+            });
+        }
+    }
     // The production reader keeps an established limit per filesystem reader.
     const limited = fakeFs({ '/sys/fs/cgroup/memory.max': `${4 * GIB}\n`, '/sys/fs/cgroup/memory.current': `${GIB}\n` });
     assert.equal(readCgroupMemoryObservation({ fsApi: limited }).headroomBytes, 3 * GIB);

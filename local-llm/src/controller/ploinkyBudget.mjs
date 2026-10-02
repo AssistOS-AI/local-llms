@@ -59,9 +59,6 @@ export function observeMemoryBudget({ maxText, currentText, established = null }
     }
     const max = parseCgroupBytes(maxText);
     if (max.state === 'unlimited') return noBudget();
-    // A limit beyond any real memory (all digits, past the safe range) is none,
-    // as the legacy projection reads it.
-    if (max.state === 'unknown' && typeof maxText === 'string' && /^\d+$/.test(maxText.trim())) return noBudget();
     if (max.state !== 'known') {
         // memory.max exists but cannot be read or is malformed: the limit is
         // unknown, never unlimited (an established one is kept).
