@@ -18,7 +18,7 @@ import { validateRunnerLock } from '../src/controller/runnerLock.mjs';
 import { createVllmMpsQualificationResolver, resolveVllmMpsQualification, vllmRunnerLockDigest } from '../src/controller/vllmMpsQualification.mjs';
 import { vllmMpsTuple, vllmRunner } from '../src/runners/vllm.mjs';
 import {
-    CALIBRATION_SCHEMA, CTYPES_QUERY, TORCH_QUERY, TUPLE_FIELDS, applyQualificationEntry, calibrationReport, canonicalJson, classifyDenominator, evidenceDigest,
+    CALIBRATION_SCHEMA, CTYPES_QUERY, DIST_QUERY, TORCH_QUERY, TUPLE_FIELDS, applyQualificationEntry, calibrationReport, canonicalJson, classifyDenominator, compareIdentities, evidenceDigest,
     main, prerequisiteReport, renderQualificationEntry, scanSizingSource, wheelPythonTag,
 } from '../tools/vllm_mps_calibration.mjs';
 
@@ -43,7 +43,7 @@ function lockDocument({ wheels = WHEELS, kind = 'python', requiresAcceptance = f
                 version: '0.30.0', kind,
                 licence: { name: 'Apache-2.0', url: 'https://github.com/vllm-project/vllm/blob/v0.30.0/LICENSE', requiresAcceptance },
                 files: wheels.map(([name, size, letter]) => ({ name, url: url(name), size, sha256: SHA(letter) })),
-                check: { distributions: { vllm: '0.30.0', torch: '2.13.0' }, imports: ['torch'] },
+                check: { distributions: { vllm: '0.30.0', torch: '2.13.0', triton: '3.7.1' }, imports: ['torch'] },
             },
         },
     };
@@ -67,25 +67,26 @@ function scratch(t) {
 }
 
 // An installed vLLM under <root>/vllm/0.30.0 with a venv, its package source and its ready marker.
-function installVllm(root, { sizing = true } = {}) {
+function installVllm(root, { sizing = true, version = '0.30.0', ready = { digest: ENTRY.digest } } = {}) {
     const runner = path.join(root, 'vllm', '0.30.0');
     const site = path.join(runner, 'venv', 'lib', 'python3.13', 'site-packages');
     fs.mkdirSync(path.join(runner, 'venv', 'bin'), { recursive: true });
     fs.writeFileSync(path.join(runner, 'venv', 'bin', 'python'), '#!/bin/sh\n', { mode: 0o755 });
     fs.mkdirSync(path.join(site, 'vllm', 'v1', 'worker'), { recursive: true });
     fs.mkdirSync(path.join(site, 'vllm', 'utils'), { recursive: true });
-    fs.mkdirSync(path.join(site, 'vllm-0.30.0.dist-info'), { recursive: true });
-    fs.writeFileSync(path.join(site, 'vllm-0.30.0.dist-info', 'METADATA'), 'Metadata-Version: 2.4\nName: vllm\nVersion: 0.30.0\n');
+    fs.mkdirSync(path.join(site, `vllm-${version}.dist-info`), { recursive: true });
+    if (version !== null) fs.writeFileSync(path.join(site, `vllm-${version}.dist-info`, 'METADATA'), `Metadata-Version: 2.4\nName: vllm\nVersion: ${version}\n`);
     if (sizing) {
         fs.writeFileSync(path.join(site, 'vllm', 'v1', 'worker', 'gpu_worker.py'), 'def request_memory(snapshot, cache_config):\n    requested_memory = snapshot.total_memory * cache_config.gpu_memory_utilization\n    return requested_memory\n');
         fs.writeFileSync(path.join(site, 'vllm', 'utils', 'mem_utils.py'), 'free, total = torch.cuda.mem_get_info()\n');
     }
-    fs.writeFileSync(path.join(runner, '.ready.json'), JSON.stringify({ digest: ENTRY.digest }));
+    if (ready !== null) fs.writeFileSync(path.join(runner, '.ready.json'), JSON.stringify(ready));
     return runner;
 }
 
 // The in-client queries, scripted: torch and ctypes see `views(env)`; a different pinned limit is a different env.
-function fakeRun({ views, torch = {}, fail = null, calls = [] }) {
+const LOCKED_DISTRIBUTIONS = Object.freeze({ vllm: '0.30.0', torch: '2.13.0', triton: '3.7.1' });
+function fakeRun({ views, torch = {}, fail = null, calls = [], distributions = LOCKED_DISTRIBUTIONS }) {
     return async (file, args, options = {}) => {
         calls.push({ file, args, env: options.env, timeoutMs: options.timeoutMs });
         const script = args[1];
@@ -102,6 +103,7 @@ function fakeRun({ views, torch = {}, fail = null, calls = [] }) {
             };
         }
         if (script === CTYPES_QUERY) return { ok: true, status: 0, stderr: '', stdout: `${JSON.stringify({ free: total - 150 * MIB, total })}\n` };
+        if (script === DIST_QUERY) return { ok: true, status: 0, stderr: '', stdout: `${JSON.stringify(Object.fromEntries(args.slice(2).map((name) => [name, distributions[name] ?? null])))}\n` };
         return { ok: false, status: 1, stdout: '', stderr: 'unexpected query', error: '1' };
     };
 }
@@ -114,7 +116,7 @@ async function calibrate(t, options = {}) {
     const calls = [];
     const report = await calibrationReport({
         env: { ...MPS_ENV, ...(options.env || {}) }, runRoot: root, readGpuImpl: async () => structuredClone(options.gpu || RTX), readMemoryImpl: () => ({ totalBytes: 31 * GIB, availableBytes: 24 * GIB }),
-        locksImpl: () => LOCK, run: fakeRun({ views: options.views || physicalViews, torch: options.torch, fail: options.fail, calls }),
+        locksImpl: () => LOCK, run: fakeRun({ views: options.views || physicalViews, torch: options.torch, fail: options.fail, calls, ...(options.distributions ? { distributions: options.distributions } : {}) }),
         hostNvmlBytes: options.hostNvmlBytes ?? 6144 * MIB, now: () => new Date('2026-10-03T10:00:00Z'), ...(options.fsApi ? { fsApi: options.fsApi } : {}),
     });
     return { report, root, calls };
@@ -150,7 +152,7 @@ test('CAL.prerequisites-pass-and-report-the-entry-wheels-and-download-size', asy
     assert.equal(vllm.version, '0.30.0'); assert.equal(vllm.kind, 'python');
     assert.equal(vllm.files, WHEELS.length); assert.equal(vllm.downloadBytes, WHEELS.reduce((sum, wheel) => sum + wheel[1], 0));
     assert.equal(vllm.runnerLockDigest, vllmRunnerLockDigest(ENTRY), 'the digest is production\'s');
-    assert.deepEqual(vllm.distributions, { vllm: '0.30.0', torch: '2.13.0' });
+    assert.deepEqual(vllm.distributions, { vllm: '0.30.0', torch: '2.13.0', triton: '3.7.1' });
     assert.equal(vllm.torchWheel.name, WHEELS[1][0]); assert.deepEqual(vllm.cudaRuntime, { major: 13, minor: 0, wheel: WHEELS[2][0] });
     assert.equal(vllm.largest[0].name, WHEELS[1][0]); assert.match(vllm.fileListDigest, /^[0-9a-f]{64}$/);
     assert.deepEqual(vllm.hosts, ['files.pythonhosted.org']);
@@ -234,11 +236,12 @@ test('CAL.tuple-comes-from-the-production-functions-over-the-real-readings', asy
 test('CAL.calibration-runs-bounded-queries-under-both-limits-compares-with-nvml-and-builds-the-production-argv', async (t) => {
     const { report, root, calls } = await calibrate(t);
     const { evidence } = report;
-    // Four bounded queries: torch and the driver, under the saved limit and a tighter one.
-    assert.equal(calls.length, 4);
+    // Five bounded queries: torch and the driver, under the saved limit and a tighter one, and the pinned distributions' versions.
+    assert.equal(calls.length, 5);
     for (const call of calls) { assert.ok(call.timeoutMs <= 180_000); assert.equal(call.args[0], '-c'); assert.equal(Object.hasOwn(call.env, 'VLLM_API_KEY'), false, 'no key reaches a query'); }
-    assert.deepEqual(calls.map((call) => (call.file.startsWith(root) ? path.relative(root, call.file) : call.file)), ['vllm/0.30.0/venv/bin/python', 'vllm/0.30.0/venv/bin/python', '/usr/bin/python3', '/usr/bin/python3']);
-    assert.deepEqual(calls.map((call) => call.env.CUDA_MPS_PINNED_DEVICE_MEM_LIMIT), ['0=5529M', '0=2048M', '0=5529M', '0=2048M']);
+    assert.deepEqual(calls.map((call) => (call.file.startsWith(root) ? path.relative(root, call.file) : call.file)), ['vllm/0.30.0/venv/bin/python', 'vllm/0.30.0/venv/bin/python', '/usr/bin/python3', '/usr/bin/python3', 'vllm/0.30.0/venv/bin/python']);
+    assert.deepEqual(calls.map((call) => call.env.CUDA_MPS_PINNED_DEVICE_MEM_LIMIT), ['0=5529M', '0=2048M', '0=5529M', '0=2048M', '0=5529M']);
+    assert.deepEqual(calls[4].args.slice(2), ['vllm', 'torch', 'triton'], 'the lock\'s pinned distributions are asked for by name');
     assert.ok(calls.every((call) => call.env.CUDA_MPS_PIPE_DIRECTORY === '/run/ploinky-mps-pipe' && call.env.LD_LIBRARY_PATH === '/usr/local/nvidia/lib64'));
     const m = evidence.measurements;
     assert.equal(m.torchShare.memGetInfo.total, USABLE); assert.equal(m.torchShare.totalMemory, USABLE);
@@ -446,4 +449,65 @@ test('CAL.stage-one-never-writes-and-the-tool-only-reads-the-installed-package',
     const text = fs.readFileSync(new URL('../tools/vllm_mps_calibration.mjs', import.meta.url), 'utf8').replace(/^\s*\/\/.*$/gm, '');
     assert.equal(/writeFile|appendFile|unlinkSync|rmSync|renameSync|mkdirSync|copyFile|child_process'\)\.exec\b|spawn\(|shell: true/.test(text), false);
     assert.equal(/REVIEWED_QUALIFICATIONS\s*=/.test(text.replace(/const empty|const filled|const current/g, '')) && /writeFileSync\(.*vllmMpsQualification/.test(text), false);
+});
+
+// --- CAL1: what is installed and queried must be what the selected lock entry pins ---------------------------
+test('CAL.identities-are-compared-with-the-selected-lock-entry-and-any-mismatch-or-missing-identity-is-not-qualifiable', async (t) => {
+    const control = await calibrate(t);
+    assert.equal(control.report.evidence.verdict.qualifiable, true, JSON.stringify(control.report.evidence.verdict));
+    assert.equal(control.report.evidence.identity.matches, true); assert.deepEqual(control.report.evidence.identity.mismatches, []);
+    assert.deepEqual(control.report.evidence.identity.observed, { vllm: '0.30.0', readyDigest: ENTRY.digest, torch: '2.13.0', torchCuda: '13.0', distributions: LOCKED_DISTRIBUTIONS });
+    // A local version label is not part of the pin.
+    const labelled = await calibrate(t, { torch: { torch: '2.13.0+cu130' }, distributions: { ...LOCKED_DISTRIBUTIONS, torch: '2.13.0+cu130' } });
+    assert.equal(labelled.report.evidence.verdict.qualifiable, true);
+    const cases = [
+        ['an installed vLLM that is not the locked version', { install: { version: '0.29.0' } }, 'vLLM package version', '0.30.0', '0.29.0'],
+        ['a runnable copy marker of another entry', { install: { ready: { digest: SHA('9') } } }, 'runnable copy marker digest', ENTRY.digest, SHA('9')],
+        ['no runnable copy marker', { install: { ready: null } }, 'runnable copy marker digest', ENTRY.digest, null],
+        ['a queried torch that is not the locked one', { torch: { torch: '2.12.0' } }, 'torch version (saved limit)', '2.13.0', '2.12.0'],
+        ['a torch built for another CUDA runtime', { torch: { torchCuda: '12.8' } }, 'CUDA runtime of torch (saved limit)', '13.0', '12.8'],
+        ['another pinned distribution', { distributions: { ...LOCKED_DISTRIBUTIONS, triton: '3.6.0' } }, 'distribution triton', '3.7.1', '3.6.0'],
+        ['a pinned distribution that is not installed', { distributions: { vllm: '0.30.0', torch: '2.13.0' } }, 'distribution triton', '3.7.1', null],
+        ['no readable vLLM version', { install: { version: null } }, null, null, null],
+    ];
+    for (const [label, options, what, expected, actual] of cases) {
+        const { report } = await calibrate(t, options);
+        const evidence = report.evidence;
+        assert.equal(evidence.verdict.qualifiable, false, `${label} must not be qualifiable`);
+        assert.ok(evidence.verdict.failed.includes('identityMatchesLock'), `${label}: ${evidence.verdict.failed}`);
+        assert.equal(evidence.verdict.checks.identityMatchesLock, false, label);
+        // Independent: nothing else failed because of it, and the real observations stay in the document.
+        assert.deepEqual(evidence.verdict.failed.filter((name) => name !== 'identityMatchesLock'), [], `${label}: only the identity check failed`);
+        if (what) {
+            const found = evidence.identity.mismatches.find((entry) => entry.what === what);
+            assert.ok(found, `${label}: ${JSON.stringify(evidence.identity.mismatches)}`);
+            assert.deepEqual([found.expected, found.actual], [expected, actual], label); assert.match(found.reason, /differs from the lock|cannot be read/, label);
+        } else assert.ok(evidence.identity.mismatches.length > 0, label);
+        assert.equal(report.proposed, undefined, `${label}: no entry is proposed`);
+        assert.throws(() => renderQualificationEntry(evidence), /Cannot render a qualification entry/, label);
+    }
+    // The observations are kept whatever they are.
+    const stale = await calibrate(t, { install: { version: '0.29.0' }, torch: { torch: '2.12.0' } });
+    assert.deepEqual([stale.report.evidence.identity.observed.vllm, stale.report.evidence.identity.observed.torch], ['0.29.0', '2.12.0']);
+    assert.equal(stale.report.evidence.install.packageVersion, '0.29.0'); assert.equal(stale.report.evidence.measurements.torchShare.torch, '2.12.0');
+    assert.ok(stale.report.evidence.identity.mismatches.length >= 3, 'both the package and torch (twice) are named');
+});
+
+test('CAL.the-identity-comparison-is-pure-and-names-a-lock-without-pins-or-cuda', () => {
+    const base = { entry: ENTRY, installedVersion: '0.30.0', ready: { digest: ENTRY.digest }, torch: { share: { torch: '2.13.0', torchCuda: '13.0' }, tight: { torch: '2.13.0', torchCuda: '13.0' } }, distributions: LOCKED_DISTRIBUTIONS };
+    assert.equal(compareIdentities(base).matches, true);
+    // A lock that pins no torch version or no CUDA wheel cannot be compared with, which is a mismatch, not a pass.
+    const noTorch = { ...base, entry: { ...ENTRY, check: { ...ENTRY.check, distributions: { vllm: '0.30.0' } } } };
+    assert.ok(compareIdentities(noTorch).mismatches.some((entry) => entry.what.startsWith('torch version') && entry.reason === 'the lock pins no such identity'));
+    const noCuda = { ...base, entry: { ...ENTRY, files: ENTRY.files.filter((file) => !/^nvidia/.test(file.name)) } };
+    assert.ok(compareIdentities(noCuda).mismatches.some((entry) => entry.what.startsWith('CUDA runtime') && entry.reason === 'the lock pins no such identity'));
+    // Every identity is its own comparison.
+    for (const [label, change, what] of [
+        ['package', { installedVersion: '0.31.0' }, 'vLLM package version'], ['marker', { ready: { digest: 'x' } }, 'runnable copy marker digest'], ['marker missing', { ready: null }, 'runnable copy marker digest'],
+        ['tight torch', { torch: { ...base.torch, tight: { torch: '2.1.0', torchCuda: '13.0' } } }, 'torch version (tighter limit)'], ['tight cuda', { torch: { ...base.torch, tight: { torch: '2.13.0', torchCuda: null } } }, 'CUDA runtime of torch (tighter limit)'],
+        ['no distributions', { distributions: null }, 'distribution vllm'],
+    ]) {
+        const result = compareIdentities({ ...base, ...change });
+        assert.equal(result.matches, false, label); assert.ok(result.mismatches.some((entry) => entry.what === what), `${label}: ${JSON.stringify(result.mismatches)}`);
+    }
 });

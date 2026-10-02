@@ -300,6 +300,48 @@ export const CTYPES_QUERY = [
     'print(json.dumps({"free":free.value,"total":total.value}))',
 ].join('\n');
 
+// The installed versions of the distributions the lock pins (check.distributions), by the package
+// metadata the installer's pip wrote; null for a distribution that is not installed.
+export const DIST_QUERY = [
+    'import json,sys',
+    'from importlib.metadata import PackageNotFoundError,version',
+    'out={}',
+    'for name in sys.argv[1:]:',
+    '    try:',
+    '        out[name]=version(name)',
+    '    except PackageNotFoundError:',
+    '        out[name]=None',
+    'print(json.dumps(out))',
+].join('\n');
+
+const baseVersion = (value) => (typeof value === 'string' && value ? value.split('+')[0] : null);
+
+/**
+ * Whether what is actually installed and queried is what the SELECTED lock entry pins: the vLLM package
+ * version, the runnable copy's marker digest, the torch version in both queries, the CUDA runtime torch
+ * was built for, and every distribution `check.distributions` lists. Any mismatch, or an identity that
+ * cannot be read, is named; the observations stay in the result either way. A local version label
+ * (+cu130) is not part of the pin.
+ */
+export function compareIdentities({ entry, installedVersion, ready, torch, distributions }) {
+    const mismatches = [];
+    const compare = (what, expected, actual) => {
+        if (expected === null || expected === undefined) mismatches.push({ what, expected: null, actual: actual ?? null, reason: 'the lock pins no such identity' });
+        else if (actual === null || actual === undefined) mismatches.push({ what, expected, actual: null, reason: 'the identity cannot be read' });
+        else if (expected !== actual) mismatches.push({ what, expected, actual, reason: 'differs from the lock' });
+    };
+    const pinned = entry.check?.distributions ?? {};
+    const cuda = lockWheelFacts(entry).cudaRuntime;
+    compare('vLLM package version', entry.version, baseVersion(installedVersion));
+    compare('runnable copy marker digest', entry.digest, typeof ready?.digest === 'string' ? ready.digest : null);
+    compare('torch version (saved limit)', pinned.torch ?? null, baseVersion(torch?.share?.torch));
+    compare('torch version (tighter limit)', pinned.torch ?? null, baseVersion(torch?.tight?.torch));
+    compare('CUDA runtime of torch (saved limit)', cuda ? `${cuda.major}.${cuda.minor}` : null, typeof torch?.share?.torchCuda === 'string' ? torch.share.torchCuda : null);
+    compare('CUDA runtime of torch (tighter limit)', cuda ? `${cuda.major}.${cuda.minor}` : null, typeof torch?.tight?.torchCuda === 'string' ? torch.tight.torchCuda : null);
+    for (const [name, version] of Object.entries(pinned)) compare(`distribution ${name}`, baseVersion(version), baseVersion(distributions?.[name]));
+    return { matches: mismatches.length === 0, mismatches, observed: { vllm: installedVersion ?? null, readyDigest: ready?.digest ?? null, torch: torch?.share?.torch ?? null, torchCuda: torch?.share?.torchCuda ?? null, distributions: distributions ?? null } };
+}
+
 /** The source lines that size vLLM's request against the device, with file and line (bounded). */
 export function scanSizingSource({ fsApi = fs, root }) {
     const lines = []; let scanned = 0; let truncated = false;
@@ -423,8 +465,8 @@ export async function calibrationReport({
     const tightMiB = Math.max(512, Math.min(2048, Math.floor(shareMiB / 2)));
     const tightEnv = envOf(launchEnv, budget, { CUDA_MPS_PINNED_DEVICE_MEM_LIMIT: `0=${tightMiB}M` });
     const shareEnv = envOf(launchEnv, budget);
-    const query = async (file, script, queryEnv) => {
-        const reply = await run(file, ['-c', script], { env: queryEnv, timeoutMs: 180_000 });
+    const query = async (file, script, queryEnv, extra = []) => {
+        const reply = await run(file, ['-c', script, ...extra], { env: queryEnv, timeoutMs: 180_000 });
         const value = reply.ok ? parseJsonLine(reply.stdout) : null;
         return { ok: Boolean(value), value, status: reply.status, error: value ? null : (reply.error || reply.stderr.slice(-300)) };
     };
@@ -432,11 +474,15 @@ export async function calibrationReport({
         await query(python, TORCH_QUERY, shareEnv), await query(python, TORCH_QUERY, tightEnv),
         await query('/usr/bin/python3', CTYPES_QUERY, shareEnv), await query('/usr/bin/python3', CTYPES_QUERY, tightEnv),
     ];
-    for (const [name, reply] of Object.entries({ torchShare, torchTight, ctypesShare, ctypesTight })) {
+    // The installed versions of every distribution the lock pins, from the same environment the runner has.
+    const pinnedNames = Object.keys(entry.check?.distributions ?? {});
+    const distributions = pinnedNames.length ? await query(python, DIST_QUERY, shareEnv, pinnedNames) : { ok: true, value: {} };
+    for (const [name, reply] of Object.entries({ torchShare, torchTight, ctypesShare, ctypesTight, distributions })) {
         if (!reply.ok) block('query_failed', `The bounded ${name} query did not return a document: ${String(reply.error).slice(0, 200)}`, { query: name, status: reply.status });
     }
     const sizing = scanSizingSource({ fsApi, root: installed.root });
 
+    const identity = compareIdentities({ entry, installedVersion: installed.version, ready, torch: { share: torchShare.value, tight: torchTight.value }, distributions: distributions.value });
     const torchTotal = torchShare.value?.memGetInfo?.total ?? null;
     const classification = classifyDenominator({
         torchShare: torchTotal, torchTight: torchTight.value?.memGetInfo?.total ?? null, ctypesShare: ctypesShare.value?.total ?? null,
@@ -457,6 +503,7 @@ export async function calibrationReport({
         fitsShare: requestedBytes !== null && requestedBytes + CONTEXT_MARGIN_BYTES <= budget.gpuShare.vramBytes,
         admissionFits: admission.status === 'ok',
         argvBuilt: launch !== null,
+        identityMatchesLock: identity.matches,
         hostAgrees: hostNvmlBytes === null || hostNvmlBytes === raw.totalBytes,
     };
     const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([name]) => name);
@@ -472,6 +519,7 @@ export async function calibrationReport({
             utilization, intendedBytes, requestedBytes, usableShare: VLLM_USABLE_SHARE,
         },
         denominator: classification,
+        identity,
         sizing,
         argv: launch ? { command: launch.command, args: launch.args, envNames: Object.keys(launch.env).sort(), mpsEnvironment: budget.environment } : { error: launchError, mpsEnvironment: budget.environment },
         admission: { status: admission.status, reason: admission.reason, reasonCode: admission.reasonCode ?? null, estimate: admission.estimate },
@@ -495,6 +543,8 @@ export function renderQualificationEntry(evidence) {
     const fail = (message) => { throw new Error(`Cannot render a qualification entry: ${message}`); };
     if (!evidence || evidence.schema !== CALIBRATION_SCHEMA) fail('the document is not a stage-1 calibration');
     if (evidence.verdict?.qualifiable !== true || evidence.verdict?.denominator !== 'physical-device') fail('the calibration did not establish the physical-device denominator');
+    // The evidence must itself show that what was installed and queried is what the lock pins.
+    if (evidence.verdict?.checks?.identityMatchesLock !== true || evidence.identity?.matches !== true || evidence.identity?.mismatches?.length) fail('the installed identities were not shown to equal the lock\'s pins');
     const digest = evidenceDigest(evidence);
     if (evidence.evidenceDigest !== undefined && evidence.evidenceDigest !== digest) fail('the document does not match its own digest');
     const tuple = Object.fromEntries(TUPLE_FIELDS.map((field) => [field, evidence.tuple?.[field]]));
