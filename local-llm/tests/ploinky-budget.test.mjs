@@ -9,13 +9,14 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { admit } from '../src/controller/admission.mjs';
-import { GPU_TEST_LOCK, GPU_MODEL, MPS_ENV, TEST_GPU, gpuHarness, testQualification, waitForLaunch } from './ploinkyGpuFixture.mjs';
+import { GPU_TEST_LOCK, MPS_ENV, TEST_GPU, gpuHarness, testQualification, waitForLaunch } from './ploinkyGpuFixture.mjs';
 import { createVllmMpsQualificationResolver, resolveVllmMpsQualification, vllmRunnerLockDigest } from '../src/controller/vllmMpsQualification.mjs';
-import { MPS_VARIABLES, attachGpuBudget, effectiveGpu, parseMpsBudget } from '../src/controller/ploinkyBudget.mjs';
+import { attachGpuBudget, effectiveGpu, parseMpsBudget } from '../src/controller/ploinkyBudget.mjs';
 import { validateModel } from '../src/controller/catalog.mjs';
 import { createRunnerInstaller } from '../src/controller/runnerInstaller.mjs';
 import { loadRunnerLocks } from '../src/controller/runnerLock.mjs';
 import { collectOverviews, collectOllamaRuns } from './overview-scenarios.mjs';
+import { QUALIFICATION_MISMATCHES, GPU_ADAPTERS, CPU_ADAPTERS, INVALID_MPS_VALUES, checkQualificationMismatch, checkGpuAdapter, checkCpuAdapter, checkInvalidMps } from './ploinkyGpuCases.mjs';
 import { loadSeedCatalog } from '../src/controller/catalog.mjs';
 import { createController } from '../src/controller/deployments.mjs';
 import {
@@ -353,14 +354,9 @@ test('LL.vllm-qualification-absent', async (t) => {
 });
 
 test('LL.vllm-qualification-mismatch', async (t) => {
-    for (const [field, value] of [['runnerLockDigest', 'b'.repeat(64)], ['driverVersion', '999.2'], ['gpuPciDeviceId', '0x987610DE'], ['computeCapability', '9.8'], ['deviceTotalBytes', 7 * GIB]]) {
-        await t.test(field, async (t) => {
-            const h = gpuHarness(t, { qualificationDataProvider: () => [{ ...testQualification(), [field]: value }] });
-            await assert.rejects(h.run({ maxModelLen: 512 }), (error) => error.details?.admission?.reasonCode === 'vllm_mps_unqualified');
-            assert.equal(h.started.length, 0);
-        });
-    }
+    for (const vector of QUALIFICATION_MISMATCHES) await checkQualificationMismatch(t, vector);
 });
+for (const vector of QUALIFICATION_MISMATCHES) test(`qualification mismatch vector: ${vector[0]}`, (t) => checkQualificationMismatch(t, vector));
 
 test('LL.vllm-qualification-match', async (t) => {
     const entry = GPU_TEST_LOCK.runners.vllm;
@@ -430,49 +426,19 @@ test('LL.ollama-auto-free', async (t) => {
 });
 
 test('LL.gpu-minimal-env-all-adapters', async (t) => {
-    const gpu = { ...TEST_GPU, totalBytes: 24 * GIB, freeBytes: 24 * GIB, usedBytes: 0 };
-    const env = { ...MPS_ENV, CUDA_MPS_PINNED_DEVICE_MEM_LIMIT: '0=16384M' };
-    for (const [runnerId, modelId] of [['llama.cpp', 'qwen2.5-0.5b-instruct-q4_k_m'], ['ik_llama.cpp', 'qwen2.5-0.5b-instruct-q4_k_m'], ['lmstudio', 'qwen2.5-0.5b-instruct-q4_k_m'], ['ollama', 'gpt-oss-20b'], ['vllm', GPU_MODEL.id], ['tabbyapi', 'qwen3-8b-exl3']]) {
-        await t.test(runnerId, async (t) => {
-            const h = gpuHarness(t, { gpu, env });
-            const params = runnerId === 'vllm' ? { maxModelLen: 512 } : {};
-            assert.equal((await h.run(params, { runnerId, modelId })).accepted, true);
-            const launch = await waitForLaunch(h);
-            assert.deepEqual(Object.fromEntries(MPS_VARIABLES.map((key) => [key, launch.env[key]])), env);
-            assert.equal(Object.hasOwn(launch.env, 'PRIVATE_AGENT_SECRET'), false);
-            assert.equal(Object.keys(launch.env).filter((key) => key.startsWith('CUDA_MPS_')).length, 3);
-        });
-    }
+    for (const adapter of GPU_ADAPTERS) await checkGpuAdapter(t, adapter);
 });
+for (const adapter of GPU_ADAPTERS) test(`GPU environment adapter: ${adapter[0]}`, (t) => checkGpuAdapter(t, adapter));
 
 test('LL.cpu-no-mps-env', async (t) => {
-    for (const [runnerId, modelId] of [['llama.cpp', 'qwen2.5-0.5b-instruct-q4_k_m'], ['llama.cpp-cpu', 'qwen2.5-0.5b-instruct-q4_k_m'], ['ollama', 'gpt-oss-20b']]) {
-        await t.test(runnerId, async (t) => {
-            const h = gpuHarness(t, { gpu: { available: false, state: 'absent', reason: 'No GPU.' }, profile: 'cpu', qualificationDataProvider: null });
-            assert.equal((await h.run({}, { runnerId, modelId })).accepted, true);
-            const launch = await waitForLaunch(h);
-            assert.equal(Object.keys(launch.env).some((key) => key.startsWith('CUDA_MPS_')), false);
-        });
-    }
+    for (const adapter of CPU_ADAPTERS) await checkCpuAdapter(t, adapter);
 });
+for (const adapter of CPU_ADAPTERS) test(`CPU environment adapter: ${adapter[0]}`, (t) => checkCpuAdapter(t, adapter));
 
 test('LL.partial-mps-refused', async (t) => {
-    const vectors = [
-        { CUDA_MPS_PIPE_DIRECTORY: MPS_ENV.CUDA_MPS_PIPE_DIRECTORY },
-        { ...MPS_ENV, CUDA_MPS_ACTIVE_THREAD_PERCENTAGE: undefined },
-        { ...MPS_ENV, CUDA_MPS_ACTIVE_THREAD_PERCENTAGE: '0' },
-        { ...MPS_ENV, CUDA_MPS_ACTIVE_THREAD_PERCENTAGE: '101' },
-        { ...MPS_ENV, CUDA_MPS_PINNED_DEVICE_MEM_LIMIT: '1=3072M' },
-        { ...MPS_ENV, CUDA_MPS_PINNED_DEVICE_MEM_LIMIT: '0=3072M,1=1M' },
-        { ...MPS_ENV, CUDA_MPS_PINNED_DEVICE_MEM_LIMIT: '0=9007199254740991M' },
-        { ...MPS_ENV, CUDA_MPS_PIPE_DIRECTORY: '/secret-path-do-not-echo' },
-    ];
-    for (const [index, env] of vectors.entries()) await t.test(`invalid vector ${index}`, async (t) => {
-        const h = gpuHarness(t, { env });
-        await assert.rejects(h.run({ maxModelLen: 512 }), (error) => error.details?.admission?.reasonCode === 'gpu_budget_invalid' && !error.message.includes('secret-path'));
-        assert.equal(h.started.length, 0);
-    });
+    for (const vector of INVALID_MPS_VALUES.entries()) await checkInvalidMps(t, vector);
 });
+for (const vector of INVALID_MPS_VALUES.entries()) test(`invalid MPS vector: ${vector[0]}`, (t) => checkInvalidMps(t, vector));
 
 test('LL.unified-share-refused', async (t) => {
     const h = gpuHarness(t, { gpu: { ...TEST_GPU, memoryModel: 'unified', totalBytes: null, freeBytes: null } });
