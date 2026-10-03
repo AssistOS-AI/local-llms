@@ -58,7 +58,7 @@ const CONTEXT_MARGIN_BYTES = 256 * MIB;
 // VLLM_USABLE_SHARE); it must agree with that to within this fraction of the device.
 const USABLE_TOLERANCE = 0.03;
 const OUTPUT_LIMIT = 48 * 1024;
-const SIZING_PATTERN = /gpu_memory_utilization|mem_get_info|requested_memory|total_memory/;
+const SIZING_PATTERN = /gpu_memory_utilization|mem_get_info|get_memory_info|requested_memory|total_memory/;
 const SIZING_DIRECTORIES = Object.freeze(['v1/worker', 'utils']);
 const MAX_SIZING_FILES = 120;
 const MAX_SIZING_LINES = 40;
@@ -67,14 +67,20 @@ const MAX_SIZING_LINES = 40;
 // file is never proof: the installed source must hold both statements below, as executable code (comments and string literals are
 // removed first, so a commented-out or quoted expression is not a statement). `request`: the memory
 // vLLM asks for is the device's total memory times gpu_memory_utilization (the denominator is
-// whatever `total` is). `total`: that total is read from the CUDA runtime's mem_get_info, which is
-// what the tool measures under two MPS limits. The entry for a version records what review expects
+// whatever `total` is). `total`: that total is read from the CUDA runtime's memory query, the same
+// cudaMemGetInfo the tool measures under two MPS limits. vLLM 0.30.0 reads it in
+// vllm/utils/mem_utils.py MemorySnapshot.measure() as
+// `self.free_memory, self.total_memory = torch.accelerator.get_memory_info(device)`; PyTorch returns (free, total)
+// from that call, so the total is the SECOND target of a tuple assignment (or index [1]); a total taken from the first
+// value, from the wrong position or from another source is not the statement. The `mem_get_info` forms of earlier
+// wheels stay accepted. The entry for a version records what review expects
 // of that version's source; it is confirmed only by a stage 1 document whose `sizing.rules` hold the
 // matching lines of the installed wheel. A version without an entry has no reviewed sizing
 // semantics, so no calibration of it is qualifiable.
 export const REVIEWED_SIZING = Object.freeze({
     '0.30.0': Object.freeze({
-        expectation: 'requested = total_memory * gpu_memory_utilization, with total_memory from mem_get_info()',
+        expectation: 'requested = total_memory * gpu_memory_utilization, with total_memory read as the total of torch.accelerator.get_memory_info() '
+            + '(vLLM 0.30.0 MemorySnapshot.measure: free, total = ...) or of mem_get_info()',
         request: Object.freeze([
             String.raw`\b[\w.]*total_memory\s*\*\s*[\w.]*gpu_memory_utilization\b`,
             String.raw`\b[\w.]*gpu_memory_utilization\s*\*\s*[\w.]*total_memory\b`,
@@ -82,6 +88,10 @@ export const REVIEWED_SIZING = Object.freeze({
         total: Object.freeze([
             String.raw`\b[\w.]*total[\w.]*\s*=\s*(?:torch\.cuda|current_platform)\.mem_get_info\(`,
             String.raw`,\s*[\w.]*total[\w.]*\s*=\s*(?:torch\.cuda|current_platform)\.mem_get_info\(`,
+            // torch.accelerator.get_memory_info returns (free, total): the total is the second target of the unpacking ...
+            String.raw`\b[\w.]+\s*,\s*[\w.]*total[\w.]*\s*=\s*torch\.accelerator\.get_memory_info\(`,
+            // ... or the second element of the returned pair.
+            String.raw`\b[\w.]*total[\w.]*\s*=\s*torch\.accelerator\.get_memory_info\([^()]*\)\s*\[\s*1\s*\]`,
         ]),
     }),
 });
@@ -289,8 +299,8 @@ function safeCatalog() {
 // ---------------------------------------------------------------------------
 // Stage 1: the calibration.
 
-// Bounded in-client queries. Both print one JSON line. torch's two total-memory
-// views come from the same process; ctypes asks the driver directly (the same
+// Bounded in-client queries. Both print one JSON line. torch's three total-memory
+// views (torch.cuda.mem_get_info, the device properties and torch.accelerator.get_memory_info) come from the same process; ctypes asks the driver directly (the same
 // cuMemGetInfo the G1 CUDA probe reports).
 export const TORCH_QUERY = [
     'import json,os,sys',
@@ -301,6 +311,13 @@ export const TORCH_QUERY = [
     '    p=torch.cuda.get_device_properties(0)',
     '    out["memGetInfo"]={"free":int(free),"total":int(total)}',
     '    out["totalMemory"]=int(p.total_memory)',
+    // The API vLLM 0.30.0 calls for its denominator (vllm/utils/mem_utils.py MemorySnapshot.measure), recorded as returned (free, total).
+    '    try:',
+    '        a=torch.accelerator.get_memory_info(0)',
+    '        out["acceleratorMemoryInfo"]={"free":int(a[0]),"total":int(a[1])}',
+    '    except Exception as e:',
+    '        out["acceleratorMemoryInfo"]=None',
+    '        out["acceleratorError"]=type(e).__name__+": "+str(e)[:160]',
     '    out["name"]=p.name',
     '    out["capability"]=[int(p.major),int(p.minor)]',
     '    out["multiProcessorCount"]=int(p.multi_processor_count)',
@@ -446,7 +463,7 @@ export function sizingVerdict({ installedVersion, lockVersion, scan }) {
     else if (scan.truncated) reasons.push(`the sizing scan was cut short (${scan.unreadable} unreadable files, or more than ${MAX_SIZING_FILES} files)`);
     if (reviewed && scan && scan.filesScanned > 0) {
         if (!scan.rules?.request?.length) reasons.push('no statement computes the requested memory as the device total times gpu_memory_utilization');
-        if (!scan.rules?.total?.length) reasons.push('no statement reads the device total from mem_get_info');
+        if (!scan.rules?.total?.length) reasons.push('no statement reads the device total from mem_get_info or torch.accelerator.get_memory_info');
     }
     return { ok: reasons.length === 0, reasons, lockVersion, installedVersion: installedVersion ?? null, reviewed, expectation: reviewed ? REVIEWED_SIZING[lockVersion].expectation : null };
 }
@@ -465,6 +482,24 @@ function vllmPackage({ fsApi = fs, runnerDir }) {
         }
     } catch { /* not installed */ }
     return null;
+}
+
+const positiveInteger = (value) => Number.isSafeInteger(value) && value > 0;
+const wholeNumber = (value) => Number.isSafeInteger(value) && value >= 0;
+// torch.accelerator.get_memory_info(0) as one query recorded it: { free, total } of whole numbers (total above zero), or null.
+const acceleratorInfo = (query) => {
+    const info = query?.acceleratorMemoryInfo;
+    return wholeNumber(info?.free) && positiveInteger(info?.total) ? { free: info.free, total: info.total } : null;
+};
+// One query's three torch totals, compared as integers: torch.cuda.mem_get_info, the device properties and the accelerator API.
+function torchViewsAgree(query) {
+    const info = acceleratorInfo(query);
+    return positiveInteger(query?.memGetInfo?.total) && info !== null && query.memGetInfo.total === query.totalMemory && query.memGetInfo.total === info.total;
+}
+// The accelerator total against the driver's own, within the tolerance torch and the driver are held to (1 MiB), and 0 <= free <= total.
+function acceleratorAgreesWithDriver(torchQuery, driverQuery) {
+    const info = acceleratorInfo(torchQuery);
+    return info !== null && positiveInteger(driverQuery?.total) && Math.abs(info.total - driverQuery.total) <= MIB && info.free <= info.total;
 }
 
 /** Classify the denominator the installed wheel sees from the two measured views. */
@@ -568,6 +603,15 @@ export async function calibrationReport({
     for (const [name, reply] of Object.entries({ torchShare, torchTight, ctypesShare, ctypesTight, distributions })) {
         if (!reply.ok) block('query_failed', `The bounded ${name} query did not return a document: ${String(reply.error).slice(0, 200)}`, { query: name, status: reply.status });
     }
+    // vLLM 0.30.0 reads its denominator through torch.accelerator.get_memory_info, so that exact API must be measurable under both
+    // limits. Without it the calibration cannot show what vLLM will see, which is a blocking prerequisite, never a pass.
+    if (torchShare.ok && torchTight.ok && torchShare.value?.cudaAvailable === true) {
+        const missing = [['saved limit', torchShare.value], ['tighter limit', torchTight.value]].filter(([, value]) => !acceleratorInfo(value));
+        if (missing.length) {
+            block('accelerator_memory_api_unavailable', `torch.accelerator.get_memory_info(0), the call vLLM ${entry.version} reads its device total through, did not return the device memory under the ${missing.map(([label]) => label).join(' and the ')}: ${missing.map(([, value]) => value?.acceleratorError ?? 'no result').join('; ').slice(0, 240)}. It must be measured, so this calibration cannot qualify.`,
+                { torch: torchShare.value?.torch ?? null, errors: Object.fromEntries(missing.map(([label, value]) => [label, value?.acceleratorError ?? null])) });
+        }
+    }
     const sizing = scanSizingSource({ fsApi, root: installed.root, version: entry.version });
     const sizingCheck = sizingVerdict({ installedVersion: installed.version, lockVersion: entry.version, scan: sizing });
 
@@ -586,7 +630,12 @@ export async function calibrationReport({
     const checks = {
         cudaAvailable: torchShare.value?.cudaAvailable === true,
         archSupported,
-        torchViewsAgree: torchShare.value?.memGetInfo?.total === torchShare.value?.totalMemory && torchTight.value?.memGetInfo?.total === torchTight.value?.totalMemory,
+        // The three views torch gives of the total (torch.cuda.mem_get_info, the device properties and torch.accelerator.get_memory_info)
+        // are equal as integers under each limit.
+        torchViewsAgree: torchViewsAgree(torchShare.value) && torchViewsAgree(torchTight.value),
+        // The accelerator view agrees with the CUDA driver's own total within the tolerance torch and the driver are held to, and its
+        // free memory is a part of that total (0 <= free <= total), under each limit.
+        acceleratorAgreesWithDriver: acceleratorAgreesWithDriver(torchShare.value, ctypesShare.value) && acceleratorAgreesWithDriver(torchTight.value, ctypesTight.value),
         denominatorIsPhysical: classification.denominator === 'physical-device',
         matchesIntended: Boolean(torchTotal) && Math.abs(torchTotal - raw.totalBytes * VLLM_USABLE_SHARE) <= USABLE_TOLERANCE * raw.totalBytes,
         fitsShare: requestedBytes !== null && requestedBytes + CONTEXT_MARGIN_BYTES <= budget.gpuShare.vramBytes,
@@ -606,6 +655,8 @@ export async function calibrationReport({
         measurements: {
             hostNvmlTotalBytes: hostNvmlBytes, containerNvmlTotalBytes: raw.totalBytes, nvmlName: raw.name,
             torchShare: torchShare.value, torchTight: torchTight.value, ctypesShare: ctypesShare.value, ctypesTight: ctypesTight.value,
+            // The raw (free, total) torch.accelerator.get_memory_info(0) returned under each limit: the exact API vLLM reads.
+            acceleratorShare: acceleratorInfo(torchShare.value), acceleratorTight: acceleratorInfo(torchTight.value),
             utilization, intendedBytes, requestedBytes, usableShare: VLLM_USABLE_SHARE,
         },
         denominator: classification,

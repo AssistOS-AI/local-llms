@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 import { loadSeedCatalog } from '../src/controller/catalog.mjs';
@@ -92,7 +93,8 @@ function installVllm(root, { sizing = true, version = '0.30.0', ready = { digest
 
 // The in-client queries, scripted: torch and ctypes see `views(env)`; a different pinned limit is a different env.
 const LOCKED_DISTRIBUTIONS = Object.freeze({ vllm: '0.30.0', torch: '2.13.0', triton: '3.7.1' });
-function fakeRun({ views, torch = {}, fail = null, calls = [], distributions = LOCKED_DISTRIBUTIONS }) {
+// `torch` and `ctypes` override fields of the torch and the driver documents; a function receives the pinned limit, so one limit can differ.
+function fakeRun({ views, torch = {}, ctypes = {}, fail = null, calls = [], distributions = LOCKED_DISTRIBUTIONS }) {
     return async (file, args, options = {}) => {
         calls.push({ file, args, env: options.env, timeoutMs: options.timeoutMs });
         const script = args[1];
@@ -102,13 +104,13 @@ function fakeRun({ views, torch = {}, fail = null, calls = [], distributions = L
         if (script === TORCH_QUERY) {
             return {
                 ok: true, status: 0, stderr: '', stdout: `${JSON.stringify({
-                    python: '3.13.5', torch: '2.13.0', torchCuda: '13.0', cudaAvailable: true, memGetInfo: { free: total - 200 * MIB, total }, totalMemory: total, name: RTX.name,
+                    python: '3.13.5', torch: '2.13.0', torchCuda: '13.0', cudaAvailable: true, memGetInfo: { free: total - 200 * MIB, total }, totalMemory: total, acceleratorMemoryInfo: { free: total - 200 * MIB, total }, name: RTX.name,
                     capability: [8, 6], multiProcessorCount: 30, archList: ['sm_75', 'sm_80', 'sm_86', 'sm_90'], mps: { CUDA_MPS_PIPE_DIRECTORY: options.env.CUDA_MPS_PIPE_DIRECTORY, CUDA_MPS_ACTIVE_THREAD_PERCENTAGE: options.env.CUDA_MPS_ACTIVE_THREAD_PERCENTAGE, CUDA_MPS_PINNED_DEVICE_MEM_LIMIT: limit },
-                    ...torch,
+                    ...(typeof torch === 'function' ? torch(limit, total) : torch),
                 })}\n`,
             };
         }
-        if (script === CTYPES_QUERY) return { ok: true, status: 0, stderr: '', stdout: `${JSON.stringify({ free: total - 150 * MIB, total })}\n` };
+        if (script === CTYPES_QUERY) return { ok: true, status: 0, stderr: '', stdout: `${JSON.stringify({ free: total - 150 * MIB, total, ...(typeof ctypes === 'function' ? ctypes(limit, total) : ctypes) })}\n` };
         if (script === DIST_QUERY) return { ok: true, status: 0, stderr: '', stdout: `${JSON.stringify(Object.fromEntries(args.slice(2).map((name) => [name, distributions[name] ?? null])))}\n` };
         return { ok: false, status: 1, stdout: '', stderr: 'unexpected query', error: '1' };
     };
@@ -122,7 +124,7 @@ async function calibrate(t, options = {}) {
     const calls = [];
     const report = await calibrationReport({
         env: { ...MPS_ENV, ...(options.env || {}) }, runRoot: root, readGpuImpl: async () => structuredClone(options.gpu || RTX), readMemoryImpl: () => ({ totalBytes: 31 * GIB, availableBytes: 24 * GIB }),
-        locksImpl: () => LOCK, run: fakeRun({ views: options.views || physicalViews, torch: options.torch, fail: options.fail, calls, ...(options.distributions ? { distributions: options.distributions } : {}) }),
+        locksImpl: () => LOCK, run: fakeRun({ views: options.views || physicalViews, torch: options.torch, ctypes: options.ctypes, fail: options.fail, calls, ...(options.distributions ? { distributions: options.distributions } : {}) }),
         hostNvmlBytes: options.hostNvmlBytes ?? 6144 * MIB, now: () => new Date('2026-10-03T10:00:00Z'), ...(options.fsApi ? { fsApi: options.fsApi } : {}),
     });
     return { report, root, calls };
@@ -652,4 +654,217 @@ test('CAL.stripping-blanks-comments-and-literals-and-keeps-every-line', () => {
     const source = '"""doc\nmore\n"""\nx = total_memory * gpu_memory_utilization  # c\n';
     assert.equal(stripPythonNonCode(source).split('\n')[3].includes('total_memory * gpu_memory_utilization'), true);
     assert.equal(stripPythonNonCode(source).split('\n').slice(0, 3).join('').replace(/["\s]/g, ''), '');
+});
+
+// --- CAL3: vLLM 0.30.0 reads its denominator through torch.accelerator.get_memory_info ----------------------------------
+// The sizing statement of vllm/utils/mem_utils.py MemorySnapshot.measure() in v0.30.0 (the line the live calibration refused: it names no
+// mem_get_info), inside a method body shaped like the real one. The surrounding lines are representative.
+const REAL_STATEMENT = 'self.free_memory, self.total_memory = torch.accelerator.get_memory_info(device)';
+const REAL_MEM_UTILS = [
+    '@dataclass',
+    'class MemorySnapshot:',
+    '    """Memory snapshot."""',
+    '',
+    '    torch_peak: int = 0',
+    '    free_memory: int = 0',
+    '    total_memory: int = 0',
+    '    auto_measure: bool = True',
+    '',
+    '    def __post_init__(self) -> None:',
+    '        if self.auto_measure:',
+    '            self.measure()',
+    '',
+    '    def measure(self) -> None:',
+    '        device = self.device_',
+    '        # we measure the torch peak memory usage via allocated_bytes,',
+    '        # rather than `torch.cuda.memory_reserved()` .',
+    '        self.torch_peak = current_platform.memory_stats(device).get("allocated_bytes.all.peak", 0)',
+    '',
+    '        # this is the amount of memory the device reports through cudaMemGetInfo',
+    `        ${REAL_STATEMENT}`,
+    '        shared_sysmem_device_mem_sms = ((8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark',
+    '        if current_platform.is_cuda() and current_platform.get_device_capability(device.index) in shared_sysmem_device_mem_sms:',
+    '            self.total_memory = psutil.virtual_memory().total',
+    '        self.cuda_memory = self.total_memory - self.free_memory',
+    '',
+].join('\n');
+const REAL_STATEMENT_LINE = REAL_MEM_UTILS.split('\n').findIndex((line) => line.includes(REAL_STATEMENT)) + 1;
+// The `total` rule of the reviewed entry as of d501bfc, before this change: only mem_get_info forms.
+const OLD_TOTAL_RULE = Object.freeze([
+    String.raw`\b[\w.]*total[\w.]*\s*=\s*(?:torch\.cuda|current_platform)\.mem_get_info\(`,
+    String.raw`,\s*[\w.]*total[\w.]*\s*=\s*(?:torch\.cuda|current_platform)\.mem_get_info\(`,
+]);
+
+test('CAL.the-real-vllm-0-30-0-statement-was-refused-by-the-old-rule-and-is-accepted-with-its-line-by-the-new-one', async (t) => {
+    const code = stripPythonNonCode(REAL_MEM_UTILS).split('\n');
+    // The d501bfc rule matches no executable line of the real method: that is the live refusal "no statement reads the device total".
+    assert.equal(OLD_TOTAL_RULE.some((source) => code.some((line) => new RegExp(source).test(line))), false);
+    const old = sizingVerdict({ installedVersion: '0.30.0', lockVersion: '0.30.0', scan: { filesScanned: 2, truncated: false, unreadable: 0, rules: { request: [{}], total: [] } } });
+    assert.equal(old.ok, false); assert.ok(old.reasons.some((entry) => /no statement reads the device total from mem_get_info/.test(entry)), JSON.stringify(old.reasons));
+    // The reviewed rule of this change matches exactly that line, and only that one.
+    const matching = REVIEWED_SIZING['0.30.0'].total.flatMap((source) => code.flatMap((line, index) => (new RegExp(source).test(line) ? [index + 1] : [])));
+    assert.deepEqual([...new Set(matching)], [REAL_STATEMENT_LINE]);
+    // Through the scan of an installed wheel, with its file and original line, and through a whole calibration.
+    const root = scratch(t);
+    installVllm(root, { sizing: { worker: CODE_REQUEST, utils: REAL_MEM_UTILS } });
+    const site = path.join(root, 'vllm', '0.30.0', 'venv', 'lib', 'python3.13', 'site-packages', 'vllm');
+    const scan = scanSizingSource({ root: site, version: '0.30.0' });
+    assert.deepEqual(scan.rules.total.map((hit) => [hit.file, hit.line, hit.text]), [['utils/mem_utils.py', REAL_STATEMENT_LINE, REAL_STATEMENT]]);
+    assert.ok(scan.lines.some((line) => line.line === REAL_STATEMENT_LINE && /get_memory_info/.test(line.text)), 'the accelerator statement is listed as sizing evidence');
+    assert.equal(sizingVerdict({ installedVersion: '0.30.0', lockVersion: '0.30.0', scan }).ok, true);
+    const evidence = (await calibrate(t, { install: { sizing: { worker: CODE_REQUEST, utils: REAL_MEM_UTILS } } })).report.evidence;
+    assert.equal(evidence.verdict.qualifiable, true, JSON.stringify(evidence.verdict));
+    assert.deepEqual(evidence.verdict.failed, []);
+    assert.equal(evidence.verdict.checks.sizingEvidence, true);
+});
+
+test('CAL.only-the-accelerator-total-in-its-reviewed-position-and-executable-code-is-a-sizing-statement', async (t) => {
+    const control = await sizingOutcome(t, { worker: CODE_REQUEST, utils: REAL_MEM_UTILS });
+    assert.equal(control.verdict.qualifiable, true);
+    const A = 'torch.accelerator.get_memory_info(device)';
+    const negatives = [
+        ['commented out', `#         ${REAL_STATEMENT}\nself.free_memory, self.total_memory = configured_cache_limit, configured_cache_limit\n`],
+        ['a trailing comment', `x = 1  # ${REAL_STATEMENT}\n`],
+        ['a docstring', `def g():\n    """\n    ${REAL_STATEMENT}\n    """\n    return None\n`],
+        ['a string literal', `NOTE = "${REAL_STATEMENT}"\n`],
+        ['a triple-quoted block', `NOTE = '''\n${REAL_STATEMENT}\n'''\n`],
+        ['absent', '# see torch.accelerator.get_memory_info for the free and total memory\nvalue = total_memory\n'],
+        ['the total from the device properties', `self.free_memory = ${A}[0]\nself.total_memory = torch.cuda.get_device_properties(device).total_memory\n`],
+        ['the total from a constant', 'self.free_memory, self.total_memory = 0, 6 * 1024 ** 3\n'],
+        ['the unpacking in the wrong order', `self.total_memory, self.free_memory = ${A}\n`],
+        ['the free value taken as the total', `self.total_memory = ${A}[0]\n`],
+        ['the whole pair bound to the total', `self.total_memory = ${A}\n`],
+        ['another module\'s function', 'self.free_memory, self.total_memory = some_cache.accelerator.get_memory_info(device)\n'],
+        ['the call of another prefix', 'self.free_memory, self.total_memory = my_torch.accelerator.get_memory_info(device)\n'],
+        ['a second value that is not a total', `self.free_memory, self.used_memory = ${A}\n`],
+    ];
+    for (const [label, utils] of negatives) {
+        const evidence = await sizingOutcome(t, { worker: CODE_REQUEST, utils });
+        assert.equal(evidence.verdict.qualifiable, false, `${label}: not qualifiable`);
+        assert.deepEqual(evidence.verdict.failed, ['sizingEvidence'], label);
+        assert.deepEqual(evidence.sizing.rules.total, [], `${label}: no total statement matched`);
+        assert.equal(evidence.sizing.rules.request.length, 1, `${label}: the request statement is still found`);
+        assert.ok(evidence.sizing.verdict.reasons.some((entry) => /no statement reads the device total from mem_get_info or torch\.accelerator\.get_memory_info/.test(entry)), `${label}: ${JSON.stringify(evidence.sizing.verdict.reasons)}`);
+    }
+    // The second value of the returned pair, bound by index or by an unpacking that ignores the free value, is the same statement.
+    for (const [label, utils] of [
+        ['an index', `self.total_memory = ${A}[1]\n`],
+        ['an ignored free value', 'free, total = torch.accelerator.get_memory_info(0)\n'],
+        ['an underscore', '_, total_bytes = torch.accelerator.get_memory_info(device)\n'],
+    ]) {
+        const evidence = await sizingOutcome(t, { worker: CODE_REQUEST, utils });
+        assert.equal(evidence.verdict.qualifiable, true, `${label}: ${JSON.stringify(evidence.verdict)}`);
+        assert.equal(evidence.sizing.rules.total.length, 1, label);
+        assert.ok(evidence.sizing.lines.some((line) => /get_memory_info/.test(line.text)), `${label}: the accelerator statement is listed as sizing evidence`);
+    }
+    // The earlier wheels' statement stays accepted, and the exact-version gating is unchanged: another version never qualifies.
+    assert.equal((await sizingOutcome(t, { worker: CODE_REQUEST, utils: CODE_TOTAL })).verdict.qualifiable, true);
+    const other = await calibrate(t, { install: { version: '0.29.0', sizing: { worker: CODE_REQUEST, utils: REAL_MEM_UTILS } } });
+    assert.ok(other.report.evidence.verdict.failed.includes('sizingEvidence') && other.report.evidence.verdict.failed.includes('identityMatchesLock'));
+    assert.deepEqual(Object.keys(REVIEWED_SIZING), ['0.30.0']);
+});
+
+test('CAL.the-accelerator-api-is-measured-under-both-limits-and-recorded-raw-next-to-the-cuda-and-driver-views', async (t) => {
+    assert.ok(TORCH_QUERY.includes('torch.accelerator.get_memory_info(0)'), 'the probe calls the exact API vLLM 0.30.0 calls');
+    const queryLines = TORCH_QUERY.split('\n');
+    assert.ok(queryLines.findIndex((line) => line.includes('torch.accelerator.get_memory_info')) > queryLines.findIndex((line) => line.includes('if out["cudaAvailable"]')), 'it runs only when CUDA is available');
+    const { report, calls } = await calibrate(t);
+    assert.equal(calls.filter((call) => call.args[1] === TORCH_QUERY).length, 2, 'the torch query, with the accelerator call, runs under both limits');
+    const m = report.evidence.measurements;
+    const free = USABLE - 200 * MIB;
+    assert.deepEqual(m.acceleratorShare, { free, total: USABLE }); assert.deepEqual(m.acceleratorTight, { free, total: USABLE });
+    // The raw (free, total) is in the torch document as well, next to torch.cuda's pair and the driver's.
+    assert.deepEqual(m.torchShare.acceleratorMemoryInfo, { free, total: USABLE }); assert.deepEqual(m.torchTight.acceleratorMemoryInfo, { free, total: USABLE });
+    assert.deepEqual(m.torchShare.memGetInfo, { free, total: USABLE }); assert.equal(m.ctypesShare.total, USABLE); assert.equal(m.ctypesTight.total, USABLE);
+    for (const name of ['torchViewsAgree', 'acceleratorAgreesWithDriver']) assert.equal(report.evidence.verdict.checks[name], true, name);
+    // The raw values are part of the digest: changing one changes it.
+    const doctored = structuredClone(report.evidence); doctored.measurements.acceleratorTight.total += 1;
+    assert.notEqual(evidenceDigest(doctored), report.evidence.evidenceDigest);
+    // Under a share-following device both limits move it, and the accelerator follows (the denominator stays 'share').
+    const share = (await calibrate(t, { views: shareViews })).report.evidence;
+    assert.deepEqual([share.measurements.acceleratorShare.total, share.measurements.acceleratorTight.total], [5529 * MIB, 2048 * MIB]);
+});
+
+test('CAL.the-accelerator-view-must-agree-exactly-with-the-cuda-views-and-with-the-driver-under-each-limit', async (t) => {
+    const TIGHT = '0=2048M';
+    const cases = [
+        ['the accelerator total one byte off under the saved limit', { torch: (l, total) => (l !== TIGHT ? { acceleratorMemoryInfo: { free: total - 200 * MIB, total: total - 1 } } : {}) }, ['torchViewsAgree']],
+        ['the accelerator total one MiB off under the tighter limit', { torch: (l, total) => (l === TIGHT ? { acceleratorMemoryInfo: { free: total - 200 * MIB, total: total - MIB } } : {}) }, ['torchViewsAgree']],
+        ['the accelerator total far from the driver under both limits (with every torch view following it)', {
+            torch: (_l, total) => ({ memGetInfo: { free: total - 200 * MIB, total: total - 8 * MIB }, totalMemory: total - 8 * MIB, acceleratorMemoryInfo: { free: total - 200 * MIB, total: total - 8 * MIB } }),
+        }, ['acceleratorAgreesWithDriver']],
+        ['the accelerator free memory above its total', { torch: (_l, total) => ({ acceleratorMemoryInfo: { free: total + 1, total } }) }, ['acceleratorAgreesWithDriver']],
+        ['the driver far from the accelerator under the tighter limit only', { ctypes: (l, total) => (l === TIGHT ? { total: total - 4 * MIB } : {}) }, ['acceleratorAgreesWithDriver']],
+    ];
+    for (const [label, options, expected] of cases) {
+        const { report } = await calibrate(t, options);
+        const evidence = report.evidence;
+        assert.equal(evidence.verdict.qualifiable, false, label);
+        for (const name of expected) { assert.ok(evidence.verdict.failed.includes(name), `${label}: ${evidence.verdict.failed}`); assert.equal(evidence.verdict.checks[name], false, label); }
+        assert.equal(report.proposed, undefined, label); assert.throws(() => renderQualificationEntry(evidence), /Cannot render a qualification entry/, label);
+    }
+    // One isolated check: only the accelerator's free value is implausible, everything else holds.
+    const isolated = (await calibrate(t, { torch: (_l, total) => ({ acceleratorMemoryInfo: { free: total + 1, total } }) })).report.evidence;
+    assert.deepEqual(isolated.verdict.failed, ['acceleratorAgreesWithDriver']);
+    const exactOnly = (await calibrate(t, { torch: (_l, total) => ({ acceleratorMemoryInfo: { free: total - 200 * MIB, total: total - 1 } }) })).report.evidence;
+    assert.ok(exactOnly.verdict.failed.includes('torchViewsAgree') && !exactOnly.verdict.failed.includes('acceleratorAgreesWithDriver'), `a one-byte gap is inside the driver tolerance but not the exact torch rule: ${exactOnly.verdict.failed}`);
+});
+
+test('CAL.an-unavailable-accelerator-api-is-a-blocking-prerequisite-with-a-clear-message', async (t) => {
+    const TIGHT = '0=2048M';
+    const missing = { acceleratorMemoryInfo: null, acceleratorError: "AttributeError: module 'torch' has no attribute 'accelerator'" };
+    for (const [label, torch, which] of [
+        ['under both limits', missing, 'saved limit and the tighter limit'],
+        ['under the tighter limit only', (l) => (l === TIGHT ? missing : {}), 'tighter limit'],
+        ['under the saved limit only', (l) => (l !== TIGHT ? missing : {}), 'saved limit'],
+    ]) {
+        const { report } = await calibrate(t, { torch });
+        assert.equal(report.ok, false, label);
+        const blocker = report.blockers.find((entry) => entry.code === 'accelerator_memory_api_unavailable');
+        assert.ok(blocker, `${label}: ${JSON.stringify(report.blockers)}`);
+        assert.match(blocker.message, /torch\.accelerator\.get_memory_info\(0\), the call vLLM 0\.30\.0 reads its device total through, did not return the device memory/);
+        assert.ok(blocker.message.includes(which) && blocker.message.includes("has no attribute 'accelerator'") && /cannot qualify/.test(blocker.message), `${label}: ${blocker.message}`);
+        assert.equal(report.evidence.verdict.qualifiable, false, label);
+        assert.ok(report.evidence.verdict.failed.includes('torchViewsAgree') && report.evidence.verdict.failed.includes('acceleratorAgreesWithDriver'), `${label}: ${report.evidence.verdict.failed}`);
+        assert.equal(report.proposed, undefined, label);
+        assert.equal(report.evidence.measurements.acceleratorShare === null || report.evidence.measurements.acceleratorTight === null, true, label);
+    }
+    // A result that is not a (free, total) pair of whole numbers with a positive total is no measurement either.
+    for (const bad of [{ free: 0, total: 0 }, { free: 100, total: 0 }, { free: -1, total: USABLE }, { free: 1.5, total: USABLE }, { free: '100', total: USABLE }, { total: USABLE }]) {
+        const { report } = await calibrate(t, { torch: { acceleratorMemoryInfo: bad } });
+        assert.ok(report.blockers.some((entry) => entry.code === 'accelerator_memory_api_unavailable'), JSON.stringify(bad));
+        assert.equal(report.evidence.verdict.qualifiable, false, JSON.stringify(bad));
+    }
+    // A CUDA that is unavailable is its own blocker, not this one.
+    const noCuda = await calibrate(t, { torch: { cudaAvailable: false, memGetInfo: undefined, totalMemory: undefined, acceleratorMemoryInfo: null } });
+    assert.equal(noCuda.report.blockers.some((entry) => entry.code === 'accelerator_memory_api_unavailable'), false);
+});
+
+// The probe's Python itself, run with python3 against a stub torch: the call is made with device index 0, its (free, total) pair is recorded
+// under the documented keys, and a torch without the API is recorded with its error instead of failing the whole query.
+test('CAL.the-torch-query-runs-and-records-the-accelerator-pair-or-its-error', (t) => {
+    const root = scratch(t);
+    const stub = path.join(root, 'stub'); fs.mkdirSync(path.join(stub, 'torch'), { recursive: true });
+    fs.writeFileSync(path.join(stub, 'torch', '__init__.py'), [
+        'import os', '__version__ = "2.13.0"', 'MiB = 1024 * 1024',
+        'class _V:', '    cuda = "13.0"', 'version = _V()',
+        'class _P:', '    total_memory = 6000 * MiB', '    name = "Stub GPU"', '    major = 8', '    minor = 6', '    multi_processor_count = 30',
+        'class _Cuda:', '    @staticmethod', '    def is_available(): return True', '    @staticmethod', '    def mem_get_info(): return (5000 * MiB, 6000 * MiB)',
+        '    @staticmethod', '    def get_device_properties(index): return _P()', '    @staticmethod', '    def get_arch_list(): return ["sm_86"]',
+        'cuda = _Cuda()',
+        'class _Accelerator:', '    @staticmethod', '    def get_memory_info(index=None):', '        assert index == 0, index', '        return (4800 * MiB, 6000 * MiB)',
+        'if not os.environ.get("STUB_NO_ACCELERATOR"):', '    accelerator = _Accelerator()', '',
+    ].join('\n'));
+    const run = (extraEnv) => spawnSync('python3', ['-c', TORCH_QUERY], { env: { PATH: '/usr/bin:/bin', PYTHONPATH: stub, ...extraEnv }, encoding: 'utf8', timeout: 20_000 });
+    const present = run({});
+    assert.equal(present.status, 0, present.stderr);
+    const value = JSON.parse(present.stdout.trim().split('\n').at(-1));
+    assert.deepEqual(value.acceleratorMemoryInfo, { free: 4800 * MIB, total: 6000 * MIB });
+    assert.deepEqual(value.memGetInfo, { free: 5000 * MIB, total: 6000 * MIB }); assert.equal(value.totalMemory, 6000 * MIB);
+    assert.equal(Object.hasOwn(value, 'acceleratorError'), false);
+    const absent = run({ STUB_NO_ACCELERATOR: '1' });
+    assert.equal(absent.status, 0, absent.stderr);
+    const missing = JSON.parse(absent.stdout.trim().split('\n').at(-1));
+    assert.equal(missing.acceleratorMemoryInfo, null); assert.match(missing.acceleratorError, /^AttributeError: /);
+    assert.deepEqual(missing.memGetInfo, { free: 5000 * MIB, total: 6000 * MIB }, 'the rest of the query is unaffected');
 });
