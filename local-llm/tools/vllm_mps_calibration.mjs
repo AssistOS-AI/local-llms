@@ -65,34 +65,41 @@ const MAX_SIZING_LINES = 40;
 
 // The sizing semantics a qualification may rest on, reviewed per EXACT vLLM version. A keyword in a
 // file is never proof: the installed source must hold both statements below, as executable code (comments and string literals are
-// removed first, so a commented-out or quoted expression is not a statement). `request`: the memory
-// vLLM asks for is the device's total memory times gpu_memory_utilization (the denominator is
-// whatever `total` is). `total`: that total is read from the CUDA runtime's memory query, the same
-// cudaMemGetInfo the tool measures under two MPS limits. vLLM 0.30.0 reads it in
-// vllm/utils/mem_utils.py MemorySnapshot.measure() as
-// `self.free_memory, self.total_memory = torch.accelerator.get_memory_info(device)`; PyTorch returns (free, total)
-// from that call, so the total is the SECOND target of a tuple assignment (or index [1]); a total taken from the first
-// value, from the wrong position or from another source is not the statement. The `mem_get_info` forms of earlier
-// wheels stay accepted. The entry for a version records what review expects
-// of that version's source; it is confirmed only by a stage 1 document whose `sizing.rules` hold the
-// matching lines of the installed wheel. A version without an entry has no reviewed sizing
+// removed first, so a commented-out or quoted expression is not a statement), each in the file the review found it in (a path relative
+// to the vllm package root: a match in any other file never counts). `request`: the memory vLLM asks for is the device's total memory
+// times gpu_memory_utilization (the denominator is whatever `total` is); in 0.30.0 that is `request_memory` in v1/worker/utils.py.
+// `total`: that total is read from the CUDA runtime's memory query, the same cudaMemGetInfo the tool measures under two MPS limits;
+// in 0.30.0 it is vllm/utils/mem_utils.py MemorySnapshot.measure(), `self.free_memory, self.total_memory =
+// torch.accelerator.get_memory_info(device)`. PyTorch returns (free, total) from that call, so the total is the SECOND target of a
+// tuple assignment (or index [1]); a total taken from the first value, from the wrong position or from another source is not the
+// statement. The same call also appears in an unrelated sleep-mode path of v1/worker/gpu_worker.py (`free_bytes_after_sleep, total = ...`),
+// which is why the file, and for the total the class and method, are part of the rule. The `mem_get_info` forms of earlier wheels stay
+// accepted in the same place. The entry for a version records what review expects of that version's source; it is confirmed only by a stage 1
+// document whose `sizing.rules` hold the matching lines of the installed wheel. A version without an entry has no reviewed sizing
 // semantics, so no calibration of it is qualifiable.
 export const REVIEWED_SIZING = Object.freeze({
     '0.30.0': Object.freeze({
-        expectation: 'requested = total_memory * gpu_memory_utilization, with total_memory read as the total of torch.accelerator.get_memory_info() '
-            + '(vLLM 0.30.0 MemorySnapshot.measure: free, total = ...) or of mem_get_info()',
-        request: Object.freeze([
-            String.raw`\b[\w.]*total_memory\s*\*\s*[\w.]*gpu_memory_utilization\b`,
-            String.raw`\b[\w.]*gpu_memory_utilization\s*\*\s*[\w.]*total_memory\b`,
-        ]),
-        total: Object.freeze([
-            String.raw`\b[\w.]*total[\w.]*\s*=\s*(?:torch\.cuda|current_platform)\.mem_get_info\(`,
-            String.raw`,\s*[\w.]*total[\w.]*\s*=\s*(?:torch\.cuda|current_platform)\.mem_get_info\(`,
-            // torch.accelerator.get_memory_info returns (free, total): the total is the second target of the unpacking ...
-            String.raw`\b[\w.]+\s*,\s*[\w.]*total[\w.]*\s*=\s*torch\.accelerator\.get_memory_info\(`,
-            // ... or the second element of the returned pair.
-            String.raw`\b[\w.]*total[\w.]*\s*=\s*torch\.accelerator\.get_memory_info\([^()]*\)\s*\[\s*1\s*\]`,
-        ]),
+        expectation: 'requested = total_memory * gpu_memory_utilization in v1/worker/utils.py request_memory, with total_memory read as the total of '
+            + 'torch.accelerator.get_memory_info() (vLLM 0.30.0 utils/mem_utils.py MemorySnapshot.measure: free, total = ...) or of mem_get_info()',
+        request: Object.freeze({
+            file: 'v1/worker/utils.py',
+            patterns: Object.freeze([
+                String.raw`\b[\w.]*total_memory\s*\*\s*[\w.]*gpu_memory_utilization\b`,
+                String.raw`\b[\w.]*gpu_memory_utilization\s*\*\s*[\w.]*total_memory\b`,
+            ]),
+        }),
+        total: Object.freeze({
+            file: 'utils/mem_utils.py',
+            within: Object.freeze({ class: 'MemorySnapshot', function: 'measure' }),
+            patterns: Object.freeze([
+                String.raw`\b[\w.]*total[\w.]*\s*=\s*(?:torch\.cuda|current_platform)\.mem_get_info\(`,
+                String.raw`,\s*[\w.]*total[\w.]*\s*=\s*(?:torch\.cuda|current_platform)\.mem_get_info\(`,
+                // torch.accelerator.get_memory_info returns (free, total): the total is the second target of the unpacking ...
+                String.raw`\b[\w.]+\s*,\s*[\w.]*total[\w.]*\s*=\s*torch\.accelerator\.get_memory_info\(`,
+                // ... or the second element of the returned pair.
+                String.raw`\b[\w.]*total[\w.]*\s*=\s*torch\.accelerator\.get_memory_info\([^()]*\)\s*\[\s*1\s*\]`,
+            ]),
+        }),
     }),
 });
 
@@ -414,15 +421,41 @@ export function stripPythonNonCode(text) {
     return out;
 }
 
+const indentOf = (line) => line.length - line.trimStart().length;
+
+/**
+ * The class and method a line of (already stripped) Python code sits in, by indentation: the nearest `def` above it with a smaller
+ * indentation is its function, and the nearest `class` above that is its class. A line at module level has neither.
+ */
+export function enclosingPythonScope(code, index) {
+    const scope = { class: null, function: null };
+    let indent = indentOf(code[index] ?? '');
+    for (let at = index - 1; at >= 0 && indent > 0; at -= 1) {
+        const line = code[at];
+        if (!line.trim()) continue;
+        const here = indentOf(line);
+        if (here >= indent) continue;
+        indent = here;
+        const def = /^\s*(?:async\s+)?def\s+(\w+)\s*\(/.exec(line);
+        const klass = /^\s*class\s+(\w+)\s*[(:]/.exec(line);
+        if (def && scope.function === null && scope.class === null) scope.function = def[1];
+        else if (klass && scope.class === null) scope.class = klass[1];
+    }
+    return scope;
+}
+
 /**
  * The source lines that size vLLM's request against the device, with file and line (bounded), and,
- * from the whole scan, the lines that hold each statement of the reviewed rules for `version`.
+ * from the whole scan, the lines that hold each statement of the reviewed rules for `version`, each only in the file (and, for the total,
+ * the class and method) the rule names. The lines of a rule's hit are always listed, beyond the bound; only other keyword lines are cut.
  * `truncated` means the SCAN was cut short (the file bound, or a file that cannot be read): an
  * incomplete scan proves nothing. `linesOmitted` only counts evidence lines beyond the bound.
  */
 export function scanSizingSource({ fsApi = fs, root, version = null }) {
     const reviewed = version !== null && Object.hasOwn(REVIEWED_SIZING, version) ? REVIEWED_SIZING[version] : null;
-    const compiled = reviewed ? Object.fromEntries(['request', 'total'].map((name) => [name, reviewed[name].map((source) => new RegExp(source))])) : { request: [], total: [] };
+    const compiled = reviewed
+        ? Object.fromEntries(['request', 'total'].map((name) => [name, { file: reviewed[name].file, within: reviewed[name].within ?? null, patterns: reviewed[name].patterns.map((source) => new RegExp(source)) }]))
+        : null;
     const lines = []; const rules = { request: [], total: [] };
     let scanned = 0; let truncated = false; let unreadable = 0; let omitted = 0;
     for (const directory of SIZING_DIRECTORIES) {
@@ -435,13 +468,23 @@ export function scanSizingSource({ fsApi = fs, root, version = null }) {
             try { text = fsApi.readFileSync(path.join(root, directory, name), 'utf8'); } catch { unreadable += 1; truncated = true; continue; }
             // The reviewed rules are matched against executable code only: comments and strings never count.
             const code = stripPythonNonCode(text).split('\n');
+            const file = `${directory}/${name}`;
             text.split('\n').forEach((line, index) => {
-                const hit = { file: `${directory}/${name}`, line: index + 1, text: line.trim().slice(0, 160) };
-                for (const rule of ['request', 'total']) {
-                    if (rules[rule].length < 4 && compiled[rule].some((pattern) => pattern.test(code[index] ?? ''))) rules[rule].push(hit);
+                const hit = { file, line: index + 1, text: line.trim().slice(0, 160) };
+                let ruleHit = false;
+                if (compiled) {
+                    for (const rule of ['request', 'total']) {
+                        const entry = compiled[rule];
+                        if (rules[rule].length >= 4 || file !== entry.file || !entry.patterns.some((pattern) => pattern.test(code[index] ?? ''))) continue;
+                        if (entry.within) {
+                            const scope = enclosingPythonScope(code, index);
+                            if (scope.class !== entry.within.class || scope.function !== entry.within.function) continue;
+                        }
+                        rules[rule].push(hit); ruleHit = true;
+                    }
                 }
-                if (!SIZING_PATTERN.test(line)) return;
-                if (lines.length >= MAX_SIZING_LINES) { omitted += 1; return; }
+                if (!SIZING_PATTERN.test(line) && !ruleHit) return;
+                if (lines.length >= MAX_SIZING_LINES && !ruleHit) { omitted += 1; return; }
                 lines.push(hit);
             });
         }
@@ -462,8 +505,9 @@ export function sizingVerdict({ installedVersion, lockVersion, scan }) {
     if (!scan || scan.filesScanned === 0) reasons.push('no sizing source files were found in the installed package');
     else if (scan.truncated) reasons.push(`the sizing scan was cut short (${scan.unreadable} unreadable files, or more than ${MAX_SIZING_FILES} files)`);
     if (reviewed && scan && scan.filesScanned > 0) {
-        if (!scan.rules?.request?.length) reasons.push('no statement computes the requested memory as the device total times gpu_memory_utilization');
-        if (!scan.rules?.total?.length) reasons.push('no statement reads the device total from mem_get_info or torch.accelerator.get_memory_info');
+        const rule = REVIEWED_SIZING[lockVersion];
+        if (!scan.rules?.request?.length) reasons.push(`no statement computes the requested memory as the device total times gpu_memory_utilization in ${rule.request.file}`);
+        if (!scan.rules?.total?.length) reasons.push(`no statement reads the device total from mem_get_info or torch.accelerator.get_memory_info in ${rule.total.file}${rule.total.within ? ` (${rule.total.within.class}.${rule.total.within.function})` : ''}`);
     }
     return { ok: reasons.length === 0, reasons, lockVersion, installedVersion: installedVersion ?? null, reviewed, expectation: reviewed ? REVIEWED_SIZING[lockVersion].expectation : null };
 }

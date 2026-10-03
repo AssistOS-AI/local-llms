@@ -20,7 +20,7 @@ import { createVllmMpsQualificationResolver, resolveVllmMpsQualification, vllmRu
 import { vllmMpsTuple, vllmRunner } from '../src/runners/vllm.mjs';
 import {
     CALIBRATION_SCHEMA, CTYPES_QUERY, DIST_QUERY, TORCH_QUERY, TUPLE_FIELDS, applyQualificationEntry, calibrationReport, canonicalJson, classifyDenominator, compareIdentities, evidenceDigest,
-    REVIEWED_SIZING, main, prerequisiteReport, renderQualificationEntry, scanSizingSource, sizingVerdict, stripPythonNonCode, wheelPythonTag,
+    REVIEWED_SIZING, enclosingPythonScope, main, prerequisiteReport, renderQualificationEntry, scanSizingSource, sizingVerdict, stripPythonNonCode, wheelPythonTag,
 } from '../tools/vllm_mps_calibration.mjs';
 
 const MIB = 1024 * 1024;
@@ -68,8 +68,9 @@ function scratch(t) {
 }
 
 // An installed vLLM under <root>/vllm/0.30.0 with a venv, its package source and its ready marker.
-// `sizing`: true writes the reviewed statements, false writes no sizing file, or an object { worker, utils } gives the two files' text.
-function installVllm(root, { sizing = true, version = '0.30.0', ready = { digest: ENTRY.digest }, extraFiles = 0 } = {}) {
+// `sizing`: true writes the reviewed statements, false writes no sizing file, or an object { worker, utils, gpuWorker? } gives the text of
+// v1/worker/utils.py (the request), utils/mem_utils.py (the total) and, when given, v1/worker/gpu_worker.py.
+function installVllm(root, { sizing = true, version = '0.30.0', ready = { digest: ENTRY.digest }, extraFiles = 0, extraPackageFiles = {} } = {}) {
     const runner = path.join(root, 'vllm', '0.30.0');
     const site = path.join(runner, 'venv', 'lib', 'python3.13', 'site-packages');
     fs.mkdirSync(path.join(runner, 'venv', 'bin'), { recursive: true });
@@ -83,9 +84,11 @@ function installVllm(root, { sizing = true, version = '0.30.0', ready = { digest
             worker: 'def request_memory(snapshot, cache_config):\n    requested_memory = snapshot.total_memory * cache_config.gpu_memory_utilization\n    return requested_memory\n',
             utils: 'class MemorySnapshot:\n    def measure(self):\n        self.free_memory, self.total_memory = torch.cuda.mem_get_info()\n',
         };
-        fs.writeFileSync(path.join(site, 'vllm', 'v1', 'worker', 'gpu_worker.py'), text.worker);
+        fs.writeFileSync(path.join(site, 'vllm', 'v1', 'worker', 'utils.py'), text.worker);
+        if (text.gpuWorker !== undefined) fs.writeFileSync(path.join(site, 'vllm', 'v1', 'worker', 'gpu_worker.py'), text.gpuWorker);
         fs.writeFileSync(path.join(site, 'vllm', 'utils', 'mem_utils.py'), text.utils);
     }
+    for (const [relative, text] of Object.entries(extraPackageFiles)) { fs.mkdirSync(path.dirname(path.join(site, 'vllm', relative)), { recursive: true }); fs.writeFileSync(path.join(site, 'vllm', relative), text); }
     for (let index = 0; index < extraFiles; index += 1) fs.writeFileSync(path.join(site, 'vllm', 'utils', `zz_extra_${String(index).padStart(3, '0')}.py`), '# nothing\n');
     if (ready !== null) fs.writeFileSync(path.join(runner, '.ready.json'), JSON.stringify(ready));
     return runner;
@@ -270,10 +273,10 @@ test('CAL.calibration-runs-bounded-queries-under-both-limits-compares-with-nvml-
     assert.ok(evidence.argv.envNames.includes('VLLM_API_KEY') && !JSON.stringify(evidence.argv).includes('VLLM_API_KEY='));
     // The sizing expression of the installed version, with file and line, and the installed version.
     assert.equal(evidence.install.packageVersion, '0.30.0');
-    assert.ok(evidence.sizing.lines.some((line) => line.file === 'v1/worker/gpu_worker.py' && line.line === 2 && /gpu_memory_utilization/.test(line.text)), JSON.stringify(evidence.sizing));
+    assert.ok(evidence.sizing.lines.some((line) => line.file === 'v1/worker/utils.py' && line.line === 2 && /gpu_memory_utilization/.test(line.text)), JSON.stringify(evidence.sizing));
     assert.ok(evidence.sizing.lines.some((line) => /mem_get_info/.test(line.text)));
     // The reviewed statements of this exact version were found, with file and line: that is the sizing evidence.
-    assert.deepEqual(evidence.sizing.rules.request.map((hit) => [hit.file, hit.line]), [['v1/worker/gpu_worker.py', 2]]);
+    assert.deepEqual(evidence.sizing.rules.request.map((hit) => [hit.file, hit.line]), [['v1/worker/utils.py', 2]]);
     assert.deepEqual(evidence.sizing.rules.total.map((hit) => [hit.file, hit.line]), [['utils/mem_utils.py', 3]]);
     assert.deepEqual([evidence.sizing.verdict.ok, evidence.sizing.verdict.reviewed, evidence.sizing.verdict.installedVersion, evidence.sizing.verdict.lockVersion], [true, true, '0.30.0', '0.30.0']);
     // The verdict and the digest.
@@ -453,10 +456,10 @@ test('CAL.stage-one-never-writes-and-the-tool-only-reads-the-installed-package',
     void report;
     // The installed tree is read by the scan alone.
     const installed = path.join(root, 'vllm', '0.30.0', 'venv', 'lib', 'python3.13', 'site-packages', 'vllm');
-    const before = fs.readFileSync(path.join(installed, 'v1', 'worker', 'gpu_worker.py'), 'utf8');
+    const before = fs.readFileSync(path.join(installed, 'v1', 'worker', 'utils.py'), 'utf8');
     scanSizingSource({ fsApi: spy, root: installed });
     assert.deepEqual(writes, []);
-    assert.equal(fs.readFileSync(path.join(installed, 'v1', 'worker', 'gpu_worker.py'), 'utf8'), before);
+    assert.equal(fs.readFileSync(path.join(installed, 'v1', 'worker', 'utils.py'), 'utf8'), before);
     // Statically: the tool has no write, delete or spawn-shell call outside the bounded runner and `render`.
     const text = fs.readFileSync(new URL('../tools/vllm_mps_calibration.mjs', import.meta.url), 'utf8').replace(/^\s*\/\/.*$/gm, '');
     assert.equal(/writeFile|appendFile|unlinkSync|rmSync|renameSync|mkdirSync|copyFile|child_process'\)\.exec\b|spawn\(|shell: true/.test(text), false);
@@ -573,11 +576,12 @@ test('CAL.the-sizing-scan-is-complete-reports-where-each-statement-was-found-and
     const site = path.join(root, 'vllm', '0.30.0', 'venv', 'lib', 'python3.13', 'site-packages', 'vllm');
     const scan = scanSizingSource({ root: site, version: '0.30.0' });
     assert.equal(scan.truncated, false); assert.equal(scan.unreadable, 0); assert.equal(scan.filesScanned, 2);
-    assert.deepEqual([scan.rules.request[0].file, scan.rules.total[0].file], ['v1/worker/gpu_worker.py', 'utils/mem_utils.py']);
+    assert.deepEqual([scan.rules.request[0].file, scan.rules.total[0].file], ['v1/worker/utils.py', 'utils/mem_utils.py']);
     // The evidence lines are bounded without making the scan incomplete: the rules come from the whole scan.
     fs.writeFileSync(path.join(site, 'utils', 'aaa_noise.py'), `${'x = total_memory\n'.repeat(200)}`);
     const noisy = scanSizingSource({ root: site, version: '0.30.0' });
-    assert.equal(noisy.lines.length, 40); assert.ok(noisy.linesOmitted > 100); assert.equal(noisy.truncated, false); assert.ok(noisy.rules.request.length >= 1 && noisy.rules.total.length >= 1);
+    // 40 evidence lines, plus the hit of each rule beyond the bound (the request hit is among the first 40; the total hit is listed after them).
+    assert.equal(noisy.lines.length, 41); assert.ok(noisy.lines.some((line) => line.file === 'utils/mem_utils.py' && line.line === 3), 'a rule hit is never crowded out of the evidence lines'); assert.ok(noisy.linesOmitted > 100); assert.equal(noisy.truncated, false); assert.ok(noisy.rules.request.length >= 1 && noisy.rules.total.length >= 1);
     // A file that cannot be read cuts the scan short.
     const spy = new Proxy(fs, { get: (target, name) => (name === 'readFileSync' ? (file, ...rest) => { if (String(file).endsWith('mem_utils.py')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); return target.readFileSync(file, ...rest); } : target[name]) });
     const blocked = scanSizingSource({ fsApi: spy, root: site, version: '0.30.0' });
@@ -590,8 +594,9 @@ test('CAL.the-sizing-scan-is-complete-reports-where-each-statement-was-found-and
 // --- CAL2b: only executable statements are sizing evidence ---------------------------------------------------
 const CODE_REQUEST = 'requested_memory = snapshot.total_memory * cache_config.gpu_memory_utilization\n';
 const CODE_TOTAL = 'self.free_memory, self.total_memory = torch.cuda.mem_get_info()\n';
-const sizingOutcome = async (t, sizing) => {
-    const { report } = await calibrate(t, { install: { sizing } });
+// `extra`: more files under the vllm package (path relative to it -> text), for the cases where the same statement sits elsewhere.
+const sizingOutcome = async (t, sizing, extra = undefined) => {
+    const { report } = await calibrate(t, { install: { sizing, ...(extra ? { extraPackageFiles: extra } : {}) } });
     return report.evidence;
 };
 const refusedForSizing = (evidence, label) => {
@@ -632,7 +637,7 @@ test('CAL.a-real-statement-next-to-comments-and-strings-qualifies-with-its-origi
     const evidence = await sizingOutcome(t, { worker, utils });
     assert.equal(evidence.verdict.qualifiable, true, JSON.stringify(evidence.verdict));
     // The hits are the executable lines, by their line in the original file (the docstring and comment lines are not hits).
-    assert.deepEqual(evidence.sizing.rules.request.map((hit) => [hit.file, hit.line]), [['v1/worker/gpu_worker.py', 6]]);
+    assert.deepEqual(evidence.sizing.rules.request.map((hit) => [hit.file, hit.line]), [['v1/worker/utils.py', 6]]);
     assert.deepEqual(evidence.sizing.rules.total.map((hit) => [hit.file, hit.line]), [['utils/mem_utils.py', 6]]);
     assert.match(evidence.sizing.rules.request[0].text, /requested_memory = snapshot\.total_memory \* cache_config\.gpu_memory_utilization/);
 });
@@ -657,8 +662,8 @@ test('CAL.stripping-blanks-comments-and-literals-and-keeps-every-line', () => {
 });
 
 // --- CAL3: vLLM 0.30.0 reads its denominator through torch.accelerator.get_memory_info ----------------------------------
-// The sizing statement of vllm/utils/mem_utils.py MemorySnapshot.measure() in v0.30.0 (the line the live calibration refused: it names no
-// mem_get_info), inside a method body shaped like the real one. The surrounding lines are representative.
+// Minimal excerpts of the REAL vLLM 0.30.0 tree (the files the live calibration scans), each at its real path under the vllm package, copied
+// verbatim from the tree the reviewer verified against the wheel's RECORD sha256 values. Only the lines around the sizing statements are kept.
 const REAL_STATEMENT = 'self.free_memory, self.total_memory = torch.accelerator.get_memory_info(device)';
 const REAL_MEM_UTILS = [
     '@dataclass',
@@ -666,100 +671,249 @@ const REAL_MEM_UTILS = [
     '    """Memory snapshot."""',
     '',
     '    torch_peak: int = 0',
+    '    torch_allocated: int = 0',
     '    free_memory: int = 0',
     '    total_memory: int = 0',
+    '    cuda_memory: int = 0',
+    '    torch_memory: int = 0',
+    '    non_torch_memory: int = 0',
+    '    timestamp: float = 0.0',
+    '',
+    '    device: torch.types.Device = None',
     '    auto_measure: bool = True',
     '',
     '    def __post_init__(self) -> None:',
+    '        if self.device is None:',
+    '            device_fn = current_platform.current_device',
+    '            assert device_fn is not None',
+    '            self.device_ = torch.device(device_fn())',
+    '        else:',
+    '            self.device_ = torch.device(self.device)',
+    '',
     '        if self.auto_measure:',
     '            self.measure()',
     '',
     '    def measure(self) -> None:',
     '        device = self.device_',
-    '        # we measure the torch peak memory usage via allocated_bytes,',
-    '        # rather than `torch.cuda.memory_reserved()` .',
-    '        self.torch_peak = current_platform.memory_stats(device).get("allocated_bytes.all.peak", 0)',
     '',
-    '        # this is the amount of memory the device reports through cudaMemGetInfo',
+    '        # we measure the torch peak memory usage via allocated_bytes,',
+    '        # rather than `torch.accelerator.memory_reserved()` .',
+    '        # After `torch.accelerator.reset_peak_memory_stats()`,',
+    '        # `torch.accelerator.memory_reserved()` will keep growing, and only shrink',
+    '        # when we call `torch.accelerator.empty_cache()` or OOM happens.',
+    '        stats = torch.accelerator.memory_stats(device)',
+    '        self.torch_peak = stats.get("allocated_bytes.all.peak", 0)',
+    '        self.torch_allocated = stats.get("allocated_bytes.all.current", 0)',
+    '',
     `        ${REAL_STATEMENT}`,
-    '        shared_sysmem_device_mem_sms = ((8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark',
-    '        if current_platform.is_cuda() and current_platform.get_device_capability(device.index) in shared_sysmem_device_mem_sms:',
-    '            self.total_memory = psutil.virtual_memory().total',
+    '        if current_platform.is_integrated_gpu(device.index):',
+    '            # On UMA (Unified Memory Architecture) platforms where CPU and',
+    '            # GPU share physical memory (e.g. GH200, DGX Spark, Jetson Orin),',
+    '            # cudaMemGetInfo underreports free memory because it does not',
+    '            # account for reclaimable OS memory (page cache, buffers).',
+    '            # Use psutil to get the true available memory.',
+    '            self.free_memory = psutil.virtual_memory().available',
+    '',
     '        self.cuda_memory = self.total_memory - self.free_memory',
     '',
+    '        # torch.accelerator.memory_reserved() is how many bytes',
+    '        # PyTorch gets from cuda (by calling cudaMalloc, etc.)',
+    '        # this is used to measure the non-torch memory usage',
+    '        self.torch_memory = torch.accelerator.memory_reserved(device)',
+    '',
+    '        self.non_torch_memory = self.cuda_memory - self.torch_memory',
+    '        self.timestamp = time.time()',
+    '',
 ].join('\n');
-const REAL_STATEMENT_LINE = REAL_MEM_UTILS.split('\n').findIndex((line) => line.includes(REAL_STATEMENT)) + 1;
-// The `total` rule of the reviewed entry as of d501bfc, before this change: only mem_get_info forms.
+// The same call in the unrelated sleep-mode path of the worker: it must never satisfy the total.
+const REAL_SLEEP_LINE = 'free_bytes_after_sleep, total = torch.accelerator.get_memory_info()';
+const REAL_GPU_WORKER = [
+    'class Worker(WorkerBase):',
+    '    def sleep(self, level: int = 1) -> None:',
+    '        torch.accelerator.synchronize()',
+    '        deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)',
+    '        while True:',
+    `            ${REAL_SLEEP_LINE}`,
+    '            freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep',
+    '            if freed_bytes >= 0 or time.monotonic() >= deadline:',
+    '                break',
+    '            time.sleep(0.1)',
+    '',
+    '        used_bytes = total - free_bytes_after_sleep',
+    '',
+    '    def init_device(self):',
+    '            # take current memory snapshot',
+    '            self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)',
+    '            self.requested_memory = request_memory(init_snapshot, self.cache_config)',
+    '',
+].join('\n');
+const REAL_REQUEST = [
+    'def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:',
+    '    """',
+    '    Calculate the amount of memory required by vLLM, then validate',
+    '    that the current amount of free memory is sufficient for that.',
+    '    """',
+    '    requested_memory = math.ceil(',
+    '        init_snapshot.total_memory * cache_config.gpu_memory_utilization',
+    '    )',
+    '',
+    '    if init_snapshot.free_memory < requested_memory:',
+    '        raise ValueError(',
+    '            f"Free memory on device {init_snapshot.device_} "',
+    '            f"({cache_config.gpu_memory_utilization}, "',
+    '        )',
+    '',
+    '    return requested_memory',
+    '',
+].join('\n');
+const lineOf = (text, needle) => text.split('\n').findIndex((line) => line.includes(needle)) + 1;
+const REAL_STATEMENT_LINE = lineOf(REAL_MEM_UTILS, REAL_STATEMENT);
+const REAL_REQUEST_LINE = lineOf(REAL_REQUEST, 'init_snapshot.total_memory * cache_config.gpu_memory_utilization');
+const REAL_SIZING = Object.freeze({ worker: REAL_REQUEST, utils: REAL_MEM_UTILS, gpuWorker: REAL_GPU_WORKER });
+// A statement in the place the reviewed rule names (the class MemorySnapshot, its method measure), so that only its own text decides.
+const inMeasure = (...body) => ['class MemorySnapshot:', '    def measure(self):', ...body.map((line) => `        ${line}`), ''].join('\n');
+// The `total` rule of the reviewed entry as of d501bfc, before the accelerator change: only mem_get_info forms, in no file in particular.
 const OLD_TOTAL_RULE = Object.freeze([
     String.raw`\b[\w.]*total[\w.]*\s*=\s*(?:torch\.cuda|current_platform)\.mem_get_info\(`,
     String.raw`,\s*[\w.]*total[\w.]*\s*=\s*(?:torch\.cuda|current_platform)\.mem_get_info\(`,
 ]);
 
-test('CAL.the-real-vllm-0-30-0-statement-was-refused-by-the-old-rule-and-is-accepted-with-its-line-by-the-new-one', async (t) => {
+test('CAL.the-real-vllm-0-30-0-statement-was-refused-by-the-old-rule-and-the-real-tree-excerpts-qualify-with-exactly-the-mem-utils-line', async (t) => {
     const code = stripPythonNonCode(REAL_MEM_UTILS).split('\n');
     // The d501bfc rule matches no executable line of the real method: that is the live refusal "no statement reads the device total".
     assert.equal(OLD_TOTAL_RULE.some((source) => code.some((line) => new RegExp(source).test(line))), false);
     const old = sizingVerdict({ installedVersion: '0.30.0', lockVersion: '0.30.0', scan: { filesScanned: 2, truncated: false, unreadable: 0, rules: { request: [{}], total: [] } } });
     assert.equal(old.ok, false); assert.ok(old.reasons.some((entry) => /no statement reads the device total from mem_get_info/.test(entry)), JSON.stringify(old.reasons));
-    // The reviewed rule of this change matches exactly that line, and only that one.
-    const matching = REVIEWED_SIZING['0.30.0'].total.flatMap((source) => code.flatMap((line, index) => (new RegExp(source).test(line) ? [index + 1] : [])));
+    // The reviewed rule of this change matches exactly that line of the method, and only that one.
+    const matching = REVIEWED_SIZING['0.30.0'].total.patterns.flatMap((source) => code.flatMap((line, index) => (new RegExp(source).test(line) ? [index + 1] : [])));
     assert.deepEqual([...new Set(matching)], [REAL_STATEMENT_LINE]);
-    // Through the scan of an installed wheel, with its file and original line, and through a whole calibration.
+    // Through the scan of the real tree excerpts (sleep path included), with their files and original lines, and through a whole calibration.
     const root = scratch(t);
-    installVllm(root, { sizing: { worker: CODE_REQUEST, utils: REAL_MEM_UTILS } });
+    installVllm(root, { sizing: REAL_SIZING });
     const site = path.join(root, 'vllm', '0.30.0', 'venv', 'lib', 'python3.13', 'site-packages', 'vllm');
     const scan = scanSizingSource({ root: site, version: '0.30.0' });
-    assert.deepEqual(scan.rules.total.map((hit) => [hit.file, hit.line, hit.text]), [['utils/mem_utils.py', REAL_STATEMENT_LINE, REAL_STATEMENT]]);
-    assert.ok(scan.lines.some((line) => line.line === REAL_STATEMENT_LINE && /get_memory_info/.test(line.text)), 'the accelerator statement is listed as sizing evidence');
+    assert.deepEqual(scan.rules.total.map((hit) => [hit.file, hit.line, hit.text]), [['utils/mem_utils.py', REAL_STATEMENT_LINE, REAL_STATEMENT]], 'the sleep-mode line is no hit');
+    assert.deepEqual(scan.rules.request.map((hit) => [hit.file, hit.line]), [['v1/worker/utils.py', REAL_REQUEST_LINE]]);
+    assert.ok(scan.lines.some((line) => line.file === 'v1/worker/gpu_worker.py' && /get_memory_info/.test(line.text)), 'the sleep-mode line is listed as keyword evidence, not as a rule hit');
+    assert.ok(scan.lines.some((line) => line.file === 'utils/mem_utils.py' && line.line === REAL_STATEMENT_LINE && /get_memory_info/.test(line.text)), 'the accelerator statement is listed as sizing evidence');
     assert.equal(sizingVerdict({ installedVersion: '0.30.0', lockVersion: '0.30.0', scan }).ok, true);
-    const evidence = (await calibrate(t, { install: { sizing: { worker: CODE_REQUEST, utils: REAL_MEM_UTILS } } })).report.evidence;
+    const evidence = (await calibrate(t, { install: { sizing: REAL_SIZING } })).report.evidence;
     assert.equal(evidence.verdict.qualifiable, true, JSON.stringify(evidence.verdict));
     assert.deepEqual(evidence.verdict.failed, []);
-    assert.equal(evidence.verdict.checks.sizingEvidence, true);
+    assert.deepEqual(evidence.sizing.rules.total.map((hit) => [hit.file, hit.line]), [['utils/mem_utils.py', REAL_STATEMENT_LINE]]);
+});
+
+test('CAL.a-denominator-from-a-constant-or-the-device-properties-in-the-real-tree-is-blocked-even-with-the-sleep-mode-line-present', async (t) => {
+    const mutate = (replacement) => REAL_MEM_UTILS.replace(`        ${REAL_STATEMENT}`, replacement);
+    for (const [label, utils] of [
+        ['a constant', mutate('        self.free_memory, self.total_memory = 0, 6 * 1024 ** 3')],
+        ['the device properties', mutate('        self.free_memory = torch.accelerator.get_memory_info(device)[0]\n        self.total_memory = torch.cuda.get_device_properties(device).total_memory')],
+        ['another source', mutate('        self.free_memory, self.total_memory = some_cache.read()')],
+    ]) {
+        const evidence = await sizingOutcome(t, { ...REAL_SIZING, utils });
+        assert.equal(evidence.verdict.qualifiable, false, `${label}: blocked`);
+        assert.deepEqual(evidence.verdict.failed, ['sizingEvidence'], label);
+        assert.deepEqual(evidence.sizing.rules.total, [], `${label}: the sleep-mode line is not the total`);
+        assert.equal(evidence.sizing.rules.request.length, 1, label);
+        assert.ok(evidence.sizing.lines.some((line) => line.file === 'v1/worker/gpu_worker.py' && line.text.includes('free_bytes_after_sleep')), `${label}: the sleep line is still evidence, not proof`);
+    }
+});
+
+test('CAL.a-statement-counts-only-in-its-reviewed-file-class-and-method', async (t) => {
+    const A = 'torch.accelerator.get_memory_info(device)';
+    // The sleep line alone, and the real total statement in the wrong file, class, method or at module level, never satisfy the total.
+    const noTotal = await sizingOutcome(t, { worker: REAL_REQUEST, utils: '# nothing here\n', gpuWorker: REAL_GPU_WORKER });
+    assert.deepEqual(noTotal.verdict.failed, ['sizingEvidence']); assert.deepEqual(noTotal.sizing.rules.total, []);
+    for (const [label, install] of [
+        ['the real statement in another file of utils', { worker: REAL_REQUEST, utils: '# nothing\n', extra: { 'utils/other.py': inMeasure(REAL_STATEMENT) } }],
+        ['the real statement in the worker file', { worker: REAL_REQUEST, utils: '# nothing\n', gpuWorker: inMeasure(REAL_STATEMENT) }],
+        ['another class with the same method', { worker: REAL_REQUEST, utils: ['class Other:', '    def measure(self):', `        ${REAL_STATEMENT}`, ''].join('\n') }],
+        ['the same class, another method', { worker: REAL_REQUEST, utils: ['class MemorySnapshot:', '    def other(self):', `        ${REAL_STATEMENT}`, ''].join('\n') }],
+        ['a function named measure outside the class', { worker: REAL_REQUEST, utils: ['def measure(self):', `    ${REAL_STATEMENT}`, ''].join('\n') }],
+        ['module level', { worker: REAL_REQUEST, utils: `${REAL_STATEMENT}\n` }],
+        ['a nested class and method of another name', { worker: REAL_REQUEST, utils: ['class MemorySnapshot:', '    def measure(self):', '        def inner():', `            ${REAL_STATEMENT}`, '        return inner', ''].join('\n') }],
+    ]) {
+        const { extra, ...sizing } = install;
+        const evidence = await sizingOutcome(t, sizing, extra);
+        assert.deepEqual(evidence.verdict.failed, ['sizingEvidence'], label);
+        assert.deepEqual(evidence.sizing.rules.total, [], label);
+    }
+    // The request statement counts only in v1/worker/utils.py.
+    for (const [label, install] of [
+        ['the request in the worker file', { worker: '# nothing\n', utils: REAL_MEM_UTILS, gpuWorker: REAL_REQUEST }],
+        ['the request in another file of v1/worker', { worker: '# nothing\n', utils: REAL_MEM_UTILS }],
+    ]) {
+        const evidence = await sizingOutcome(t, install, label.includes('another file') ? { 'v1/worker/other.py': REAL_REQUEST } : undefined);
+        assert.deepEqual(evidence.verdict.failed, ['sizingEvidence'], label);
+        assert.deepEqual(evidence.sizing.rules.request, [], label);
+        assert.ok(evidence.sizing.verdict.reasons.some((entry) => /no statement computes the requested memory as the device total times gpu_memory_utilization in v1\/worker\/utils\.py/.test(entry)), `${label}: ${JSON.stringify(evidence.sizing.verdict.reasons)}`);
+        assert.equal(evidence.sizing.rules.total.length, 1, `${label}: the total is still found`);
+    }
+    // Exact-version gating and executable-only matching are unchanged around the anchored rule.
+    const other = await calibrate(t, { install: { version: '0.29.0', sizing: REAL_SIZING } });
+    assert.ok(other.report.evidence.verdict.failed.includes('sizingEvidence') && other.report.evidence.verdict.failed.includes('identityMatchesLock'));
+    void A;
+});
+
+test('CAL.the-enclosing-python-scope-is-read-from-the-indentation-of-the-executable-code', () => {
+    const code = stripPythonNonCode(['class A:', '    def one(self):', '        if x:', '            target = 1', '    def two(self):', '        return 2', 'def top():', '    y = 1', 'z = 3', ''].join('\n')).split('\n');
+    assert.deepEqual(enclosingPythonScope(code, 3), { class: 'A', function: 'one' });
+    assert.deepEqual(enclosingPythonScope(code, 5), { class: 'A', function: 'two' });
+    assert.deepEqual(enclosingPythonScope(code, 7), { class: null, function: 'top' });
+    assert.deepEqual(enclosingPythonScope(code, 8), { class: null, function: null });
+    assert.deepEqual(enclosingPythonScope(stripPythonNonCode(['class B:', '    # def fake(self):', '    value = 1', ''].join('\n')).split('\n'), 2), { class: 'B', function: null });
+    // A nested function defined earlier in the method does not change which method a later line is in.
+    const nested = stripPythonNonCode(['class N:', '    def outer(self):', '        def inner():', '            pass', '        target = 1', ''].join('\n')).split('\n');
+    assert.deepEqual(enclosingPythonScope(nested, 4), { class: 'N', function: 'outer' });
+    // A class body inside a function has the class, and no method of its own.
+    const local = stripPythonNonCode(['def factory():', '    class Local:', '        value = 1', ''].join('\n')).split('\n');
+    assert.deepEqual(enclosingPythonScope(local, 2), { class: 'Local', function: null });
+    assert.deepEqual(enclosingPythonScope(stripPythonNonCode(['class C:', '    s = """', '    def fake(self):', '    """', '    value = 2', ''].join('\n')).split('\n'), 4), { class: 'C', function: null });
 });
 
 test('CAL.only-the-accelerator-total-in-its-reviewed-position-and-executable-code-is-a-sizing-statement', async (t) => {
-    const control = await sizingOutcome(t, { worker: CODE_REQUEST, utils: REAL_MEM_UTILS });
+    const control = await sizingOutcome(t, REAL_SIZING);
     assert.equal(control.verdict.qualifiable, true);
     const A = 'torch.accelerator.get_memory_info(device)';
+    // Every case sits in the reviewed place (MemorySnapshot.measure of utils/mem_utils.py), so that only its own text decides.
     const negatives = [
-        ['commented out', `#         ${REAL_STATEMENT}\nself.free_memory, self.total_memory = configured_cache_limit, configured_cache_limit\n`],
-        ['a trailing comment', `x = 1  # ${REAL_STATEMENT}\n`],
-        ['a docstring', `def g():\n    """\n    ${REAL_STATEMENT}\n    """\n    return None\n`],
-        ['a string literal', `NOTE = "${REAL_STATEMENT}"\n`],
-        ['a triple-quoted block', `NOTE = '''\n${REAL_STATEMENT}\n'''\n`],
-        ['absent', '# see torch.accelerator.get_memory_info for the free and total memory\nvalue = total_memory\n'],
-        ['the total from the device properties', `self.free_memory = ${A}[0]\nself.total_memory = torch.cuda.get_device_properties(device).total_memory\n`],
-        ['the total from a constant', 'self.free_memory, self.total_memory = 0, 6 * 1024 ** 3\n'],
-        ['the unpacking in the wrong order', `self.total_memory, self.free_memory = ${A}\n`],
-        ['the free value taken as the total', `self.total_memory = ${A}[0]\n`],
-        ['the whole pair bound to the total', `self.total_memory = ${A}\n`],
-        ['another module\'s function', 'self.free_memory, self.total_memory = some_cache.accelerator.get_memory_info(device)\n'],
-        ['the call of another prefix', 'self.free_memory, self.total_memory = my_torch.accelerator.get_memory_info(device)\n'],
-        ['a second value that is not a total', `self.free_memory, self.used_memory = ${A}\n`],
+        ['commented out', inMeasure(`#   ${REAL_STATEMENT}`, 'self.free_memory, self.total_memory = configured_cache_limit, configured_cache_limit')],
+        ['a trailing comment', inMeasure(`x = 1  # ${REAL_STATEMENT}`)],
+        ['a docstring', inMeasure('"""', REAL_STATEMENT, '"""')],
+        ['a string literal', inMeasure(`NOTE = "${REAL_STATEMENT}"`)],
+        ['a triple-quoted block', inMeasure("NOTE = '''", REAL_STATEMENT, "'''")],
+        ['absent', inMeasure('# see torch.accelerator.get_memory_info for the free and total memory', 'value = total_memory')],
+        ['the total from the device properties', inMeasure(`self.free_memory = ${A}[0]`, 'self.total_memory = torch.cuda.get_device_properties(device).total_memory')],
+        ['the total from a constant', inMeasure('self.free_memory, self.total_memory = 0, 6 * 1024 ** 3')],
+        ['the unpacking in the wrong order', inMeasure(`self.total_memory, self.free_memory = ${A}`)],
+        ['the free value taken as the total', inMeasure(`self.total_memory = ${A}[0]`)],
+        ['the whole pair bound to the total', inMeasure(`self.total_memory = ${A}`)],
+        ['another module\'s function', inMeasure('self.free_memory, self.total_memory = some_cache.accelerator.get_memory_info(device)')],
+        ['the call of another prefix', inMeasure('self.free_memory, self.total_memory = my_torch.accelerator.get_memory_info(device)')],
+        ['a second value that is not a total', inMeasure(`self.free_memory, self.used_memory = ${A}`)],
     ];
     for (const [label, utils] of negatives) {
-        const evidence = await sizingOutcome(t, { worker: CODE_REQUEST, utils });
+        const evidence = await sizingOutcome(t, { worker: REAL_REQUEST, utils });
         assert.equal(evidence.verdict.qualifiable, false, `${label}: not qualifiable`);
         assert.deepEqual(evidence.verdict.failed, ['sizingEvidence'], label);
         assert.deepEqual(evidence.sizing.rules.total, [], `${label}: no total statement matched`);
         assert.equal(evidence.sizing.rules.request.length, 1, `${label}: the request statement is still found`);
-        assert.ok(evidence.sizing.verdict.reasons.some((entry) => /no statement reads the device total from mem_get_info or torch\.accelerator\.get_memory_info/.test(entry)), `${label}: ${JSON.stringify(evidence.sizing.verdict.reasons)}`);
+        assert.ok(evidence.sizing.verdict.reasons.some((entry) => /no statement reads the device total from mem_get_info or torch\.accelerator\.get_memory_info in utils\/mem_utils\.py \(MemorySnapshot\.measure\)/.test(entry)), `${label}: ${JSON.stringify(evidence.sizing.verdict.reasons)}`);
     }
     // The second value of the returned pair, bound by index or by an unpacking that ignores the free value, is the same statement.
     for (const [label, utils] of [
-        ['an index', `self.total_memory = ${A}[1]\n`],
-        ['an ignored free value', 'free, total = torch.accelerator.get_memory_info(0)\n'],
-        ['an underscore', '_, total_bytes = torch.accelerator.get_memory_info(device)\n'],
+        ['an index', inMeasure(`self.total_memory = ${A}[1]`)],
+        ['an ignored free value', inMeasure('free, total = torch.accelerator.get_memory_info(0)')],
+        ['an underscore', inMeasure('_, total_bytes = torch.accelerator.get_memory_info(device)')],
     ]) {
-        const evidence = await sizingOutcome(t, { worker: CODE_REQUEST, utils });
+        const evidence = await sizingOutcome(t, { worker: REAL_REQUEST, utils });
         assert.equal(evidence.verdict.qualifiable, true, `${label}: ${JSON.stringify(evidence.verdict)}`);
         assert.equal(evidence.sizing.rules.total.length, 1, label);
         assert.ok(evidence.sizing.lines.some((line) => /get_memory_info/.test(line.text)), `${label}: the accelerator statement is listed as sizing evidence`);
     }
-    // The earlier wheels' statement stays accepted, and the exact-version gating is unchanged: another version never qualifies.
-    assert.equal((await sizingOutcome(t, { worker: CODE_REQUEST, utils: CODE_TOTAL })).verdict.qualifiable, true);
-    const other = await calibrate(t, { install: { version: '0.29.0', sizing: { worker: CODE_REQUEST, utils: REAL_MEM_UTILS } } });
+    // The earlier wheels' statement stays accepted in the same place, and the exact-version gating is unchanged: another version never qualifies.
+    assert.equal((await sizingOutcome(t, { worker: REAL_REQUEST, utils: inMeasure('self.free_memory, self.total_memory = torch.cuda.mem_get_info()') })).verdict.qualifiable, true);
+    const other = await calibrate(t, { install: { version: '0.29.0', sizing: REAL_SIZING } });
     assert.ok(other.report.evidence.verdict.failed.includes('sizingEvidence') && other.report.evidence.verdict.failed.includes('identityMatchesLock'));
     assert.deepEqual(Object.keys(REVIEWED_SIZING), ['0.30.0']);
 });
