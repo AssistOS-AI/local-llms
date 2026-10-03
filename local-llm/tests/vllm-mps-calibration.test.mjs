@@ -397,7 +397,7 @@ test('CAL.the-data-entry-edits-only-the-reviewed-list-and-production-then-qualif
     const { evidence } = (await calibrate(t)).report;
     const rendered = renderQualificationEntry(evidence);
     const source = fs.readFileSync(new URL('../src/controller/vllmMpsQualification.mjs', import.meta.url), 'utf8');
-    assert.match(source, /const REVIEWED_QUALIFICATIONS = Object\.freeze\(\[\]\);/);
+    assert.match(source, /const REVIEWED_QUALIFICATIONS = Object\.freeze\(\[/);
     const patched = applyQualificationEntry(source, rendered);
     // Only that declaration changed.
     const remove = (text) => text.replace(/const REVIEWED_QUALIFICATIONS = Object\.freeze\(\[[\s\S]*?\]\);/, 'LIST');

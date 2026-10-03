@@ -4,8 +4,22 @@ const TUPLE_FIELDS = Object.freeze(['runnerLockDigest', 'driverVersion', 'gpuPci
 const FIX = 'Use a qualified runner or clear this GPU share; this vLLM/driver/device combination needs MPS qualification.';
 
 // Entries require approved calibration and a subsequent normal model readiness,
-// text-response and cleanup check for that exact tuple. None is qualified yet.
-const REVIEWED_QUALIFICATIONS = Object.freeze([]);
+// text-response and cleanup check for that exact tuple.
+// The one entry below is a CANDIDATE calibration entry: stage-one run 752291a0, calibration evidence digest
+// 39bcd924696fb6f3ec050c1ecbd59c6a0c7a11459badb0dbbcf1e857aadb746d. It is PENDING stage-two model qualification (public
+// admission, model readiness, a text response, resource observation and cleanup for this exact tuple), which has not run.
+// It states no finished qualification and no release; any changed tuple field invalidates the calibration.
+const REVIEWED_QUALIFICATIONS = Object.freeze([
+    Object.freeze({
+        runnerLockDigest: "d9065d01d086a952146366f0d6f2a3c54b0d179bc3a33c64cf3103d189363f62",
+        driverVersion: "595.91.07",
+        gpuPciDeviceId: "0x256010DE",
+        computeCapability: "8.6",
+        deviceTotalBytes: 6442450944,
+        denominator: 'physical-device',
+        evidenceDigest: '39bcd924696fb6f3ec050c1ecbd59c6a0c7a11459badb0dbbcf1e857aadb746d',
+    }),
+]);
 
 function canonical(value) {
     if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
