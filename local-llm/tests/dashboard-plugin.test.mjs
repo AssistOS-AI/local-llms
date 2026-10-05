@@ -1144,3 +1144,14 @@ test('the source fields follow the four kinds, and the lookup is forgotten when 
     assert.equal(presenter.lookupSizing, null);
 });
 
+
+test('the optional Ploinky GPU budget card names best-effort per-process scope without replacing physical telemetry', () => {
+    const hardware = { gpu: { available: true, name: 'Physical GPU', totalBytes: 6 * 1024 ** 3, usedBytes: 1024 ** 3, freeBytes: 5 * 1024 ** 3 }, memory: {}, disk: {} };
+    const plain = hardwareCardsHtml(hardware);
+    assert.doesNotMatch(plain, /Limits from Ploinky/);
+    const limited = hardwareCardsHtml(hardware, null, { limits: { budget: { cpus: 0.5, memoryBytes: 8 * 1024 ** 3, gpuShare: { smPercent: 50, vramBytes: 3 * 1024 ** 3, assurance: 'best-effort' } } } });
+    assert.match(limited, /Limits from Ploinky/);
+    assert.match(limited, /50% GPU SM, 3,072 MiB per CUDA process \(best-effort\)/);
+    assert.match(limited, /1,024 MiB of 6,144 MiB/);
+    assert.match(limited, /0.5 CPUs/);
+});

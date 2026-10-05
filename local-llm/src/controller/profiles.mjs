@@ -333,16 +333,21 @@ export function admitUnifiedVllm({ model, source, params, memory, disk, remainin
     if (!(weightsBytes > 0)) {
         return result('incompatible', `${model.displayName}'s weight size is unknown, so it cannot be sized on unified memory.`, base, warnings);
     }
-    const shareOf = (bytes) => Math.floor((bytes / memory.totalBytes) * 100) / 100;
+    // vLLM reads its share against the device's total, which here is the
+    // physical pool: a container budget bounds the bytes (memory.totalBytes and
+    // availableBytes are the capped view) but never changes that denominator.
+    const denominator = Number.isFinite(memory.physicalTotalBytes) && memory.physicalTotalBytes > 0
+        ? memory.physicalTotalBytes : memory.totalBytes;
+    const shareOf = (bytes) => Math.floor((bytes / denominator) * 100) / 100;
     const maxShare = Math.min(VLLM_MAX_UTILIZATION, shareOf(memory.totalBytes - UNIFIED.hostReserveBytes - VLLM_RUNNER_RAM_BYTES));
     const adminSet = params.gpuMemoryUtilization !== null && params.gpuMemoryUtilization !== undefined;
     const share = adminSet
         ? params.gpuMemoryUtilization
         : Math.min(maxShare, shareOf(memory.availableBytes - UNIFIED.floorBytes - VLLM_RUNNER_RAM_BYTES));
-    const budgetBytes = Math.round(Math.max(0, share) * memory.totalBytes);
+    const budgetBytes = Math.round(Math.max(0, share) * denominator);
     const estimate = { ...base, gpuMemoryUtilization: share, budgetBytes, unifiedBytes: budgetBytes + VLLM_RUNNER_RAM_BYTES };
     // Whether it can ever fit: in the admin's share, or in the largest share the reserve allows.
-    const ceilingBytes = adminSet ? budgetBytes : Math.max(0, maxShare) * memory.totalBytes;
+    const ceilingBytes = adminSet ? budgetBytes : Math.max(0, maxShare) * denominator;
     if (modelBytes > ceilingBytes) {
         return result('incompatible', `Its weights, a KV cache for ${params.maxModelLen} tokens and vLLM's overhead need about ${gib(modelBytes)}; `
             + (adminSet
@@ -439,7 +444,8 @@ export function cpuPool(memory = {}, cgroupMemory = null) {
     let totalBytes = memory.totalBytes;
     let availableBytes = memory.availableBytes;
     const limit = cgroupMemory?.maxBytes;
-    if (Number.isFinite(limit) && limit > 0) {
+    // A known limit of zero is a limit, not an absent one.
+    if (Number.isSafeInteger(limit) && limit >= 0) {
         totalBytes = Math.min(totalBytes, limit);
         availableBytes = Math.min(availableBytes, totalBytes);
         if (Number.isFinite(cgroupMemory.currentBytes)) availableBytes = Math.min(availableBytes, Math.max(0, limit - cgroupMemory.currentBytes));

@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 
 import { HARDWARE_QUERY_REAP_MS } from '../drainBudget.mjs';
+import { attachCpuQuota, attachGpuBudget, attachMemoryBudget, observeMemoryBudget, parseCpuQuota, parseMpsBudget } from './ploinkyBudget.mjs';
 
 // The Box GPU wiring binds the host nvidia-smi here (the override is a test seam).
 export const NVIDIA_SMI = process.env.LOCAL_LLM_NVIDIA_SMI || '/usr/local/nvidia/bin/nvidia-smi';
@@ -308,15 +309,56 @@ function readText(fsApi, file) {
  * read. The CPU profile caps its pool with it (DS005): /proc/meminfo shows the
  * host's memory, not the container's.
  */
-export function readCgroupMemory({ fsApi = fs } = {}) {
-    const bytes = (file) => {
-        const text = readText(fsApi, file);
-        const value = text !== null && /^\d+$/.test(text.trim()) ? Number(text.trim()) : null;
+function projectCgroupMemory(maxText, currentText) {
+    const bytes = (text) => {
+        const value = typeof text === 'string' && /^\d+$/.test(text.trim()) ? Number(text.trim()) : null;
         return Number.isSafeInteger(value) ? value : null;
     };
-    const maxBytes = bytes('/sys/fs/cgroup/memory.max');
-    if (maxBytes === null) return null;
-    return { maxBytes, currentBytes: bytes('/sys/fs/cgroup/memory.current') };
+    const maxBytes = bytes(maxText);
+    return maxBytes === null ? null : { maxBytes, currentBytes: bytes(currentText) };
+}
+
+export function readCgroupMemory({ fsApi = fs } = {}) {
+    return projectCgroupMemory(readText(fsApi, '/sys/fs/cgroup/memory.max'), readText(fsApi, '/sys/fs/cgroup/memory.current'));
+}
+
+// A cgroup file's text; undefined when it does not exist (ENOENT), null when
+// it exists but cannot be read (EACCES, EIO, ...). The legacy readers above
+// keep collapsing both to null.
+function readObservedText(fsApi, file) {
+    try {
+        return fsApi.readFileSync(file, 'utf8');
+    } catch (error) {
+        return error?.code === 'ENOENT' ? undefined : null;
+    }
+}
+
+// The finite memory limit this process has seen, per filesystem reader (the
+// real one in production): a later failure to read memory.max never turns an
+// established limit into unlimited.
+const establishedMemoryLimits = new WeakMap();
+
+/**
+ * The internal memory-budget observation (ploinkyBudget.mjs): unlike
+ * readCgroupMemory, it keeps a literal `max` (no limit) apart from a file that
+ * cannot be read, and a finite limit apart from an unreadable `memory.current`.
+ * Used by admission and the memory guard; never published in the overview.
+ */
+function captureCgroupMemory({ fsApi = fs, established = establishedMemoryLimits.get(fsApi) ?? null } = {}) {
+    const maxText = readObservedText(fsApi, '/sys/fs/cgroup/memory.max');
+    const currentText = readObservedText(fsApi, '/sys/fs/cgroup/memory.current');
+    const observation = observeMemoryBudget({ maxText, currentText, established });
+    if (Number.isSafeInteger(observation.finiteMemoryBytes)) establishedMemoryLimits.set(fsApi, observation.finiteMemoryBytes);
+    return { raw: projectCgroupMemory(maxText, currentText), observation };
+}
+
+export function readCgroupMemoryObservation(options = {}) {
+    return captureCgroupMemory(options).observation;
+}
+
+/** The raw cgroup v2 CPU quota in CPUs (1.5 for `150000 100000`), or null without one. */
+export function readCpuQuota({ fsApi = fs } = {}) {
+    return parseCpuQuota(readText(fsApi, '/sys/fs/cgroup/cpu.max'));
 }
 
 // "0-3,8,10-11" -> [0, 1, 2, 3, 8, 10, 11]
@@ -438,19 +480,24 @@ export async function readDisk(dataDir, { statfs = (target) => fs.promises.statf
  * the GPU queries are killed (readGpu), and the free-disk read, which cannot
  * be cancelled, is not waited for; its late answer is dropped.
  */
-export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signal } = {}) {
+export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signal, env = process.env } = {}) {
     if (signal?.aborted) throw stoppedError();
     // Read alongside the GPU queries; it never rejects.
     const pendingDisk = readDisk(dataDir, { statfs }).catch((error) => ({ freeBytes: null, totalBytes: null, error: error.message }));
-    const gpu = await readGpu({ execFileImpl, signal });
+    const gpu = await readGpu({ execFileImpl, signal, env });
     const disk = await untilStopped(pendingDisk, signal);
-    return {
+    const cgroup = captureCgroupMemory({ fsApi });
+    const snapshot = {
         at: new Date().toISOString(),
         gpu,
         memory: readMemory({ fsApi }),
         disk,
         cpus: os.availableParallelism?.() ?? os.cpus().length,
         cores: physicalCoreCount({ fsApi }),
-        cgroupMemory: readCgroupMemory({ fsApi }),
+        cgroupMemory: cgroup.raw,
     };
+    // Internal budget facts (ploinkyBudget.mjs), not published with the snapshot.
+    attachCpuQuota(snapshot, readCpuQuota({ fsApi }));
+    attachGpuBudget(snapshot, parseMpsBudget(env));
+    return attachMemoryBudget(snapshot, cgroup.observation);
 }
