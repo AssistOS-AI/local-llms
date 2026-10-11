@@ -1,8 +1,5 @@
 ---
-id: DS005
-title: Hardware Profiles
-status: accepted
-owner: local-llm
+title: DS005-hardware-profiles
 summary: The dedicated, unified and cpu hardware profiles, how the GPU's memory model and its absence are detected, what changes on a GPU that shares system memory (NVIDIA GB10 in DGX Spark), and how models run on the CPU when no NVIDIA GPU is usable.
 ---
 
@@ -175,7 +172,7 @@ need = the pinned weight size (every shard; all layers resident) + f16 KV for th
 
 An entry without `memory.kvBytesPerToken` uses DS003's default of 64 KiB per token, and without `memory.layers` the default of 48 layers; the estimate names every defaulted input (`defaulted`, with `contextLength` when it is missing), and a warning says what each default can miss (the per-token default can understate the KV cache several times for large dense models; without `contextLength` the context is not capped at the training context) and how to add them (Settings, or `local_llm_model_update`): the actionable path for missing metadata is data, not a benchmark. The estimate carries `envelope: null` and `measured: false`, its `basis` says it is an estimate and where its per-token figure came from (the catalog, the entry added at run time, or a default), and a warning always says the run is unmeasured, that the figure is an estimate, and that the guard stops the runner below the floor. Parameters outside a trusted rectangle add a warning naming the rectangles. An entry without a pinned size is `incompatible`.
 
-**What sizing from an entry added at run time can change.** Its `memory.kvBytesPerToken`, `memory.fixedKvBytes` and, with MTP, `memory.layers` feed only the KV and MTP terms. The weights term is the pinned size, bound to the pinned sha256 that download and adoption enforce (DS002), and the compute, runtime and prompt-cache terms are fixed. So an understated value can lower only the KV and MTP terms; the estimate lists the fields it used (`userSizing`), and a warning says nothing checks them against the weights and that the memory guard is then the only backstop. An envelope, by contrast, replaces the whole need, which is why envelopes come only from the operator's trusted catalogs (below, Question #2).
+**What sizing from an entry added at run time can change.** Its `memory.kvBytesPerToken`, `memory.fixedKvBytes` and, with MTP, `memory.layers` feed only the KV and MTP terms. The weights term is the pinned size, bound to the pinned sha256 that download and adoption enforce (DS002), and the compute, runtime and prompt-cache terms are fixed. So an understated value can lower only the KV and MTP terms; the estimate lists the fields it used (`userSizing`), and a warning says nothing checks them against the weights and that the memory guard is then the only backstop. An envelope, by contrast, replaces the whole need, which is why envelopes come only from the operator's trusted catalogs (the trusted unified envelope rationale below).
 
 llama-server's prompt cache lives in host memory, is bounded by `--cache-ram` (it evicts before it allocates, and skips a single state larger than the bound), and is allocated in one burst when a new task starts. `--cache-ram 0` is not an option: it also turns off the clearing of idle slots, so with a unified KV cache an idle slot keeps its cells and new requests fail (measured: 0 of 4). 8192 MiB, llama.cpp's default, is the measured baseline; smaller bounds wait for their measurements.
 
@@ -221,44 +218,42 @@ In the `cpu` profile the dashboard shows three cards:
 
 The run form shows one memory estimate against what is available now (under a container memory limit, what the limit leaves). A runner with no CPU policy gets no Models column and no Install, and the Runners tab says why; its intro promises installs only while some runner can be installed under the profile, and the run form's parameter preview gives the same reason. The dedicated and unified profiles add no such refusal. A runner that serves only some profiles (llama.cpp's CPU build) is not listed at all on the others: not in the Runners tab, not as a Models column, and its Install and Run are refused before anything downloads.
 
-## Decisions & Questions
+### Rationale
 
-### Question #1: Why a known-unified device list beside the addressing mode?
+#### Unified device detection
 
-Response: The addressing mode alone is not a unified-memory signal (GH200 reports ATS with dedicated HBM), and `[N/A]` memory is how this driver reports GB10 today. A future driver that reports numbers for GB10 would otherwise turn it into a dedicated GPU with a pool the size of system memory. The device id keeps GB10 unified whatever the driver reports; the addressing mode covers other GPUs that share memory, which the image then accepts or refuses by compute capability (DS000).
+The addressing mode alone is not a unified-memory signal (GH200 reports ATS with dedicated HBM), and `[N/A]` memory is how this driver reports GB10 today. A future driver that reports numbers for GB10 would otherwise turn it into a dedicated GPU with a pool the size of system memory. The device id keeps GB10 unified whatever the driver reports; the addressing mode covers other GPUs that share memory, which the image then accepts or refuses by compute capability (DS000).
 
-### Question #2: Why can a user entry not carry a unified envelope?
+#### Trusted unified envelopes
 
-Response: Where an envelope applies it replaces the whole need (weights, buffers, transient), and `validated` tells an admin what was measured. An envelope sent through `local_llm_model_add` or `_update` carries no evidence of where its numbers came from, so it could shrink any configuration's entire need, weights included, on a shared host with only the guard behind it. A user entry's sizing fields are narrower: they feed only the KV and MTP terms of an estimate, never the pinned weights or the fixed terms, and every run they lower carries a warning that only the guard stands behind an understated value. Certification therefore stays with inputs whose provenance the operator controls outside the model-management API: the shipped catalog and `LOCAL_LLM_CATALOG_FILE`. Admin-measured envelopes would need a recorded owner decision and a provenance field; this release has neither. Stored entries are reported rather than migrated or deleted, because they are the admin's data.
+Where an envelope applies it replaces the whole need (weights, buffers, transient), and `validated` tells an admin what was measured. An envelope sent through `local_llm_model_add` or `_update` carries no evidence of where its numbers came from, so it could shrink any configuration's entire need, weights included, on a shared host with only the guard behind it. A user entry's sizing fields are narrower: they feed only the KV and MTP terms of an estimate, never the pinned weights or the fixed terms, and every run they lower carries a warning that only the guard stands behind an understated value. Certification therefore stays with inputs whose provenance the operator controls outside the model-management API: the shipped catalog and `LOCAL_LLM_CATALOG_FILE`. Admin-measured envelopes would need a recorded owner decision and a provenance field; this release has neither. Stored entries are reported rather than migrated or deleted, because they are the admin's data.
 
-### Question #3: Why is the load mode part of an envelope rectangle?
+#### Load mode in envelopes
 
-Response: The two unified load modes use memory very differently: `none` added 12.1 GiB of page cache for gpt-oss-20b and 37 GiB for gpt-oss-120b, against 0.8–0.9 GiB for `dio`. A rectangle measured with one mode says nothing about the other, so each names the mode it was measured with and applies only to that mode. There is no inference from an older envelope; a mode no rectangle covers is sized by estimate.
+The two unified load modes use memory very differently: `none` added 12.1 GiB of page cache for gpt-oss-20b and 37 GiB for gpt-oss-120b, against 0.8–0.9 GiB for `dio`. A rectangle measured with one mode says nothing about the other, so each names the mode it was measured with and applies only to that mode. There is no inference from an older envelope; a mode no rectangle covers is sized by estimate.
 
-### Question #4: Why is no benchmark a prerequisite for a Run?
+#### Admission without per-model benchmarks
 
-Response: The owner decided on 2026-09-29 that users must be able to add and run models at run time without per-model benchmarks, and deferred the benchmark phases; the earlier measurements were disturbed by another user's fine-tuning and stay historical evidence, not calibration. So every run is sized by a labelled estimate from the model's data (or by a trusted envelope where one applies) and checked against a fresh snapshot with the host reserve and the floor, and the guard remains the backstop. An estimate can be wrong; it says so, names its defaults, and never presents itself as measured.
+The owner decided on 2026-09-29 that users must be able to add and run models at run time without per-model benchmarks, and deferred the benchmark phases; the earlier measurements were disturbed by another user's fine-tuning and stay historical evidence, not calibration. So every run is sized by a labelled estimate from the model's data (or by a trusted envelope where one applies) and checked against a fresh snapshot with the host reserve and the floor, and the guard remains the backstop. An estimate can be wrong; it says so, names its defaults, and never presents itself as measured.
 
-### Question #5: Why does vLLM on unified memory need an operator switch when llama.cpp does not?
+#### Experimental vLLM on unified memory
 
-Response: The owner chose experimental, opt-in vLLM on DGX Spark. vLLM preallocates its whole share of the pool for weights and KV cache, and its behaviour on GB10 (the share it can actually take, its host-side memory, any network access) has not been checked on the hardware. An explicit operator switch, outside the model-management API, keeps that choice with whoever runs the deployment; a model entry or a Run parameter cannot make it.
+The owner chose experimental, opt-in vLLM on DGX Spark. vLLM preallocates its whole share of the pool for weights and KV cache, and its behaviour on GB10 (the share it can actually take, its host-side memory, any network access) has not been checked on the hardware. An explicit operator switch, outside the model-management API, keeps that choice with whoever runs the deployment; a model entry or a Run parameter cannot make it.
 
-### Question #6: Why is MTP a declared capability rather than a parameter any model may set?
+#### Declared MTP capability
 
-Response: MTP speculative decoding needs a multi-token-prediction head in the weights; llama.cpp cannot use it on a model without one. Honouring an explicit value must not turn an unsupported configuration into a Run that fails at load or silently misbehaves, so the entry declares the capability and the parameter is refused elsewhere. Declaring a capability is not certifying memory figures, so user entries may declare it.
+MTP speculative decoding needs a multi-token-prediction head in the weights; llama.cpp cannot use it on a model without one. Honouring an explicit value must not turn an unsupported configuration into a Run that fails at load or silently misbehaves, so the entry declares the capability and the parameter is refused elsewhere. Declaring a capability is not certifying memory figures, so user entries may declare it.
 
-### Question #7: Why is `cpu` decided at once when no GPU is attached, but only after 60 s when the GPU cannot be read?
+#### CPU selection and unreadable GPU grace period
 
-Response: A container cannot gain a GPU without being recreated, so committing then is safe. A failing nvidia-smi or device query can be transient; committing on the first failure would lock DGX Spark or a GPU host into the CPU profile.
+A container cannot gain a GPU without being recreated, so committing then is safe. A failing nvidia-smi or device query can be transient; committing on the first failure would lock DGX Spark or a GPU host into the CPU profile.
 
-### Question #8: Why a smaller reserve, floor and prompt cache on the CPU?
+#### CPU memory reserves
 
-Response: The first CPU host has 5.76 GiB, where the unified values (16 GiB reserve, 8 GiB floor) would refuse everything. The proportional values converge to the unified ones on large hosts.
+The first CPU host has 5.76 GiB, where the unified values (16 GiB reserve, 8 GiB floor) would refuse everything. The proportional values converge to the unified ones on large hosts.
 
-### Question #9: Why is llama.cpp's CPU build hidden on the GPU profiles by its own declaration?
+#### CPU runner availability
 
-Response: `profileUnsupportedReason` is set only on the `cpu` profile, on purpose: the dedicated and unified overviews must stay what they were, so a runner cannot be hidden there by a reason that only the new profile produces. A runner that serves one profile says so itself (`profiles`), and the overview, the table columns, the per-model rows, Run, preview and Install all read that one declaration. A test compares both GPU profiles' overviews with a golden file made before the runner existed.
-
-## Conclusion
+`profileUnsupportedReason` is set only on the `cpu` profile, on purpose: the dedicated and unified overviews must stay what they were, so a runner cannot be hidden there by a reason that only the new profile produces. A runner that serves one profile says so itself (`profiles`), and the overview, the table columns, the per-model rows, Run, preview and Install all read that one declaration. A test compares both GPU profiles' overviews with a golden file made before the runner existed.
 
 The agent picks the dedicated, unified or cpu profile from what nvidia-smi reports or from its absence. It runs models on the CPU whenever no NVIDIA GPU is usable, and it waits only while a GPU is present but unreadable. It normalizes, admits, launches and guards each Run under one committed profile. It admits unified and CPU runs, bundled or added at run time, from a labelled estimate (or, on unified memory, a trusted envelope), checked against a fresh snapshot with a host reserve and a floor and rechecked immediately before the runner starts, with a 250 ms guard as the backstop. vLLM joins only as an experimental operator choice on unified memory.

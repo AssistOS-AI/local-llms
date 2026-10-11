@@ -1,8 +1,5 @@
 ---
-id: DS006
-title: Coding Style
-status: accepted
-owner: local-llm
+title: DS006-coding-style
 summary: Coding conventions, source layout, language rules and test organization for local-llm, the repository's only agent; carries forward the repository coding-style rules of the retired shared-image agents.
 ---
 
@@ -24,7 +21,7 @@ This specification is the coding-style authority for the local-llms repository, 
 
 ```
 local-llms/
-  CLAUDE.md / AGENTS.md / README.md
+  AGENTS.md / README.md
   fileSizesCheck.sh
   docs/handoff-local-llms.md
   .github/workflows/runner-lock-check.yml       the CI install check of the agent's runner lock (DS004)
@@ -73,12 +70,10 @@ Branches must not use the `codex/` prefix. Commits must not include AI assistant
 
 For the record, the retired shared-image agents' rules were: runtime logic in POSIX shell (`start-agent.sh`, `dispatcher.sh`, runner scripts), Python services as single-file Flask applications, every test in `tests/validate.mjs`, shell scripts under 500 lines and Python services under 150. They no longer apply because that code is gone (DS000).
 
-## Decisions & Questions
+### Rationale
 
-### Question #1: Why keep a coding-style specification inside local-llm's set?
+#### Coding-style authority
 
-Response: The repository's own specification set described only the retired agents and was removed with them. `AGENTS.md` makes the coding-style authority part of the mandatory reading order, so it moves here, numbered after local-llm's specifications, instead of disappearing.
-
-## Conclusion
+The repository's own specification set described only the retired agents and was removed with them. `AGENTS.md` makes the coding-style authority part of the mandatory reading order, so it moves here, numbered after local-llm's specifications, instead of disappearing.
 
 local-llm is Node.js ESM with strict validation at every boundary, JSON configuration, `node:test` tests that need no hardware, and human-authored commits.

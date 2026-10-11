@@ -1,8 +1,5 @@
 ---
-id: DS002
-title: Model Lifecycle
-status: accepted
-owner: local-llm
+title: DS002-model-lifecycle
 summary: Catalog, registry, on-demand download, the deployment state machine, and restart behaviour.
 ---
 
@@ -55,8 +52,7 @@ On the `cpu` profile a user Ollama tag is pinned when it is added, because the C
 
 1. **Its own store.** A file whose verification record matches the pinned identity is used as it is while its recorded stat is unchanged; a changed one is hashed again, kept if it still matches, otherwise removed and fetched again. A record without a stat is hashed once.
 2. **In-place adoption.** A regular file already at the file's canonical store path, of the pinned size and with no valid record, is hashed and adopted where it is. This is the zero-copy path for a retained or separately downloaded file: the operator hard-links it on the host into the canonical path. The canonical paths are:
-   - GGUF, and each shard of a split GGUF: `<workspace>/.data/local-llm/models/gguf/<owner>/<repo>/<commit>/<file>` (`<file>` is the file's whole path in the repository);
-   - a Hugging Face snapshot file: `<workspace>/.data/local-llm/models/hf/<owner>/<repo>/<commit>/<file>`.
+   - GGUF, and each shard of a split GGUF: `<workspace>/.data/local-llm/models/gguf/<owner>/<repo>/<commit>/<file>` (`<file>` is the file's whole path in the repository); - a Hugging Face snapshot file: `<workspace>/.data/local-llm/models/hf/<owner>/<repo>/<commit>/<file>`.
 
    The operator must not link a file that also stays under `.data/shared`: every agent could then write to it. The deployment log warns when an adopted file has other links.
 3. **`/shared/models`** (on the host `<workspace>/.data/shared/models`; `LOCAL_LLM_SHARED_MODELS` overrides it for tests). A candidate is used only through a **private copy** into the store, hashed as it is written; it is never hard-linked (a link would share the inode with a path every agent can write, and inside the container `/shared` and `/data` are separate mounts, where `link()` fails with EXDEV anyway).
@@ -139,12 +135,10 @@ The retired repository specification is kept at commit [`03697765`](https://gith
 | Download is built into start; llama.cpp models must be pre-placed | Replaced: explicit Run downloads, resumes and verifies |
 | Switching models needs an agent restart | Replaced: Run with `replace: true` stops the current runner and starts the new one |
 
-## Decisions & Questions
+### Rationale
 
-### Question #1: Why is a paused download not resumed automatically after a restart?
+#### Explicit download resumption
 
-Response: A restart can be the operator's way of stopping a large download, and an automatic resume would consume bandwidth and disk without a request. The state records `paused` with the byte count, and the next Run continues from there.
-
-## Conclusion
+A restart can be the operator's way of stopping a large download, and an automatic resume would consume bandwidth and disk without a request. The state records `paused` with the byte count, and the next Run continues from there.
 
 Weights move onto the disk only after an explicit Run, are verified against a pinned identity, survive restarts as resumable partials, and are removed only by an explicit delete.

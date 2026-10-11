@@ -1,8 +1,5 @@
 ---
-id: DS000
-title: Vision and Scope
-status: accepted
-owner: local-llm
+title: DS000-vision-and-scope
 summary: What local-llm is, the retired shared-image agents and the services that went with them, its runners (LM Studio for internal use only), and what it deliberately leaves out.
 ---
 
@@ -74,16 +71,14 @@ The agent uses none of what LM Studio adds on top of llama.cpp: its native REST 
 
 Translation and reranking services (retired above), a shared host model cache, and Apple GPU acceleration through Podman libkrun/Vulkan (deferred by the user 2026-09-30, to be added later). Each needs its own decision.
 
-## Decisions & Questions
+### Rationale
 
-### Question #1: Why a separate agent instead of extending the shared image?
+#### Controller ownership
 
-Response: The shared image was CPU-only and arm64-first, started one fixed model per agent, and its dispatcher was shell. GPU runners, on-demand weights, admission and a Settings UI need a long-running controller with state, so local-llm began as a separate agent beside the legacy ones, and the legacy agents were later retired (above).
+The shared image was CPU-only and arm64-first, started one fixed model per agent, and its dispatcher was shell. GPU runners, on-demand weights, admission and a Settings UI need a long-running controller with state, so local-llm began as a separate agent beside the legacy ones, and the legacy agents were later retired (above).
 
-### Question #2: Why does local-llm run models on the CPU when no NVIDIA GPU is usable?
+#### Automatic CPU fallback
 
-Response: Plan decision D7 left CPU inference out. That made the agent unusable on a Mac (through its Podman machine) and on hosts without a GPU, although Explorer enables it by default. On 2026-09-30 the user decided that an NVIDIA GPU may not be a prerequisite. The CPU path is automatic, with no operator switch, and is sized from the machine's RAM (DS005). Revoking the GPU grant therefore no longer stops local-llm from serving models: it moves them to the CPU.
-
-## Conclusion
+Plan decision D7 left CPU inference out. That made the agent unusable on a Mac (through its Podman machine) and on hosts without a GPU, although Explorer enables it by default. On 2026-09-30 the user decided that an NVIDIA GPU may not be a prerequisite. The CPU path is automatic, with no operator switch, and is sized from the machine's RAM (DS005). Revoking the GPU grant therefore no longer stops local-llm from serving models: it moves them to the CPU.
 
 `local-llm` is an opt-in, per-workspace model host. It uses the NVIDIA GPU when one is attached and the CPU otherwise, downloads nothing until an administrator runs a model, and serves other agents only through the local Soul Gateway.

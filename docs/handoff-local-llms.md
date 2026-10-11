@@ -4,7 +4,7 @@ This is the compact handoff for a new session working in this repository.
 
 ## Repository policy
 
-Read `CLAUDE.md` first, then `AGENTS.md`. Do not create branches with a `codex/` prefix; do not add AI assistant co-author trailers; keep commit metadata human-authored.
+Read `AGENTS.md` first. Do not create branches with a `codex/` prefix; do not add AI assistant co-author trailers; keep commit metadata human-authored.
 
 ## What is here
 

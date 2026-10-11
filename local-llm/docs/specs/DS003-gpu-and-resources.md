@@ -1,8 +1,5 @@
 ---
-id: DS003
-title: GPU and Resources
-status: accepted
-owner: local-llm
+title: DS003-gpu-and-resources
 summary: Manifest-declared GPU access and the operator override, admission, runner isolation, and memory estimates.
 ---
 
@@ -100,12 +97,10 @@ The calibration is `tools/vllm_mps_calibration.mjs`, run inside the agent contai
 
 The overview adds `limits.budget.gpuShare={smPercent,vramBytes,assurance:"best-effort"}` only when configured. The dashboard adds a Limits from Ploinky line with the per-CUDA-process scope. Unlimited overview, runner argv and telemetry shapes retain their previous output.
 
-## Decisions & Questions
+### Rationale
 
-### Question #1: Why is the memory estimate profile-based instead of computed from GGUF metadata?
+#### Profile-based memory estimates
 
-Response: The GGUF header gives tensor sizes but not the CUDA compute buffers or the runtime's allocation behaviour, which differ by build and flash-attention mode. A profile measured on real hardware and stored with the catalog entry is accurate for the seed model; the file-size heuristic is the fallback for user models and is labelled as such.
-
-## Conclusion
+The GGUF header gives tensor sizes but not the CUDA compute buffers or the runtime's allocation behaviour, which differ by build and flash-attention mode. A profile measured on real hardware and stored with the catalog entry is accurate for the seed model; the file-size heuristic is the fallback for user models and is labelled as such.
 
 The agent reaches the GPU through its manifest declaration, which the operator can revoke, refuses before downloading when a model cannot fit, keeps runners on loopback behind a per-start key, and never exposes a runner port through the Router.

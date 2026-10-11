@@ -1,8 +1,5 @@
 ---
-id: DS001
-title: Agent Contract
-status: accepted
-owner: local-llm
+title: DS001-agent-contract
 summary: Manifest, process model, tools, authorization, the chat endpoint, drain, and LM Studio's operator switch and limits.
 ---
 
@@ -60,7 +57,7 @@ Every tool is declared in `mcp-config.json` with `command: "node"`, `args: ["/co
 | `local_llm_weights_delete` | `deleteWeights` |
 | `local_llm_model_add` / `_update` / `_remove` | registry edits; seed entries are read-only; an entry that carries a unified envelope (`unified`) or any `validated` label is refused with `invalid_model`, because only the trusted seed catalog may certify measurements (DS005) |
 | `local_llm_model_lookup` | `lookupModel`: `repo`, `revision`, `format` (`gguf`, `hf`, `exl3`), optional `file`; Hugging Face metadata only, plus up to 32 MiB from the start of one GGUF file for its header (DS002). Runs outside the command queue; downloads no weights |
-| `local_llm_test_prompt` | an admin smoke chat against the active runner on loopback; the one inference-routing exception (Question #3) |
+| `local_llm_test_prompt` | an admin smoke chat against the active runner on loopback; the one inference-routing exception (the admin smoke-test routing rationale) |
 | `local_llm_runner_install` | `installRunner`: `runnerId`, `acceptLicence`; installs an on-demand runner from the image's runner lock or the agent's own (DS004). Who accepted a licence comes from the Router-signed invocation, never from tool input. |
 | `local_llm_runner_uninstall` | `uninstallRunner`: `runnerId`; refused while that runner runs a model |
 
@@ -69,10 +66,7 @@ Every tool is declared in `mcp-config.json` with `command: "node"`, `args: ["/co
 - **The running Run's step ends at once.** The snapshot or lookup in progress stops. A snapshot answers without waiting for its nvidia-smi query, which is killed, or for its free-disk read, which cannot be cancelled and whose late answer is dropped.
 - **A queued Run reads and records nothing.** When its turn comes it fails at once.
 - **Outcome.**
-  - Every invalidated Run fails with `cancelled`, or with `shutting_down` when the drain met it in a snapshot.
-  - It records nothing (no deployment, request id or saved parameters) and starts no download or runner, so the same request can be sent again.
-  - A Stop succeeds. A Cancel that invalidated at least one Run of new work (a request id not already accepted) succeeds even when nothing is downloading. A queued retry of an accepted request is not new work: it is answered as a duplicate, never cancelled, and does not make a Cancel succeed.
-  - A second Stop or Cancel right after finds nothing left of those Runs.
+  - Every invalidated Run fails with `cancelled`, or with `shutting_down` when the drain met it in a snapshot. - It records nothing (no deployment, request id or saved parameters) and starts no download or runner, so the same request can be sent again. - A Stop succeeds. A Cancel that invalidated at least one Run of new work (a request id not already accepted) succeeds even when nothing is downloading. A queued retry of an accepted request is not new work: it is answered as a duplicate, never cancelled, and does not make a Cancel succeed. - A second Stop or Cancel right after finds nothing left of those Runs.
 - **Answers that come first.** A request id that was already accepted is answered as a duplicate, as always, even if its retry was queued before a Stop. Busy and replace keep their meaning for Runs that go ahead.
 - **Checks.** A Run checks for a Stop or Cancel after every step that waits, and last just before it records anything; from there to its job's start nothing waits.
 - **The drain** stops the running Run the same way. A Run still queued at a drain gets its turn and refuses with `shutting_down` at its first snapshot, which the drain has already stopped, or at its last check, unless an earlier check refuses it first; it records nothing and starts nothing. A Run submitted after the drain began is refused at once with `shutting_down`.
@@ -87,7 +81,7 @@ AgentServer runs `src/chatResponder.mjs` for each `POST /v1/chat/completions` ro
 
 The Router lists the agent at `/api/router/openai-agent-discovery` because the manifest declares `endpoints.chatCompletions`. The workspace-local Soul Gateway turns it into the model `local-llms/local-llm/default` (AgentServer's fallback `/v1/models` id), and AchillesAgentLib callers in other agents reach it as `soul_gateway/local-llms/local-llm/default`. That is the only way other agents use the model. The manifest's `capabilities.tags: ["local-llm"]` keeps the model out of the gateway's shared `generic-agent` group.
 
-Soul Gateway refuses a call whose caller is the agent that the target model fronts ("Agent cannot call its own discovered Soul Gateway model"). The guard stays as it is. The admin test prompt therefore uses the exception in Question #3.
+Soul Gateway refuses a call whose caller is the agent that the target model fronts ("Agent cannot call its own discovered Soul Gateway model"). The guard stays as it is. The admin test prompt therefore uses the exception in the admin smoke-test routing rationale.
 
 ### Drain
 
@@ -116,19 +110,19 @@ vLLM on a GPU that shares system memory (DS005) is experimental and off unless t
 | Calls home | Every llmster start makes 2–3 short HTTPS connections to lmstudio.ai: version checks for the daemon and `lms`, the feed, the backend list, the extension-pack check and LM Link status. None downloads anything (observed 2026-09-25). They cannot be turned off through a published setting and are accepted. The controller refuses to start LM Studio when llmster has staged an update in its home, and refuses any engine other than the pinned 2.41.0. |
 | Logs | llmster's stdout echoes every request and response. A line filter keeps only lifecycle lines, so no prompt or response reaches the runner log. LM Studio's own server log, in its container-local home, is deleted before each start and after each exit. |
 
-## Decisions & Questions
+### Rationale
 
-### Question #1: Why does the controller spawn AgentServer instead of the reverse?
+#### Controller-owned AgentServer
 
-Response: The controller must outlive tool calls and must be the process that receives SIGTERM, so it can checkpoint downloads and reap the runner before Ploinky's drain deadline. AgentServer spawns a fresh process per tool call and has no place for long-lived state.
+The controller must outlive tool calls and must be the process that receives SIGTERM, so it can checkpoint downloads and reap the runner before Ploinky's drain deadline. AgentServer spawns a fresh process per tool call and has no place for long-lived state.
 
-### Question #2: Why is the runner API key passed on the command line?
+#### Per-start runner credentials
 
-Response: `llama-server` b11159 reads the key from `--api-key`, `LLAMA_API_KEY` or `--api-key-file`. The controller passes it as an argument and redacts it from the runner log. The key changes on every start, and only processes inside the container, which all run as the same user, can read another process's arguments or environment, so an environment variable or a key file would not narrow who can read it.
+`llama-server` b11159 reads the key from `--api-key`, `LLAMA_API_KEY` or `--api-key-file`. The controller passes it as an argument and redacts it from the runner log. The key changes on every start, and only processes inside the container, which all run as the same user, can read another process's arguments or environment, so an environment variable or a key file would not narrow who can read it.
 
-### Question #3: How does the admin test prompt reach the model?
+#### Admin smoke-test routing exception
 
-Response: Through a narrow exception to the workspace rule that request-time inference goes through AchillesAgentLib. It was approved by the user in the implementation session's question dialog on 2026-09-23, with its bounds set in a follow-up message in that session the same day, after Soul Gateway's self-call guard was observed to refuse the planned path (AchillesAgentLib from inside local-llm to `soul_gateway/local-llms/local-llm/default`). The exception covers `local_llm_test_prompt` only (`src/testPrompt.mjs`), with these bounds:
+Through a narrow exception to the workspace rule that request-time inference goes through AchillesAgentLib. It was approved by the user in the implementation session's question dialog on 2026-09-23, with its bounds set in a follow-up message in that session the same day, after Soul Gateway's self-call guard was observed to refuse the planned path (AchillesAgentLib from inside local-llm to `soul_gateway/local-llms/local-llm/default`). The exception covers `local_llm_test_prompt` only (`src/testPrompt.mjs`), with these bounds:
 
 | Bound | How it is enforced |
 | --- | --- |
@@ -139,7 +133,5 @@ Response: Through a narrow exception to the workspace rule that request-time inf
 | Same request shape | The request goes through the chat responder's field allowlist (`buildRunnerRequest`). |
 
 The exception adds no network exposure: the runner stays on loopback behind `routerAccess.agentPorts: false`. Soul Gateway's self-call guard is unchanged, and other agents keep using the model only through AchillesAgentLib and Soul Gateway.
-
-## Conclusion
 
 The agent exposes admin-only tools backed by one serialized controller, publishes no ports, serves other agents only through the Router and Soul Gateway, makes one bounded admin-only loopback exception for its test prompt, and drains within Ploinky's restart window.

@@ -1,8 +1,5 @@
 ---
-id: DS004
-title: On-demand Runners
-status: accepted
-owner: local-llm
+title: DS004-on-demand-runners
 summary: Runners installed after the image is built, from a lock shipped in the image or the agent's own CI-gated lock (Phase 3), a verified cache in /data and a runnable copy rebuilt in the container; a proprietary entry is never downloaded in CI.
 ---
 
@@ -99,20 +96,20 @@ The image's publish workflow installs every lock entry inside the published imag
 
 A proprietary entry is never downloaded in CI, because downloading it would accept its terms on behalf of whoever runs CI. The workflow runs the check for it with no network and `--validate-only`, and the check itself also refuses to download any proprietary entry. It reports `downloaded: false` with what the lock pins: the files, their total size, their hosts and the licence fields. The install of such a runner is proven live, on a deployment whose admin accepted its terms.
 
-## Decisions & Questions
+### Rationale
 
-### Question #1: Why rebuild the runnable copy instead of running from /data?
+#### Runnable copy isolation
 
-Response: `/data` is a workspace bind that survives containers and that other processes with workspace access can write. Rebuilding into the container's own filesystem from a cache that is re-verified against the image's lock means that code changed on disk never outlives the container, the same guarantee code baked into the image has. The check and the build use the same bytes: each file is hashed while it is copied into container-local staging, and the build reads only that copy, so a writer that swaps a cached file after the check gains nothing.
+`/data` is a workspace bind that survives containers and that other processes with workspace access can write. Rebuilding into the container's own filesystem from a cache that is re-verified against the image's lock means that code changed on disk never outlives the container, the same guarantee code baked into the image has. The check and the build use the same bytes: each file is hashed while it is copied into container-local staging, and the build reads only that copy, so a writer that swaps a cached file after the check gains nothing.
 
-### Question #2: Why `--no-deps` with the full closure?
+#### Pinned dependency closure
 
-Response: The lock already lists the resolved closure for this image's Python, so the install needs no resolver: every wheel is named with its hash, and nothing else can be installed.
+The lock already lists the resolved closure for this image's Python, so the install needs no resolver: every wheel is named with its hash, and nothing else can be installed.
 
-### Question #3: Why does the agent carry its own runner lock?
+#### Agent-owned runner lock
 
-Response: Runners the image lacks, such as Ollama on arm64 and a newer llama.cpp CPU build, would otherwise need an image rebuild and promotion before a workspace could install them. The agent's lock moves the trust root for those entries from the promoted image to the repository revision the workspace runs, and the `runner-lock-check` pull-request workflow replaces the image's promotion gate. What does not change is the pinning by URL, size and sha256 on the allowed hosts, the licence gates, and that admins never supply a URL. A workspace that runs an unreviewed revision could therefore see an entry that CI never proved, but it still cannot fetch anything except the pinned bytes. The workflow lands before any entry, and an admin-supplied pinned entry (a typed sha256) was not adopted, because it would relax "never a URL". The gate is real only once the `runner-lock-check` job is a required status check on `main`; until then the entries rely on review.
+Runners the image lacks, such as Ollama on arm64 and a newer llama.cpp CPU build, would otherwise need an image rebuild and promotion before a workspace could install them. The agent's lock moves the trust root for those entries from the promoted image to the repository revision the workspace runs, and the `runner-lock-check` pull-request workflow replaces the image's promotion gate. What does not change is the pinning by URL, size and sha256 on the allowed hosts, the licence gates, and that admins never supply a URL. A workspace that runs an unreviewed revision could therefore see an entry that CI never proved, but it still cannot fetch anything except the pinned bytes. The workflow lands before any entry, and an admin-supplied pinned entry (a typed sha256) was not adopted, because it would relax "never a URL". The gate is real only once the `runner-lock-check` job is a required status check on `main`; until then the entries rely on review.
 
-### Question #4: Why is an agent-lock entry offered on the cpu profile only?
+#### CPU-only runner declarations
 
-Response: The two runners in the lock exist for the CPU: llama.cpp's CPU build has no GPU policy, and Ollama's arm64 build is the only way to run it on an image that lacks it. Offering them on the GPU profiles would add runners, Install buttons and table columns to hosts whose behavior this change keeps as it was, and a runner with no policy for the profile would refuse every Run. Keeping them on the `cpu` profile leaves the dedicated and unified overviews identical to what they were (a test compares them with a golden file made before the lock existed, with both real locks loaded).
+The two runners in the lock exist for the CPU: llama.cpp's CPU build has no GPU policy, and Ollama's arm64 build is the only way to run it on an image that lacks it. Offering them on the GPU profiles would add runners, Install buttons and table columns to hosts whose behavior this change keeps as it was, and a runner with no policy for the profile would refuse every Run. Keeping them on the `cpu` profile leaves the dedicated and unified overviews identical to what they were (a test compares them with a golden file made before the lock existed, with both real locks loaded).
