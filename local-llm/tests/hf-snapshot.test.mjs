@@ -55,7 +55,7 @@ function tempRoot(t) {
 }
 
 // A tiny Hugging Face: revision and tree APIs and the resolve URL with Range.
-async function hub(t, { cutFirst = null, wrong = null, ignoreRange = false, badLfs = false } = {}) {
+async function hub(t, { wrong = null, ignoreRange = false, badLfs = false } = {}) {
     const requests = [];
     const all = { ...FILES, ...EXTRA };
     const server = http.createServer((req, res) => {
@@ -87,11 +87,6 @@ async function hub(t, { cutFirst = null, wrong = null, ignoreRange = false, badL
         const headers = { 'Content-Length': body.length - start };
         if (range) headers['Content-Range'] = `bytes ${start}-${body.length - 1}/${body.length}`;
         res.writeHead(range ? 206 : 200, headers);
-        const hits = requests.filter((request) => request.path === url.pathname).length;
-        if (cutFirst === name && hits === 1) {
-            res.write(body.subarray(start, start + 512 * 1024), () => res.destroy());
-            return;
-        }
         res.end(body.subarray(start));
     });
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -171,14 +166,47 @@ test('bytes that match neither the sha256 nor the git oid are refused and nothin
 });
 
 test('a cut transfer resumes from the partial with Range', async (t) => {
-    const { base, requests } = await hub(t, { cutFirst: 'model.safetensors' });
     const root = tempRoot(t);
     const file = pinnedFiles().find((entry) => entry.path === 'model.safetensors');
     const artifact = { repo: REPO, commit: COMMIT, file: file.path, size: file.size, sha256: file.sha256 };
-    const result = await downloadSnapshotFile({ root, artifact, baseUrl: base, sleep: noSleep });
+    const body = FILES[file.path];
+    const prefix = 512 * 1024;
+    const { stateDir } = snapshotPaths({ root, repo: REPO, commit: COMMIT });
+    const ranges = [];
+    const fetchImpl = async (_url, { headers }) => {
+        ranges.push(headers.Range ?? null);
+        if (ranges.length === 1) {
+            return {
+                status: 200,
+                headers: new Headers({ 'Content-Length': String(body.length) }),
+                // A socket write callback cannot guarantee how many bytes the client consumes.
+                body: (async function* () {
+                    yield body.subarray(0, prefix);
+                    throw Object.assign(new Error('controlled connection reset'), { code: 'ECONNRESET' });
+                })(),
+            };
+        }
+        assert.equal(ranges.length, 2);
+        const partial = fs.readFileSync(path.join(stateDir, `${file.path}.partial`));
+        assert.equal(partial.length, prefix);
+        assert.deepEqual(partial, body.subarray(0, prefix));
+        assert.equal(headers.Range, `bytes=${partial.length}-`);
+        return new Response(body.subarray(prefix), {
+            status: 206,
+            headers: {
+                'Content-Length': String(body.length - prefix),
+                'Content-Range': `bytes ${prefix}-${body.length - 1}/${body.length}`,
+            },
+        });
+    };
+    const result = await downloadSnapshotFile({ root, artifact, fetchImpl, sleep: noSleep });
     assert.equal(result.status, 'complete');
-    const ranges = requests.filter((request) => request.path.endsWith('/model.safetensors')).map((request) => request.range);
-    assert.deepEqual(ranges, [null, `bytes=${512 * 1024}-`]);
+    assert.deepEqual(ranges, [null, `bytes=${prefix}-`]);
+    const complete = fs.readFileSync(result.path);
+    assert.equal(complete.length, file.size);
+    assert.equal(sha256(complete), file.sha256);
+    assert.deepEqual(complete, body);
+    assert.deepEqual(await inspectSnapshotFile({ root, artifact }), { state: 'complete', bytes: file.size });
 });
 
 function stores(t, root, base) {
