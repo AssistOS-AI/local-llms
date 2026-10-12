@@ -228,7 +228,7 @@ export function effectiveGpu(gpu, budget) {
 }
 
 export function mpsRunnerEnvironment(env, profile) {
-    if (profile === 'cpu') return {};
+    if (['cpu', 'vulkan', 'venus'].includes(profile)) return {};
     const budget = parseMpsBudget(env);
     if (budget.state === 'unknown') throw Object.assign(new Error(budget.reason), { code: budget.reasonCode });
     return budget.environment || {};

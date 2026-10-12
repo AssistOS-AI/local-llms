@@ -13,7 +13,7 @@
 # required status check without blocking pull requests that touch none of this:
 # the first job looks at what the pull request changes and, when it touches no
 # lock, not this workflow and nothing the install check loads or launches (all of
-# local-llm/src/controller/, local-llm/src/runners/, local-llm/src/errors.mjs and
+# local-llm/src/controller/, local-llm/src/runners/, local-llm/src/errors.mjs, local-llm/src/drainBudget.mjs and
 # local-llm/tools/), the per-architecture jobs are skipped and the
 # `runner-lock-check` job at the end still reports success. THE GATE HOLDS ONLY
 # ONCE `runner-lock-check` IS A REQUIRED STATUS CHECK ON `main` (a repository
@@ -51,7 +51,7 @@ jobs:
         # On demand, the check always runs. For a pull request it runs when the diff against the base touches a lock, the
         # workflow itself, or any file the install check loads or launches: everything under src/controller/ (the
         # installer, the lock reader, the downloader and what they import), src/runners/ (the adapters whose launch
-        # paths the locks name), src/errors.mjs and tools/. If the diff cannot be read, or grep fails, it runs: the
+        # paths the locks name), src/errors.mjs, src/drainBudget.mjs and tools/. If the diff cannot be read, or grep fails, it runs: the
         # only way to "not needed" is a diff that was read and had no such file.
         # The names go to a file, never through a pipe: `grep -q` leaves at its first match, and a writer still
         # feeding it dies of SIGPIPE, which `pipefail` turns into "no match" once the list is bigger than a pipe's
@@ -66,7 +66,7 @@ jobs:
             trap 'rm -f "$list"' EXIT
             if git -c core.quotePath=false diff --name-only -z HEAD^1 HEAD > "$list"; then
               found=0
-              LC_ALL=C grep -z -E '^(local-llm/src/(controller|runners)/.+|local-llm/src/errors\.mjs|local-llm/tools/.+|local-llm/catalog/runners\.lock\.linux-[a-z0-9]+\.json|\.github/workflows/runner-lock-check\.yml)$' "$list" > /dev/null || found=$?
+              LC_ALL=C grep -z -E '^(local-llm/src/(controller|runners)/.+|local-llm/src/(errors|drainBudget)\.mjs|local-llm/tools/.+|local-llm/catalog/runners\.lock\.linux-[a-z0-9]+\.json|\.github/workflows/runner-lock-check\.yml)$' "$list" > /dev/null || found=$?
               case "$found" in
                 1) needed=false ;;
                 *) needed=true ;;

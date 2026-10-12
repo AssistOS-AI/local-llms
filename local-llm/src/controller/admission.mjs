@@ -10,6 +10,7 @@
 // not an absent one; an unknown reading under a finite limit is refused before
 // any policy runs (budgetGuard).
 import { budgetGuard, effectiveGpu, effectiveMemory, gpuBudgetOf, knownByte, memoryBudgetOf } from './ploinkyBudget.mjs';
+import { isVulkanProfile, vulkanRefusal } from './vulkan.mjs';
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
@@ -380,7 +381,8 @@ export function admitTabbyApi({ model, source, params, gpu, memory, disk, remain
 export function admit({ runner, model, source, params, snapshot, remainingDownloadBytes = 0, profile = undefined, decision = undefined,
     gpuBudget = gpuBudgetOf(snapshot), runnerContext = {} }) {
     // A runner that is for some profiles only (llama.cpp's CPU build) has no GPU policy, only `admitCpu`.
-    const policy = profile === 'cpu' ? typeof runner.admitCpu === 'function' || typeof runner.admit === 'function' : typeof runner.admit === 'function';
+    const policy = profile === 'cpu' ? typeof runner.admitCpu === 'function' || typeof runner.admit === 'function'
+        : isVulkanProfile(profile) ? true : typeof runner.admit === 'function';
     if (!runner.supported || !policy) {
         return result('incompatible', runner.unsupportedReason || `${runner.displayName} is not supported in this release.`, {});
     }
@@ -403,6 +405,19 @@ export function admit({ runner, model, source, params, snapshot, remainingDownlo
             model, source, params, gpu: snapshot?.gpu, memory: snapshot?.memory || {}, cgroupMemory: snapshot?.cgroupMemory ?? null,
             disk: snapshot?.disk, remainingDownloadBytes, decision,
         });
+    }
+    if (isVulkanProfile(profile)) {
+        const hook = profile === 'vulkan' ? runner.admitVulkan : runner.admitVenus;
+        if (typeof hook !== 'function') return result('incompatible', vulkanRefusal(runner.displayName), {});
+        if (gpuBudget.state === 'known') return result('incompatible', 'GPU shares need NVIDIA MPS; Vulkan GPUs cannot use this share.', {}, [], 'gpu_share_unsupported');
+        const gpu = snapshot?.gpu;
+        if (!gpu?.available || gpu.backend !== 'vulkan' || gpu.driver !== (profile === 'vulkan' ? 'radv' : 'venus')) {
+            const hint = ['absent', 'unusable'].includes(gpu?.state)
+                ? ` This agent started with the ${profile} profile; restart local-llm to run on the CPU.` : '';
+            return result('incompatible', `${gpu?.reason || 'The Vulkan GPU no longer matches the committed profile.'}${hint}`, {});
+        }
+        return hook({ model, source, params, gpu, memory: effectiveMemory(snapshot?.memory || {}, budget),
+            cgroupMemory: snapshot?.cgroupMemory ?? null, disk: snapshot?.disk, remainingDownloadBytes });
     }
     const rawGpu = snapshot?.gpu;
     let gpu = rawGpu;

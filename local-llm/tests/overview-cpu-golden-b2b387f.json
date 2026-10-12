@@ -1,0 +1,2196 @@
+{
+  "_meta": {
+    "base": "b2b387fd42d9c76323c3d2f79d4bcf2749fc1a19",
+    "note": "Generated from the isolated unchanged base tree. Includes the small CPU model and per-runner rows."
+  },
+  "scenarios": {
+    "x64, base contract": {
+      "overview": {
+        "profile": "cpu",
+        "profileDecision": {
+          "profile": "cpu",
+          "cause": "absent",
+          "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
+          "gpuName": null
+        },
+        "limits": {
+          "floorBytes": 644245095,
+          "hostReserveBytes": 1610612736,
+          "poolBytes": 6442450944,
+          "availableBytes": 5368709120
+        },
+        "hardware": {
+          "gpu": {
+            "available": false,
+            "state": "absent",
+            "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+          },
+          "memory": {
+            "totalBytes": 6442450944,
+            "availableBytes": 5368709120,
+            "swapFreeBytes": 0,
+            "freeBytes": 4294967296,
+            "cachedBytes": 1073741824
+          },
+          "disk": {
+            "freeBytes": 368640000,
+            "totalBytes": 409600000
+          },
+          "cpus": 4,
+          "cores": 4,
+          "cgroupMemory": null
+        },
+        "runners": [
+          {
+            "id": "llama.cpp",
+            "displayName": "llama.cpp",
+            "weightFormat": "gguf",
+            "pinnedVersion": "b11159",
+            "supported": false,
+            "paramSchema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "ctxSize": {
+                  "type": "integer",
+                  "minimum": 512,
+                  "maximum": 131072,
+                  "default": 4096,
+                  "title": "Context size",
+                  "description": "Total context window in tokens, shared by all parallel slots (at most the model's training context per slot). The KV cache lives in this machine's memory, so a larger context needs more of it."
+                },
+                "parallel": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4,
+                  "default": 1,
+                  "title": "Parallel slots",
+                  "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+                },
+                "loadMode": {
+                  "type": "string",
+                  "enum": [
+                    "mmap",
+                    "none"
+                  ],
+                  "default": "mmap",
+                  "title": "Load mode",
+                  "description": "mmap maps the weights from the file, so they are page cache the system can drop under memory pressure (generation then slows down); none reads them into memory the runner owns."
+                },
+                "threads": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "maximum": 256,
+                  "default": null,
+                  "title": "CPU threads",
+                  "description": "Number of CPU threads; empty uses the high-performance cores where cores differ, otherwise the physical cores minus 1 (four cores or fewer) or minus 2."
+                },
+                "chatTemplateKwargs": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "title": "Chat template arguments",
+                  "description": "Extra arguments passed to the Jinja chat template.",
+                  "properties": {
+                    "reasoning_effort": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high"
+                      ],
+                      "title": "Reasoning effort",
+                      "description": "Reasoning effort hint for models whose template supports it."
+                    },
+                    "preserve_thinking": {
+                      "type": "boolean",
+                      "title": "Preserve thinking",
+                      "description": "Keep earlier reasoning in the prompt, for templates that support it (Qwen3.6 with MTP)."
+                    }
+                  }
+                }
+              }
+            },
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "unsupportedReason": "llama.cpp is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "llama.cpp is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "ik_llama.cpp",
+            "displayName": "ik_llama.cpp",
+            "weightFormat": "gguf",
+            "pinnedVersion": "20f7a72",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "profileUnsupportedReason": "ik_llama.cpp needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "ollama",
+            "displayName": "Ollama",
+            "weightFormat": "ollama",
+            "pinnedVersion": "0.34.4",
+            "supported": true,
+            "paramSchema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "numCtx": {
+                  "type": "integer",
+                  "minimum": 512,
+                  "maximum": 131072,
+                  "default": 4096,
+                  "title": "Context size",
+                  "description": "Context window in tokens (num_ctx). The KV cache lives in this machine's memory, so a larger context needs more of it."
+                },
+                "numThread": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "maximum": 256,
+                  "default": null,
+                  "title": "CPU threads",
+                  "description": "Number of CPU threads; empty uses the Ollama default."
+                },
+                "keepAlive": {
+                  "type": "string",
+                  "pattern": "^(-1|0|[1-9][0-9]{0,4}[smh])$",
+                  "maxLength": 6,
+                  "default": "30m",
+                  "title": "Keep alive",
+                  "description": "How long the model stays loaded: -1 forever, 0 unload immediately, or e.g. 30m."
+                }
+              }
+            },
+            "basicParams": [
+              "numCtx"
+            ],
+            "moeParams": [],
+            "installed": false,
+            "version": null,
+            "reason": "fixture",
+            "enabled": true,
+            "install": {
+              "version": "0.34.4",
+              "totalBytes": 1549684612,
+              "files": 1,
+              "licence": {
+                "name": "MIT",
+                "url": "https://github.com/ollama/ollama/blob/v0.34.4/LICENSE",
+                "source": "https://github.com/ollama/ollama",
+                "notice": null,
+                "requiresAcceptance": false,
+                "proprietary": false
+              },
+              "cache": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 1549684612
+              },
+              "installed": false,
+              "record": null,
+              "runnable": false,
+              "state": null,
+              "installing": false
+            }
+          },
+          {
+            "id": "vllm",
+            "displayName": "vLLM",
+            "weightFormat": "hf",
+            "pinnedVersion": "0.30.0",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "maxModelLen",
+              "cpuOffloadGb"
+            ],
+            "moeParams": [],
+            "profileUnsupportedReason": "vLLM needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "vLLM is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "vLLM is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "tabbyapi",
+            "displayName": "TabbyAPI (ExLlamaV3)",
+            "weightFormat": "exl3",
+            "pinnedVersion": "f07131c",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "maxSeqLen",
+              "cacheMode"
+            ],
+            "moeParams": [],
+            "profileUnsupportedReason": "TabbyAPI (ExLlamaV3) needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "TabbyAPI (ExLlamaV3) is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "TabbyAPI (ExLlamaV3) is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "lmstudio",
+            "displayName": "LM Studio (internal use only)",
+            "weightFormat": "gguf",
+            "pinnedVersion": "0.0.25-1",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "profileUnsupportedReason": "LM Studio (internal use only) needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "LM Studio (internal use only) is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "LM Studio (internal use only) is not available on this platform: this image does not include it.",
+            "enabled": false,
+            "disabledReason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm."
+          },
+          {
+            "id": "llama.cpp-cpu",
+            "displayName": "llama.cpp (CPU build)",
+            "weightFormat": "gguf",
+            "pinnedVersion": "b11295",
+            "supported": true,
+            "paramSchema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "ctxSize": {
+                  "type": "integer",
+                  "minimum": 512,
+                  "maximum": 131072,
+                  "default": 4096,
+                  "title": "Context size",
+                  "description": "Total context window in tokens, shared by all parallel slots (at most the model's training context per slot). The KV cache lives in this machine's memory, so a larger context needs more of it."
+                },
+                "parallel": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4,
+                  "default": 1,
+                  "title": "Parallel slots",
+                  "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+                },
+                "loadMode": {
+                  "type": "string",
+                  "enum": [
+                    "mmap",
+                    "none"
+                  ],
+                  "default": "mmap",
+                  "title": "Load mode",
+                  "description": "mmap maps the weights from the file, so they are page cache the system can drop under memory pressure (generation then slows down); none reads them into memory the runner owns."
+                },
+                "threads": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "maximum": 256,
+                  "default": null,
+                  "title": "CPU threads",
+                  "description": "Number of CPU threads; empty uses the high-performance cores where cores differ, otherwise the physical cores minus 1 (four cores or fewer) or minus 2."
+                },
+                "chatTemplateKwargs": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "title": "Chat template arguments",
+                  "description": "Extra arguments passed to the Jinja chat template.",
+                  "properties": {
+                    "reasoning_effort": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high"
+                      ],
+                      "title": "Reasoning effort",
+                      "description": "Reasoning effort hint for models whose template supports it."
+                    },
+                    "preserve_thinking": {
+                      "type": "boolean",
+                      "title": "Preserve thinking",
+                      "description": "Keep earlier reasoning in the prompt, for templates that support it (Qwen3.6 with MTP)."
+                    }
+                  }
+                }
+              }
+            },
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "installed": false,
+            "version": null,
+            "reason": "fixture",
+            "enabled": true,
+            "install": {
+              "version": "b11295",
+              "totalBytes": 13577862,
+              "files": 1,
+              "licence": {
+                "name": "MIT",
+                "url": "https://github.com/ggml-org/llama.cpp/blob/b11295/LICENSE",
+                "source": "https://github.com/ggml-org/llama.cpp",
+                "notice": null,
+                "requiresAcceptance": false,
+                "proprietary": false
+              },
+              "cache": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 13577862
+              },
+              "installed": false,
+              "record": null,
+              "runnable": false,
+              "state": null,
+              "installing": false
+            }
+          }
+        ],
+        "unsupportedModels": [],
+        "models": [
+          {
+            "id": "qwen2.5-0.5b-instruct-q4_k_m",
+            "displayName": "Qwen2.5 0.5B Instruct (Q4_K_M)",
+            "description": "A small dense chat model that runs on the CPU of a machine with a few GiB of free RAM; the quickest way to check that a machine can serve a model.",
+            "license": "Apache-2.0",
+            "architecture": "dense",
+            "totalParams": "0.5B",
+            "activeParams": "0.5B",
+            "contextLength": 32768,
+            "seed": true,
+            "sources": {
+              "gguf": {
+                "type": "huggingface",
+                "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+                "file": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+                "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
+                "commit": "9217f5db79a29953eb74d5343926648285ec7e67",
+                "size": 491400032,
+                "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+                "quantization": "Q4_K_M"
+              }
+            },
+            "validated": {},
+            "weights": {
+              "gguf": {
+                "label": "GGUF file",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "acquisition": {
+                  "bytesNeeded": 491400032,
+                  "files": [
+                    {
+                      "file": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+                      "method": "download",
+                      "bytesNeeded": 491400032
+                    }
+                  ]
+                },
+                "runners": [
+                  "llama.cpp-cpu"
+                ]
+              }
+            },
+            "runners": {
+              "llama.cpp": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": null,
+                "context": null,
+                "admission": {
+                  "status": "incompatible",
+                  "reason": "llama.cpp is not available on this platform: this image does not include it.",
+                  "estimate": {
+                    "isEstimate": true
+                  },
+                  "warnings": []
+                }
+              },
+              "ik_llama.cpp": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": null,
+                "context": null,
+                "admission": {
+                  "status": "incompatible",
+                  "reason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+                  "estimate": {
+                    "isEstimate": true
+                  },
+                  "warnings": []
+                }
+              },
+              "lmstudio": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": null,
+                "context": null,
+                "admission": {
+                  "status": "incompatible",
+                  "reason": "LM Studio (internal use only) is not available on this platform: this image does not include it.",
+                  "estimate": {
+                    "isEstimate": true
+                  },
+                  "warnings": []
+                }
+              },
+              "llama.cpp-cpu": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": {
+                  "ctxSize": 4096,
+                  "parallel": 1,
+                  "loadMode": "mmap",
+                  "threads": null
+                },
+                "context": {
+                  "totalContext": 4096,
+                  "perRequestContext": 4096,
+                  "parallel": 1,
+                  "kvUnified": false
+                },
+                "admission": {
+                  "status": "insufficient-now",
+                  "reason": "The weights need 492 MiB of free disk (download or copy, with a 5 % reserve); 352 MiB is free.",
+                  "estimate": {
+                    "weightsBytes": 491400032,
+                    "kvBytes": 50331648,
+                    "computeBytes": 227457106,
+                    "runtimeBytes": 536870912,
+                    "cacheRamBytes": 268435456,
+                    "ramBytes": 1574495154,
+                    "poolBytes": 6442450944,
+                    "floorBytes": 644245095,
+                    "hostReserveBytes": 1610612736,
+                    "measured": false,
+                    "defaulted": [],
+                    "userSizing": [],
+                    "basis": "estimate, not measured on this machine: pinned weight size, f16 KV cache for ctxSize at 12288 bytes per token (from the catalog entry), compute buffers, runtime and the prompt cache bound",
+                    "isEstimate": true
+                  },
+                  "warnings": [
+                    "Runs on the CPU: no NVIDIA GPU is attached (No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU). Generation is much slower than on a GPU.",
+                    "Not measured on this machine: about 1.47 GiB is an estimate. The memory guard stops the runner at once if available memory falls below 614 MiB."
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "deployment": null,
+        "gatewayModel": "soul_gateway/local-llms/local-llm/default"
+      },
+      "log": [
+        "[controller] hardware profile: cpu (absent: No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no )"
+      ],
+      "calls": [
+        "/usr/local/nvidia/bin/nvidia-smi"
+      ]
+    },
+    "x64, base contract plus Vulkan keys": {
+      "overview": {
+        "profile": "cpu",
+        "profileDecision": {
+          "profile": "cpu",
+          "cause": "absent",
+          "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
+          "gpuName": null
+        },
+        "limits": {
+          "floorBytes": 644245095,
+          "hostReserveBytes": 1610612736,
+          "poolBytes": 6442450944,
+          "availableBytes": 5368709120
+        },
+        "hardware": {
+          "gpu": {
+            "available": false,
+            "state": "absent",
+            "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+          },
+          "memory": {
+            "totalBytes": 6442450944,
+            "availableBytes": 5368709120,
+            "swapFreeBytes": 0,
+            "freeBytes": 4294967296,
+            "cachedBytes": 1073741824
+          },
+          "disk": {
+            "freeBytes": 368640000,
+            "totalBytes": 409600000
+          },
+          "cpus": 4,
+          "cores": 4,
+          "cgroupMemory": null
+        },
+        "runners": [
+          {
+            "id": "llama.cpp",
+            "displayName": "llama.cpp",
+            "weightFormat": "gguf",
+            "pinnedVersion": "b11159",
+            "supported": false,
+            "paramSchema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "ctxSize": {
+                  "type": "integer",
+                  "minimum": 512,
+                  "maximum": 131072,
+                  "default": 4096,
+                  "title": "Context size",
+                  "description": "Total context window in tokens, shared by all parallel slots (at most the model's training context per slot). The KV cache lives in this machine's memory, so a larger context needs more of it."
+                },
+                "parallel": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4,
+                  "default": 1,
+                  "title": "Parallel slots",
+                  "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+                },
+                "loadMode": {
+                  "type": "string",
+                  "enum": [
+                    "mmap",
+                    "none"
+                  ],
+                  "default": "mmap",
+                  "title": "Load mode",
+                  "description": "mmap maps the weights from the file, so they are page cache the system can drop under memory pressure (generation then slows down); none reads them into memory the runner owns."
+                },
+                "threads": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "maximum": 256,
+                  "default": null,
+                  "title": "CPU threads",
+                  "description": "Number of CPU threads; empty uses the high-performance cores where cores differ, otherwise the physical cores minus 1 (four cores or fewer) or minus 2."
+                },
+                "chatTemplateKwargs": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "title": "Chat template arguments",
+                  "description": "Extra arguments passed to the Jinja chat template.",
+                  "properties": {
+                    "reasoning_effort": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high"
+                      ],
+                      "title": "Reasoning effort",
+                      "description": "Reasoning effort hint for models whose template supports it."
+                    },
+                    "preserve_thinking": {
+                      "type": "boolean",
+                      "title": "Preserve thinking",
+                      "description": "Keep earlier reasoning in the prompt, for templates that support it (Qwen3.6 with MTP)."
+                    }
+                  }
+                }
+              }
+            },
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "unsupportedReason": "llama.cpp is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "llama.cpp is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "ik_llama.cpp",
+            "displayName": "ik_llama.cpp",
+            "weightFormat": "gguf",
+            "pinnedVersion": "20f7a72",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "profileUnsupportedReason": "ik_llama.cpp needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "ollama",
+            "displayName": "Ollama",
+            "weightFormat": "ollama",
+            "pinnedVersion": "0.34.4",
+            "supported": true,
+            "paramSchema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "numCtx": {
+                  "type": "integer",
+                  "minimum": 512,
+                  "maximum": 131072,
+                  "default": 4096,
+                  "title": "Context size",
+                  "description": "Context window in tokens (num_ctx). The KV cache lives in this machine's memory, so a larger context needs more of it."
+                },
+                "numThread": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "maximum": 256,
+                  "default": null,
+                  "title": "CPU threads",
+                  "description": "Number of CPU threads; empty uses the Ollama default."
+                },
+                "keepAlive": {
+                  "type": "string",
+                  "pattern": "^(-1|0|[1-9][0-9]{0,4}[smh])$",
+                  "maxLength": 6,
+                  "default": "30m",
+                  "title": "Keep alive",
+                  "description": "How long the model stays loaded: -1 forever, 0 unload immediately, or e.g. 30m."
+                }
+              }
+            },
+            "basicParams": [
+              "numCtx"
+            ],
+            "moeParams": [],
+            "installed": false,
+            "version": null,
+            "reason": "fixture",
+            "enabled": true,
+            "install": {
+              "version": "0.34.4",
+              "totalBytes": 1549684612,
+              "files": 1,
+              "licence": {
+                "name": "MIT",
+                "url": "https://github.com/ollama/ollama/blob/v0.34.4/LICENSE",
+                "source": "https://github.com/ollama/ollama",
+                "notice": null,
+                "requiresAcceptance": false,
+                "proprietary": false
+              },
+              "cache": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 1549684612
+              },
+              "installed": false,
+              "record": null,
+              "runnable": false,
+              "state": null,
+              "installing": false
+            }
+          },
+          {
+            "id": "vllm",
+            "displayName": "vLLM",
+            "weightFormat": "hf",
+            "pinnedVersion": "0.30.0",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "maxModelLen",
+              "cpuOffloadGb"
+            ],
+            "moeParams": [],
+            "profileUnsupportedReason": "vLLM needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "vLLM is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "vLLM is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "tabbyapi",
+            "displayName": "TabbyAPI (ExLlamaV3)",
+            "weightFormat": "exl3",
+            "pinnedVersion": "f07131c",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "maxSeqLen",
+              "cacheMode"
+            ],
+            "moeParams": [],
+            "profileUnsupportedReason": "TabbyAPI (ExLlamaV3) needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "TabbyAPI (ExLlamaV3) is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "TabbyAPI (ExLlamaV3) is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "lmstudio",
+            "displayName": "LM Studio (internal use only)",
+            "weightFormat": "gguf",
+            "pinnedVersion": "0.0.25-1",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "profileUnsupportedReason": "LM Studio (internal use only) needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "LM Studio (internal use only) is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "LM Studio (internal use only) is not available on this platform: this image does not include it.",
+            "enabled": false,
+            "disabledReason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm."
+          },
+          {
+            "id": "llama.cpp-cpu",
+            "displayName": "llama.cpp (CPU build)",
+            "weightFormat": "gguf",
+            "pinnedVersion": "b11295",
+            "supported": true,
+            "paramSchema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "ctxSize": {
+                  "type": "integer",
+                  "minimum": 512,
+                  "maximum": 131072,
+                  "default": 4096,
+                  "title": "Context size",
+                  "description": "Total context window in tokens, shared by all parallel slots (at most the model's training context per slot). The KV cache lives in this machine's memory, so a larger context needs more of it."
+                },
+                "parallel": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4,
+                  "default": 1,
+                  "title": "Parallel slots",
+                  "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+                },
+                "loadMode": {
+                  "type": "string",
+                  "enum": [
+                    "mmap",
+                    "none"
+                  ],
+                  "default": "mmap",
+                  "title": "Load mode",
+                  "description": "mmap maps the weights from the file, so they are page cache the system can drop under memory pressure (generation then slows down); none reads them into memory the runner owns."
+                },
+                "threads": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "maximum": 256,
+                  "default": null,
+                  "title": "CPU threads",
+                  "description": "Number of CPU threads; empty uses the high-performance cores where cores differ, otherwise the physical cores minus 1 (four cores or fewer) or minus 2."
+                },
+                "chatTemplateKwargs": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "title": "Chat template arguments",
+                  "description": "Extra arguments passed to the Jinja chat template.",
+                  "properties": {
+                    "reasoning_effort": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high"
+                      ],
+                      "title": "Reasoning effort",
+                      "description": "Reasoning effort hint for models whose template supports it."
+                    },
+                    "preserve_thinking": {
+                      "type": "boolean",
+                      "title": "Preserve thinking",
+                      "description": "Keep earlier reasoning in the prompt, for templates that support it (Qwen3.6 with MTP)."
+                    }
+                  }
+                }
+              }
+            },
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "installed": false,
+            "version": null,
+            "reason": "fixture",
+            "enabled": true,
+            "install": {
+              "version": "b11295",
+              "totalBytes": 13577862,
+              "files": 1,
+              "licence": {
+                "name": "MIT",
+                "url": "https://github.com/ggml-org/llama.cpp/blob/b11295/LICENSE",
+                "source": "https://github.com/ggml-org/llama.cpp",
+                "notice": null,
+                "requiresAcceptance": false,
+                "proprietary": false
+              },
+              "cache": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 13577862
+              },
+              "installed": false,
+              "record": null,
+              "runnable": false,
+              "state": null,
+              "installing": false
+            }
+          }
+        ],
+        "unsupportedModels": [],
+        "models": [
+          {
+            "id": "qwen2.5-0.5b-instruct-q4_k_m",
+            "displayName": "Qwen2.5 0.5B Instruct (Q4_K_M)",
+            "description": "A small dense chat model that runs on the CPU of a machine with a few GiB of free RAM; the quickest way to check that a machine can serve a model.",
+            "license": "Apache-2.0",
+            "architecture": "dense",
+            "totalParams": "0.5B",
+            "activeParams": "0.5B",
+            "contextLength": 32768,
+            "seed": true,
+            "sources": {
+              "gguf": {
+                "type": "huggingface",
+                "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+                "file": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+                "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
+                "commit": "9217f5db79a29953eb74d5343926648285ec7e67",
+                "size": 491400032,
+                "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+                "quantization": "Q4_K_M"
+              }
+            },
+            "validated": {},
+            "weights": {
+              "gguf": {
+                "label": "GGUF file",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "acquisition": {
+                  "bytesNeeded": 491400032,
+                  "files": [
+                    {
+                      "file": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+                      "method": "download",
+                      "bytesNeeded": 491400032
+                    }
+                  ]
+                },
+                "runners": [
+                  "llama.cpp-cpu"
+                ]
+              }
+            },
+            "runners": {
+              "llama.cpp": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": null,
+                "context": null,
+                "admission": {
+                  "status": "incompatible",
+                  "reason": "llama.cpp is not available on this platform: this image does not include it.",
+                  "estimate": {
+                    "isEstimate": true
+                  },
+                  "warnings": []
+                }
+              },
+              "ik_llama.cpp": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": null,
+                "context": null,
+                "admission": {
+                  "status": "incompatible",
+                  "reason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+                  "estimate": {
+                    "isEstimate": true
+                  },
+                  "warnings": []
+                }
+              },
+              "lmstudio": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": null,
+                "context": null,
+                "admission": {
+                  "status": "incompatible",
+                  "reason": "LM Studio (internal use only) is not available on this platform: this image does not include it.",
+                  "estimate": {
+                    "isEstimate": true
+                  },
+                  "warnings": []
+                }
+              },
+              "llama.cpp-cpu": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": {
+                  "ctxSize": 4096,
+                  "parallel": 1,
+                  "loadMode": "mmap",
+                  "threads": null
+                },
+                "context": {
+                  "totalContext": 4096,
+                  "perRequestContext": 4096,
+                  "parallel": 1,
+                  "kvUnified": false
+                },
+                "admission": {
+                  "status": "insufficient-now",
+                  "reason": "The weights need 492 MiB of free disk (download or copy, with a 5 % reserve); 352 MiB is free.",
+                  "estimate": {
+                    "weightsBytes": 491400032,
+                    "kvBytes": 50331648,
+                    "computeBytes": 227457106,
+                    "runtimeBytes": 536870912,
+                    "cacheRamBytes": 268435456,
+                    "ramBytes": 1574495154,
+                    "poolBytes": 6442450944,
+                    "floorBytes": 644245095,
+                    "hostReserveBytes": 1610612736,
+                    "measured": false,
+                    "defaulted": [],
+                    "userSizing": [],
+                    "basis": "estimate, not measured on this machine: pinned weight size, f16 KV cache for ctxSize at 12288 bytes per token (from the catalog entry), compute buffers, runtime and the prompt cache bound",
+                    "isEstimate": true
+                  },
+                  "warnings": [
+                    "Runs on the CPU: no NVIDIA GPU is attached (No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU). Generation is much slower than on a GPU.",
+                    "Not measured on this machine: about 1.47 GiB is an estimate. The memory guard stops the runner at once if available memory falls below 614 MiB."
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "deployment": null,
+        "gatewayModel": "soul_gateway/local-llms/local-llm/default"
+      },
+      "log": [
+        "[controller] hardware profile: cpu (absent: No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no )"
+      ],
+      "calls": [
+        "/usr/local/nvidia/bin/nvidia-smi"
+      ]
+    },
+    "arm64, base contract": {
+      "overview": {
+        "profile": "cpu",
+        "profileDecision": {
+          "profile": "cpu",
+          "cause": "absent",
+          "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
+          "gpuName": null
+        },
+        "limits": {
+          "floorBytes": 644245095,
+          "hostReserveBytes": 1610612736,
+          "poolBytes": 6442450944,
+          "availableBytes": 5368709120
+        },
+        "hardware": {
+          "gpu": {
+            "available": false,
+            "state": "absent",
+            "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+          },
+          "memory": {
+            "totalBytes": 6442450944,
+            "availableBytes": 5368709120,
+            "swapFreeBytes": 0,
+            "freeBytes": 4294967296,
+            "cachedBytes": 1073741824
+          },
+          "disk": {
+            "freeBytes": 368640000,
+            "totalBytes": 409600000
+          },
+          "cpus": 4,
+          "cores": 4,
+          "cgroupMemory": null
+        },
+        "runners": [
+          {
+            "id": "llama.cpp",
+            "displayName": "llama.cpp",
+            "weightFormat": "gguf",
+            "pinnedVersion": "b11159",
+            "supported": false,
+            "paramSchema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "ctxSize": {
+                  "type": "integer",
+                  "minimum": 512,
+                  "maximum": 131072,
+                  "default": 4096,
+                  "title": "Context size",
+                  "description": "Total context window in tokens, shared by all parallel slots (at most the model's training context per slot). The KV cache lives in this machine's memory, so a larger context needs more of it."
+                },
+                "parallel": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4,
+                  "default": 1,
+                  "title": "Parallel slots",
+                  "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+                },
+                "loadMode": {
+                  "type": "string",
+                  "enum": [
+                    "mmap",
+                    "none"
+                  ],
+                  "default": "mmap",
+                  "title": "Load mode",
+                  "description": "mmap maps the weights from the file, so they are page cache the system can drop under memory pressure (generation then slows down); none reads them into memory the runner owns."
+                },
+                "threads": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "maximum": 256,
+                  "default": null,
+                  "title": "CPU threads",
+                  "description": "Number of CPU threads; empty uses the high-performance cores where cores differ, otherwise the physical cores minus 1 (four cores or fewer) or minus 2."
+                },
+                "chatTemplateKwargs": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "title": "Chat template arguments",
+                  "description": "Extra arguments passed to the Jinja chat template.",
+                  "properties": {
+                    "reasoning_effort": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high"
+                      ],
+                      "title": "Reasoning effort",
+                      "description": "Reasoning effort hint for models whose template supports it."
+                    },
+                    "preserve_thinking": {
+                      "type": "boolean",
+                      "title": "Preserve thinking",
+                      "description": "Keep earlier reasoning in the prompt, for templates that support it (Qwen3.6 with MTP)."
+                    }
+                  }
+                }
+              }
+            },
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "unsupportedReason": "llama.cpp is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "llama.cpp is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "ik_llama.cpp",
+            "displayName": "ik_llama.cpp",
+            "weightFormat": "gguf",
+            "pinnedVersion": "20f7a72",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "profileUnsupportedReason": "ik_llama.cpp needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "ollama",
+            "displayName": "Ollama",
+            "weightFormat": "ollama",
+            "pinnedVersion": "0.34.4",
+            "supported": true,
+            "paramSchema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "numCtx": {
+                  "type": "integer",
+                  "minimum": 512,
+                  "maximum": 131072,
+                  "default": 4096,
+                  "title": "Context size",
+                  "description": "Context window in tokens (num_ctx). The KV cache lives in this machine's memory, so a larger context needs more of it."
+                },
+                "numThread": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "maximum": 256,
+                  "default": null,
+                  "title": "CPU threads",
+                  "description": "Number of CPU threads; empty uses the Ollama default."
+                },
+                "keepAlive": {
+                  "type": "string",
+                  "pattern": "^(-1|0|[1-9][0-9]{0,4}[smh])$",
+                  "maxLength": 6,
+                  "default": "30m",
+                  "title": "Keep alive",
+                  "description": "How long the model stays loaded: -1 forever, 0 unload immediately, or e.g. 30m."
+                }
+              }
+            },
+            "basicParams": [
+              "numCtx"
+            ],
+            "moeParams": [],
+            "installed": false,
+            "version": null,
+            "reason": "fixture",
+            "enabled": true,
+            "install": {
+              "version": "0.34.4",
+              "totalBytes": 1549684612,
+              "files": 1,
+              "licence": {
+                "name": "MIT",
+                "url": "https://github.com/ollama/ollama/blob/v0.34.4/LICENSE",
+                "source": "https://github.com/ollama/ollama",
+                "notice": null,
+                "requiresAcceptance": false,
+                "proprietary": false
+              },
+              "cache": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 1549684612
+              },
+              "installed": false,
+              "record": null,
+              "runnable": false,
+              "state": null,
+              "installing": false
+            }
+          },
+          {
+            "id": "vllm",
+            "displayName": "vLLM",
+            "weightFormat": "hf",
+            "pinnedVersion": "0.30.0",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "maxModelLen",
+              "cpuOffloadGb"
+            ],
+            "moeParams": [],
+            "profileUnsupportedReason": "vLLM needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "vLLM is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "vLLM is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "tabbyapi",
+            "displayName": "TabbyAPI (ExLlamaV3)",
+            "weightFormat": "exl3",
+            "pinnedVersion": "f07131c",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "maxSeqLen",
+              "cacheMode"
+            ],
+            "moeParams": [],
+            "profileUnsupportedReason": "TabbyAPI (ExLlamaV3) needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "TabbyAPI (ExLlamaV3) is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "TabbyAPI (ExLlamaV3) is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "lmstudio",
+            "displayName": "LM Studio (internal use only)",
+            "weightFormat": "gguf",
+            "pinnedVersion": "0.0.25-1",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "profileUnsupportedReason": "LM Studio (internal use only) needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "LM Studio (internal use only) is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "LM Studio (internal use only) is not available on this platform: this image does not include it.",
+            "enabled": false,
+            "disabledReason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm."
+          },
+          {
+            "id": "llama.cpp-cpu",
+            "displayName": "llama.cpp (CPU build)",
+            "weightFormat": "gguf",
+            "pinnedVersion": "b11295",
+            "supported": true,
+            "paramSchema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "ctxSize": {
+                  "type": "integer",
+                  "minimum": 512,
+                  "maximum": 131072,
+                  "default": 4096,
+                  "title": "Context size",
+                  "description": "Total context window in tokens, shared by all parallel slots (at most the model's training context per slot). The KV cache lives in this machine's memory, so a larger context needs more of it."
+                },
+                "parallel": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4,
+                  "default": 1,
+                  "title": "Parallel slots",
+                  "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+                },
+                "loadMode": {
+                  "type": "string",
+                  "enum": [
+                    "mmap",
+                    "none"
+                  ],
+                  "default": "mmap",
+                  "title": "Load mode",
+                  "description": "mmap maps the weights from the file, so they are page cache the system can drop under memory pressure (generation then slows down); none reads them into memory the runner owns."
+                },
+                "threads": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "maximum": 256,
+                  "default": null,
+                  "title": "CPU threads",
+                  "description": "Number of CPU threads; empty uses the high-performance cores where cores differ, otherwise the physical cores minus 1 (four cores or fewer) or minus 2."
+                },
+                "chatTemplateKwargs": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "title": "Chat template arguments",
+                  "description": "Extra arguments passed to the Jinja chat template.",
+                  "properties": {
+                    "reasoning_effort": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high"
+                      ],
+                      "title": "Reasoning effort",
+                      "description": "Reasoning effort hint for models whose template supports it."
+                    },
+                    "preserve_thinking": {
+                      "type": "boolean",
+                      "title": "Preserve thinking",
+                      "description": "Keep earlier reasoning in the prompt, for templates that support it (Qwen3.6 with MTP)."
+                    }
+                  }
+                }
+              }
+            },
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "installed": false,
+            "version": null,
+            "reason": "fixture",
+            "enabled": true,
+            "install": {
+              "version": "b11295",
+              "totalBytes": 13577862,
+              "files": 1,
+              "licence": {
+                "name": "MIT",
+                "url": "https://github.com/ggml-org/llama.cpp/blob/b11295/LICENSE",
+                "source": "https://github.com/ggml-org/llama.cpp",
+                "notice": null,
+                "requiresAcceptance": false,
+                "proprietary": false
+              },
+              "cache": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 13577862
+              },
+              "installed": false,
+              "record": null,
+              "runnable": false,
+              "state": null,
+              "installing": false
+            }
+          }
+        ],
+        "unsupportedModels": [],
+        "models": [
+          {
+            "id": "qwen2.5-0.5b-instruct-q4_k_m",
+            "displayName": "Qwen2.5 0.5B Instruct (Q4_K_M)",
+            "description": "A small dense chat model that runs on the CPU of a machine with a few GiB of free RAM; the quickest way to check that a machine can serve a model.",
+            "license": "Apache-2.0",
+            "architecture": "dense",
+            "totalParams": "0.5B",
+            "activeParams": "0.5B",
+            "contextLength": 32768,
+            "seed": true,
+            "sources": {
+              "gguf": {
+                "type": "huggingface",
+                "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+                "file": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+                "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
+                "commit": "9217f5db79a29953eb74d5343926648285ec7e67",
+                "size": 491400032,
+                "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+                "quantization": "Q4_K_M"
+              }
+            },
+            "validated": {},
+            "weights": {
+              "gguf": {
+                "label": "GGUF file",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "acquisition": {
+                  "bytesNeeded": 491400032,
+                  "files": [
+                    {
+                      "file": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+                      "method": "download",
+                      "bytesNeeded": 491400032
+                    }
+                  ]
+                },
+                "runners": [
+                  "llama.cpp-cpu"
+                ]
+              }
+            },
+            "runners": {
+              "llama.cpp": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": null,
+                "context": null,
+                "admission": {
+                  "status": "incompatible",
+                  "reason": "llama.cpp is not available on this platform: this image does not include it.",
+                  "estimate": {
+                    "isEstimate": true
+                  },
+                  "warnings": []
+                }
+              },
+              "ik_llama.cpp": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": null,
+                "context": null,
+                "admission": {
+                  "status": "incompatible",
+                  "reason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+                  "estimate": {
+                    "isEstimate": true
+                  },
+                  "warnings": []
+                }
+              },
+              "lmstudio": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": null,
+                "context": null,
+                "admission": {
+                  "status": "incompatible",
+                  "reason": "LM Studio (internal use only) is not available on this platform: this image does not include it.",
+                  "estimate": {
+                    "isEstimate": true
+                  },
+                  "warnings": []
+                }
+              },
+              "llama.cpp-cpu": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": {
+                  "ctxSize": 4096,
+                  "parallel": 1,
+                  "loadMode": "mmap",
+                  "threads": null
+                },
+                "context": {
+                  "totalContext": 4096,
+                  "perRequestContext": 4096,
+                  "parallel": 1,
+                  "kvUnified": false
+                },
+                "admission": {
+                  "status": "insufficient-now",
+                  "reason": "The weights need 492 MiB of free disk (download or copy, with a 5 % reserve); 352 MiB is free.",
+                  "estimate": {
+                    "weightsBytes": 491400032,
+                    "kvBytes": 50331648,
+                    "computeBytes": 227457106,
+                    "runtimeBytes": 536870912,
+                    "cacheRamBytes": 268435456,
+                    "ramBytes": 1574495154,
+                    "poolBytes": 6442450944,
+                    "floorBytes": 644245095,
+                    "hostReserveBytes": 1610612736,
+                    "measured": false,
+                    "defaulted": [],
+                    "userSizing": [],
+                    "basis": "estimate, not measured on this machine: pinned weight size, f16 KV cache for ctxSize at 12288 bytes per token (from the catalog entry), compute buffers, runtime and the prompt cache bound",
+                    "isEstimate": true
+                  },
+                  "warnings": [
+                    "Runs on the CPU: no NVIDIA GPU is attached (No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU). Generation is much slower than on a GPU.",
+                    "Not measured on this machine: about 1.47 GiB is an estimate. The memory guard stops the runner at once if available memory falls below 614 MiB."
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "deployment": null,
+        "gatewayModel": "soul_gateway/local-llms/local-llm/default"
+      },
+      "log": [
+        "[controller] hardware profile: cpu (absent: No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no )"
+      ],
+      "calls": [
+        "/usr/local/nvidia/bin/nvidia-smi"
+      ]
+    },
+    "arm64, base contract plus Vulkan keys": {
+      "overview": {
+        "profile": "cpu",
+        "profileDecision": {
+          "profile": "cpu",
+          "cause": "absent",
+          "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
+          "gpuName": null
+        },
+        "limits": {
+          "floorBytes": 644245095,
+          "hostReserveBytes": 1610612736,
+          "poolBytes": 6442450944,
+          "availableBytes": 5368709120
+        },
+        "hardware": {
+          "gpu": {
+            "available": false,
+            "state": "absent",
+            "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+          },
+          "memory": {
+            "totalBytes": 6442450944,
+            "availableBytes": 5368709120,
+            "swapFreeBytes": 0,
+            "freeBytes": 4294967296,
+            "cachedBytes": 1073741824
+          },
+          "disk": {
+            "freeBytes": 368640000,
+            "totalBytes": 409600000
+          },
+          "cpus": 4,
+          "cores": 4,
+          "cgroupMemory": null
+        },
+        "runners": [
+          {
+            "id": "llama.cpp",
+            "displayName": "llama.cpp",
+            "weightFormat": "gguf",
+            "pinnedVersion": "b11159",
+            "supported": false,
+            "paramSchema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "ctxSize": {
+                  "type": "integer",
+                  "minimum": 512,
+                  "maximum": 131072,
+                  "default": 4096,
+                  "title": "Context size",
+                  "description": "Total context window in tokens, shared by all parallel slots (at most the model's training context per slot). The KV cache lives in this machine's memory, so a larger context needs more of it."
+                },
+                "parallel": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4,
+                  "default": 1,
+                  "title": "Parallel slots",
+                  "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+                },
+                "loadMode": {
+                  "type": "string",
+                  "enum": [
+                    "mmap",
+                    "none"
+                  ],
+                  "default": "mmap",
+                  "title": "Load mode",
+                  "description": "mmap maps the weights from the file, so they are page cache the system can drop under memory pressure (generation then slows down); none reads them into memory the runner owns."
+                },
+                "threads": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "maximum": 256,
+                  "default": null,
+                  "title": "CPU threads",
+                  "description": "Number of CPU threads; empty uses the high-performance cores where cores differ, otherwise the physical cores minus 1 (four cores or fewer) or minus 2."
+                },
+                "chatTemplateKwargs": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "title": "Chat template arguments",
+                  "description": "Extra arguments passed to the Jinja chat template.",
+                  "properties": {
+                    "reasoning_effort": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high"
+                      ],
+                      "title": "Reasoning effort",
+                      "description": "Reasoning effort hint for models whose template supports it."
+                    },
+                    "preserve_thinking": {
+                      "type": "boolean",
+                      "title": "Preserve thinking",
+                      "description": "Keep earlier reasoning in the prompt, for templates that support it (Qwen3.6 with MTP)."
+                    }
+                  }
+                }
+              }
+            },
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "unsupportedReason": "llama.cpp is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "llama.cpp is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "ik_llama.cpp",
+            "displayName": "ik_llama.cpp",
+            "weightFormat": "gguf",
+            "pinnedVersion": "20f7a72",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "profileUnsupportedReason": "ik_llama.cpp needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "ollama",
+            "displayName": "Ollama",
+            "weightFormat": "ollama",
+            "pinnedVersion": "0.34.4",
+            "supported": true,
+            "paramSchema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "numCtx": {
+                  "type": "integer",
+                  "minimum": 512,
+                  "maximum": 131072,
+                  "default": 4096,
+                  "title": "Context size",
+                  "description": "Context window in tokens (num_ctx). The KV cache lives in this machine's memory, so a larger context needs more of it."
+                },
+                "numThread": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "maximum": 256,
+                  "default": null,
+                  "title": "CPU threads",
+                  "description": "Number of CPU threads; empty uses the Ollama default."
+                },
+                "keepAlive": {
+                  "type": "string",
+                  "pattern": "^(-1|0|[1-9][0-9]{0,4}[smh])$",
+                  "maxLength": 6,
+                  "default": "30m",
+                  "title": "Keep alive",
+                  "description": "How long the model stays loaded: -1 forever, 0 unload immediately, or e.g. 30m."
+                }
+              }
+            },
+            "basicParams": [
+              "numCtx"
+            ],
+            "moeParams": [],
+            "installed": false,
+            "version": null,
+            "reason": "fixture",
+            "enabled": true,
+            "install": {
+              "version": "0.34.4",
+              "totalBytes": 1549684612,
+              "files": 1,
+              "licence": {
+                "name": "MIT",
+                "url": "https://github.com/ollama/ollama/blob/v0.34.4/LICENSE",
+                "source": "https://github.com/ollama/ollama",
+                "notice": null,
+                "requiresAcceptance": false,
+                "proprietary": false
+              },
+              "cache": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 1549684612
+              },
+              "installed": false,
+              "record": null,
+              "runnable": false,
+              "state": null,
+              "installing": false
+            }
+          },
+          {
+            "id": "vllm",
+            "displayName": "vLLM",
+            "weightFormat": "hf",
+            "pinnedVersion": "0.30.0",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "maxModelLen",
+              "cpuOffloadGb"
+            ],
+            "moeParams": [],
+            "profileUnsupportedReason": "vLLM needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "vLLM is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "vLLM is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "tabbyapi",
+            "displayName": "TabbyAPI (ExLlamaV3)",
+            "weightFormat": "exl3",
+            "pinnedVersion": "f07131c",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "maxSeqLen",
+              "cacheMode"
+            ],
+            "moeParams": [],
+            "profileUnsupportedReason": "TabbyAPI (ExLlamaV3) needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "TabbyAPI (ExLlamaV3) is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "TabbyAPI (ExLlamaV3) is not available on this platform: this image does not include it.",
+            "enabled": true
+          },
+          {
+            "id": "lmstudio",
+            "displayName": "LM Studio (internal use only)",
+            "weightFormat": "gguf",
+            "pinnedVersion": "0.0.25-1",
+            "supported": false,
+            "paramSchema": null,
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "profileUnsupportedReason": "LM Studio (internal use only) needs an NVIDIA GPU in this release; on this machine models run on the CPU with the runners listed in the Runners tab.",
+            "unsupportedReason": "LM Studio (internal use only) is not available on this platform: this image does not include it.",
+            "installed": false,
+            "version": null,
+            "reason": "LM Studio (internal use only) is not available on this platform: this image does not include it.",
+            "enabled": false,
+            "disabledReason": "LM Studio is not enabled on this deployment (internal use only). Its Terms allow only personal and internal business use and forbid offering it as a service, so it stays off on deployments offered to other people. This deployment's operator enables it with \"ploinky var LOCAL_LLM_LMSTUDIO internal-use\" and a restart of local-llm."
+          },
+          {
+            "id": "llama.cpp-cpu",
+            "displayName": "llama.cpp (CPU build)",
+            "weightFormat": "gguf",
+            "pinnedVersion": "b11295",
+            "supported": true,
+            "paramSchema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "ctxSize": {
+                  "type": "integer",
+                  "minimum": 512,
+                  "maximum": 131072,
+                  "default": 4096,
+                  "title": "Context size",
+                  "description": "Total context window in tokens, shared by all parallel slots (at most the model's training context per slot). The KV cache lives in this machine's memory, so a larger context needs more of it."
+                },
+                "parallel": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4,
+                  "default": 1,
+                  "title": "Parallel slots",
+                  "description": "Number of concurrent request slots; above 1 the slots share one unified KV cache."
+                },
+                "loadMode": {
+                  "type": "string",
+                  "enum": [
+                    "mmap",
+                    "none"
+                  ],
+                  "default": "mmap",
+                  "title": "Load mode",
+                  "description": "mmap maps the weights from the file, so they are page cache the system can drop under memory pressure (generation then slows down); none reads them into memory the runner owns."
+                },
+                "threads": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "maximum": 256,
+                  "default": null,
+                  "title": "CPU threads",
+                  "description": "Number of CPU threads; empty uses the high-performance cores where cores differ, otherwise the physical cores minus 1 (four cores or fewer) or minus 2."
+                },
+                "chatTemplateKwargs": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "title": "Chat template arguments",
+                  "description": "Extra arguments passed to the Jinja chat template.",
+                  "properties": {
+                    "reasoning_effort": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high"
+                      ],
+                      "title": "Reasoning effort",
+                      "description": "Reasoning effort hint for models whose template supports it."
+                    },
+                    "preserve_thinking": {
+                      "type": "boolean",
+                      "title": "Preserve thinking",
+                      "description": "Keep earlier reasoning in the prompt, for templates that support it (Qwen3.6 with MTP)."
+                    }
+                  }
+                }
+              }
+            },
+            "basicParams": [
+              "ctxSize",
+              "nCpuMoe"
+            ],
+            "moeParams": [
+              "nCpuMoe"
+            ],
+            "installed": false,
+            "version": null,
+            "reason": "fixture",
+            "enabled": true,
+            "install": {
+              "version": "b11295",
+              "totalBytes": 13577862,
+              "files": 1,
+              "licence": {
+                "name": "MIT",
+                "url": "https://github.com/ggml-org/llama.cpp/blob/b11295/LICENSE",
+                "source": "https://github.com/ggml-org/llama.cpp",
+                "notice": null,
+                "requiresAcceptance": false,
+                "proprietary": false
+              },
+              "cache": {
+                "state": "absent",
+                "bytes": 0,
+                "total": 13577862
+              },
+              "installed": false,
+              "record": null,
+              "runnable": false,
+              "state": null,
+              "installing": false
+            }
+          }
+        ],
+        "unsupportedModels": [],
+        "models": [
+          {
+            "id": "qwen2.5-0.5b-instruct-q4_k_m",
+            "displayName": "Qwen2.5 0.5B Instruct (Q4_K_M)",
+            "description": "A small dense chat model that runs on the CPU of a machine with a few GiB of free RAM; the quickest way to check that a machine can serve a model.",
+            "license": "Apache-2.0",
+            "architecture": "dense",
+            "totalParams": "0.5B",
+            "activeParams": "0.5B",
+            "contextLength": 32768,
+            "seed": true,
+            "sources": {
+              "gguf": {
+                "type": "huggingface",
+                "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+                "file": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+                "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
+                "commit": "9217f5db79a29953eb74d5343926648285ec7e67",
+                "size": 491400032,
+                "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+                "quantization": "Q4_K_M"
+              }
+            },
+            "validated": {},
+            "weights": {
+              "gguf": {
+                "label": "GGUF file",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "acquisition": {
+                  "bytesNeeded": 491400032,
+                  "files": [
+                    {
+                      "file": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+                      "method": "download",
+                      "bytesNeeded": 491400032
+                    }
+                  ]
+                },
+                "runners": [
+                  "llama.cpp-cpu"
+                ]
+              }
+            },
+            "runners": {
+              "llama.cpp": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": null,
+                "context": null,
+                "admission": {
+                  "status": "incompatible",
+                  "reason": "llama.cpp is not available on this platform: this image does not include it.",
+                  "estimate": {
+                    "isEstimate": true
+                  },
+                  "warnings": []
+                }
+              },
+              "ik_llama.cpp": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": null,
+                "context": null,
+                "admission": {
+                  "status": "incompatible",
+                  "reason": "ik_llama.cpp is not available on this platform: this image does not include it.",
+                  "estimate": {
+                    "isEstimate": true
+                  },
+                  "warnings": []
+                }
+              },
+              "lmstudio": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": null,
+                "context": null,
+                "admission": {
+                  "status": "incompatible",
+                  "reason": "LM Studio (internal use only) is not available on this platform: this image does not include it.",
+                  "estimate": {
+                    "isEstimate": true
+                  },
+                  "warnings": []
+                }
+              },
+              "llama.cpp-cpu": {
+                "format": "gguf",
+                "size": 491400032,
+                "download": {
+                  "state": "absent",
+                  "bytes": 0,
+                  "total": 491400032
+                },
+                "params": {
+                  "ctxSize": 4096,
+                  "parallel": 1,
+                  "loadMode": "mmap",
+                  "threads": null
+                },
+                "context": {
+                  "totalContext": 4096,
+                  "perRequestContext": 4096,
+                  "parallel": 1,
+                  "kvUnified": false
+                },
+                "admission": {
+                  "status": "insufficient-now",
+                  "reason": "The weights need 492 MiB of free disk (download or copy, with a 5 % reserve); 352 MiB is free.",
+                  "estimate": {
+                    "weightsBytes": 491400032,
+                    "kvBytes": 50331648,
+                    "computeBytes": 227457106,
+                    "runtimeBytes": 536870912,
+                    "cacheRamBytes": 268435456,
+                    "ramBytes": 1574495154,
+                    "poolBytes": 6442450944,
+                    "floorBytes": 644245095,
+                    "hostReserveBytes": 1610612736,
+                    "measured": false,
+                    "defaulted": [],
+                    "userSizing": [],
+                    "basis": "estimate, not measured on this machine: pinned weight size, f16 KV cache for ctxSize at 12288 bytes per token (from the catalog entry), compute buffers, runtime and the prompt cache bound",
+                    "isEstimate": true
+                  },
+                  "warnings": [
+                    "Runs on the CPU: no NVIDIA GPU is attached (No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU). Generation is much slower than on a GPU.",
+                    "Not measured on this machine: about 1.47 GiB is an estimate. The memory guard stops the runner at once if available memory falls below 614 MiB."
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "deployment": null,
+        "gatewayModel": "soul_gateway/local-llms/local-llm/default"
+      },
+      "log": [
+        "[controller] hardware profile: cpu (absent: No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no )"
+      ],
+      "calls": [
+        "/usr/local/nvidia/bin/nvidia-smi"
+      ]
+    }
+  }
+}

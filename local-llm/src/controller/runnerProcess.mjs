@@ -70,6 +70,13 @@ const CPU_BUFFER_PATTERNS = Object.freeze([
     ['computeMiB', /\bCPU(?:_[A-Za-z0-9]+)? compute buffer size =\s+([\d.]+) MiB/],
 ]);
 
+const VULKAN_BUFFER_PATTERNS = Object.freeze([
+    ['modelMiB', /Vulkan0 (?:model )?buffer size =\s+([\d.]+) MiB/],
+    ['kvMiB', /Vulkan0 KV buffer size =\s+([\d.]+) MiB/],
+    ['computeMiB', /Vulkan0 compute buffer size =\s+([\d.]+) MiB/],
+]);
+const VULKAN_DEVICE_PATTERN = /using device (Vulkan\d+) \((.*)\) \(([^()]*)\) - (\d+) MiB free/;
+
 /**
  * What the runner itself reports about its GPU or CPU use, from its log lines.
  * `profile` is the deployment's: on `cpu` the CPU lines are read whenever no
@@ -78,6 +85,7 @@ const CPU_BUFFER_PATTERNS = Object.freeze([
  * device never shows a CPU.
  */
 export function parseRunnerReport(lines, { profile = null } = {}) {
+    const vulkan = profile === 'vulkan' || profile === 'venus';
     const report = { modelMiB: null, kvMiB: null, computeMiB: null, offloaded: null, device: null };
     const sums = { kvMiB: 0 };
     const cpu = { modelMiB: null, kvMiB: null, computeMiB: null };
@@ -100,7 +108,7 @@ export function parseRunnerReport(lines, { profile = null } = {}) {
         // "common_param:   - CPU     : CPU (5894 MiB, 5894 MiB free)". No instruction-set variant is logged, so none is claimed.
         if (/common_param:\s+-\s+CPU\s+:\s+CPU\b/.test(line)) cpuDevice = true;
         if (/load_backend: loaded CUDA backend/.test(line)) cudaBackend = true;
-        for (const [key, pattern] of BUFFER_PATTERNS) {
+        for (const [key, pattern] of vulkan ? VULKAN_BUFFER_PATTERNS : BUFFER_PATTERNS) {
             const match = pattern.exec(line);
             if (!match) continue;
             if (key === 'kvMiB') {
@@ -112,14 +120,14 @@ export function parseRunnerReport(lines, { profile = null } = {}) {
         }
         const offloaded = /offloaded (\d+)\/(\d+) layers to GPU/.exec(line);
         if (offloaded) report.offloaded = { layers: Number(offloaded[1]), of: Number(offloaded[2]) };
-        const device = /using device (CUDA\d+) \(([^)]+)\)/.exec(line);
+        const device = (vulkan ? VULKAN_DEVICE_PATTERN : /using device (CUDA\d+) \(([^)]+)\)/).exec(line);
         if (device) report.device = `${device[1]} (${device[2]})`;
         // ik_llama.cpp names the GPU in its CUDA init lines instead.
         const listed = /^\s*Device (\d+): ([^,]+), compute capability/.exec(line);
-        if (listed) report.device = `CUDA${listed[1]} (${listed[2]})`;
+        if (listed && !vulkan) report.device = `CUDA${listed[1]} (${listed[2]})`;
     }
     // A run with no CUDA device or buffer is on the CPU (a CUDA build loads its CPU backend too, so that line alone says nothing).
-    if ((profile === 'cpu' || !cudaBackend) && report.device === null && ['modelMiB', 'kvMiB', 'computeMiB'].every((key) => report[key] === null)) {
+    if (!vulkan && (profile === 'cpu' || !cudaBackend) && report.device === null && ['modelMiB', 'kvMiB', 'computeMiB'].every((key) => report[key] === null)) {
         Object.assign(report, cpu);
         // The device list also names the CPU beside a GPU, so it says "CPU" only where the deployment is on the cpu profile.
         report.device = cpuBackend ?? (profile === 'cpu' && cpuDevice ? 'CPU' : null);

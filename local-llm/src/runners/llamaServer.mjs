@@ -8,7 +8,8 @@ import path from 'node:path';
 
 import { admitLlamaServer, admissionResult } from '../controller/admission.mjs';
 import { cpuDefaultThreads, defaultThreads, performanceCoreCount, physicalCoreCount } from '../controller/hardware.mjs';
-import { CPU, UNIFIED, admitCpuLlamaServer, admitUnifiedLlamaServer } from '../controller/profiles.mjs';
+import { CPU, UNIFIED, admitCpuLlamaServer, admitUnifiedLlamaServer, admitVenusLlamaServer } from '../controller/profiles.mjs';
+import { VULKAN_ALL_ICD_FILES, isVulkanProfile, vulkanProbeEnv } from '../controller/vulkan.mjs';
 import { parseRunnerReport } from '../controller/runnerProcess.mjs';
 import {
     ParamError,
@@ -186,6 +187,15 @@ export const LLAMA_SERVER_CPU_PARAM_SCHEMA = deepFreeze({
 
 const UNIFIED_BATCH = UNIFIED.batchSize;
 
+export const LLAMA_SERVER_VENUS_PARAM_SCHEMA = deepFreeze({
+    type: 'object', additionalProperties: false,
+    properties: {
+        ctxSize: { type: 'integer', minimum: 512, maximum: 131072, default: 4096, title: 'Context size' },
+        parallel: { type: 'integer', minimum: 1, maximum: 4, default: 1, title: 'Parallel slots' },
+        loadMode: { type: 'string', enum: ['auto', 'none'], default: 'auto', title: 'Load mode' },
+    },
+});
+
 function assertModelId(model) {
     if (typeof model?.id !== 'string' || model.id.length === 0) {
         throw codedError('invalid_launch', 'model.id must be a non-empty string', { field: 'model.id' });
@@ -217,7 +227,7 @@ function assertModelId(model) {
  * read once, on the first launch that needs it.
  */
 export function createLlamaServerRunner({
-    id, displayName, executable, runnable = null, pinnedVersion, port, dialect, profiles = null,
+    id, displayName, executable, runnable = null, pinnedVersion, port, dialect, profiles = null, backend = 'cuda',
     cpuCores = physicalCoreCount, perfCores = performanceCoreCount,
 }) {
     if (!executable && !runnable) throw new Error(`Runner ${id} needs an executable or a runnable name`);
@@ -234,6 +244,8 @@ export function createLlamaServerRunner({
         dedicated: offeredOn('dedicated') ? paramSchema : null,
         unified: offeredOn('unified') && dialect.unified ? LLAMA_SERVER_UNIFIED_PARAM_SCHEMA : null,
         cpu: offeredOn('cpu') && dialect.cpu ? LLAMA_SERVER_CPU_PARAM_SCHEMA : null,
+        vulkan: profiles?.includes('vulkan') ? paramSchema : null,
+        venus: profiles?.includes('venus') ? LLAMA_SERVER_VENUS_PARAM_SCHEMA : null,
     });
     let autoThreads = null;
     let unifiedThreads = null;
@@ -244,7 +256,7 @@ export function createLlamaServerRunner({
     // cores. On the CPU profile the same, and otherwise physical cores minus 1
     // up to four cores, where minus 2 would leave one or two threads. An
     // admin-set value wins; the stored parameters keep "empty".
-    const threadsFor = (values, profile) => values.threads ?? (profile === 'unified'
+    const threadsFor = (values, profile) => values.threads ?? (profile === 'unified' || profile === 'venus'
         ? (unifiedThreads ??= perfCores() ?? defaultThreads(cpuCores()))
         : profile === 'cpu'
             ? (cpuThreads ??= perfCores() ?? cpuDefaultThreads(cpuCores()))
@@ -267,7 +279,7 @@ export function createLlamaServerRunner({
         if (trainedContext !== null && values.ctxSize > trainedContext && params?.ctxSize === undefined) {
             values = validateParams(schema, { ...params, ctxSize: trainedContext }, { defaults });
         }
-        if (profile === 'dedicated' && values.ubatchSize > values.batchSize) {
+        if ((profile === 'dedicated' || profile === 'vulkan') && values.ubatchSize > values.batchSize) {
             throw new ParamError('ubatchSize', `must be <= batchSize (${values.batchSize})`);
         }
         // An explicit value wins over a default, but cannot make an unsupported
@@ -299,7 +311,7 @@ export function createLlamaServerRunner({
                 spawnSync,
                 executable,
                 args: ['--version'],
-                env: probeEnv({ LD_LIBRARY_PATH: NVIDIA_LIB_DIR }),
+                env: backend === 'vulkan' ? vulkanProbeEnv(VULKAN_ALL_ICD_FILES) : probeEnv({ LD_LIBRARY_PATH: NVIDIA_LIB_DIR }),
                 parse: dialect.parseVersion,
                 pinnedVersion
             });
@@ -314,6 +326,12 @@ export function createLlamaServerRunner({
     }
 
     function tuningArgs(values, profile) {
+        if (profile === 'venus') {
+            const args = ['--ctx-size', values.ctxSize, '--device', 'Vulkan0', '-ngl', 999, '--flash-attn', 'auto',
+                '-ctk', 'f16', '-ctv', 'f16', '--threads', threadsFor(values, profile), '-np', values.parallel];
+            if (values.parallel > 1) args.push('--kv-unified');
+            return [...args, '-b', 512, '-ub', 512, '--cache-ram', 256];
+        }
         if (profile === 'cpu') {
             const args = ['--ctx-size', values.ctxSize, '--device', 'none', '--n-gpu-layers', 0, '--fit', 'off', '--flash-attn', 'on',
                 '--cache-type-k', 'f16', '--cache-type-v', 'f16', '--threads', threadsFor(values, profile), '-np', values.parallel];
@@ -330,6 +348,7 @@ export function createLlamaServerRunner({
             return args;
         }
         const args = ['--ctx-size', values.ctxSize, '--n-gpu-layers', values.nGpuLayers];
+        if (profile === 'vulkan') args.push('--device', 'Vulkan0');
         if (values.nCpuMoe > 0) {
             args.push('--n-cpu-moe', values.nCpuMoe);
         }
@@ -355,7 +374,7 @@ export function createLlamaServerRunner({
         return args;
     }
 
-    function buildLaunch({ artifactPath, params, port: launchPort, apiKey, model, profile = 'dedicated', runnerDir } = {}) {
+    function buildLaunch({ artifactPath, params, port: launchPort, apiKey, model, profile = 'dedicated', runnerDir, icdFile } = {}) {
         const values = normalizeParams(params, { model, profile });
         const command = executable ?? path.join(assertAbsolutePath(runnerDir, 'runnerDir'), runnable);
         const args = [
@@ -370,7 +389,13 @@ export function createLlamaServerRunner({
         ];
         // The CPU launch never loads the CUDA driver library, even where a GPU is
         // attached but unusable: no library path, and no device is visible (DS003).
-        const launchEnv = profile === 'cpu' ? { CUDA_VISIBLE_DEVICES: '' } : { LD_LIBRARY_PATH: NVIDIA_LIB_DIR };
+        let launchEnv = profile === 'cpu' ? { CUDA_VISIBLE_DEVICES: '' } : { LD_LIBRARY_PATH: NVIDIA_LIB_DIR };
+        if (isVulkanProfile(profile)) {
+            const expected = profile === 'vulkan' ? 'radeon_icd.json' : 'virtio_icd.json';
+            vulkanProbeEnv(icdFile);
+            if (icdFile !== `/opt/local-llm/vulkan/icd.d/${expected}`) throw codedError('invalid_launch', 'The ICD file does not match the hardware profile.');
+            launchEnv = { VK_DRIVER_FILES: icdFile, VK_LOADER_LAYERS_DISABLE: '~all~' };
+        }
         return { command, args: args.map(String), env: launchEnv };
     }
 
@@ -380,7 +405,7 @@ export function createLlamaServerRunner({
     async function start(ctx) {
         const process = ctx.launch(ctx.runner.buildLaunch({
             artifactPath: ctx.weights.path, params: ctx.params, port: ctx.port, apiKey: ctx.apiKey, model: ctx.model,
-            profile: ctx.profile, runnerDir: ctx.runnerDir,
+            profile: ctx.profile, runnerDir: ctx.runnerDir, icdFile: ctx.icdFile,
         }));
         const base = `http://127.0.0.1:${ctx.port}`;
         await ctx.waitForHttp(`${base}/health`, { process });
@@ -417,6 +442,12 @@ export function createLlamaServerRunner({
         ...(schemas.cpu ? {
             admitCpu: (input) => admitCpuLlamaServer({ ...input, runnerId: id, displayName }, admissionResult),
         } : {}),
+        ...(schemas.vulkan ? { admitVulkan: (input) => {
+            const verdict = admitLlamaServer(input);
+            return admissionResult(verdict.status, verdict.reason, verdict.estimate,
+                [...verdict.warnings, 'Sized with the CUDA estimates; AMD support is unit-tested only and not measured on Vulkan.'], verdict.reasonCode);
+        } } : {}),
+        ...(schemas.venus ? { admitVenus: (input) => admitVenusLlamaServer(input, admissionResult) } : {}),
         ...(profiles ? { profiles: Object.freeze([...profiles]) } : {}),
         parseReport: parseRunnerReport
     });

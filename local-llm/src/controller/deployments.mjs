@@ -45,6 +45,7 @@ import { lookupHuggingFaceModel } from './modelLookup.mjs';
 import { BUDGET_UNREADABLE, MPS_VARIABLES, cpuQuotaOf, gpuBudgetOf, knownByte, memoryBudgetOf, mpsRunnerEnvironment, overviewBudget } from './ploinkyBudget.mjs';
 import {
     UNIFIED,
+    VENUS,
     UNREADABLE_COMMIT_MS,
     capabilityMismatch,
     cpuFloorBytes,
@@ -56,6 +57,7 @@ import { createRunnerInstaller, runTool } from './runnerInstaller.mjs';
 import { loadRunnerLocks } from './runnerLock.mjs';
 import { createLogBuffer, parseRunnerReport, startRunnerProcess } from './runnerProcess.mjs';
 import { acceptedRequest, createStateStore, reconcileAfterRestart, recordRequest } from './stateStore.mjs';
+import { catalogProfileOf, isVulkanProfile, vulkanContractOf } from './vulkan.mjs';
 import { createWeightStores } from './weightStores.mjs';
 import { walkShared } from './workspaceReuse.mjs';
 import { DRAIN_QUEUE_WAIT_MS, DRAIN_RUNNER_GRACE_MS } from '../drainBudget.mjs';
@@ -145,7 +147,8 @@ export function createController({
     stateStore = createStateStore({ dataDir }),
     runners = RUNNERS,
     // A snapshot's queries stop when `signal` aborts (a Stop, a Cancel or the drain).
-    snapshot = ({ signal } = {}) => readSnapshot({ dataDir, signal, env }),
+    snapshot = undefined,
+    readHardwareSnapshot = readSnapshot,
     // Trusted test seam only. Production's qualification resolver reads its
     // packaged reviewed matrix; no API or environment value supplies approval.
     qualificationDataProvider = undefined,
@@ -214,6 +217,7 @@ export function createController({
     sharedModelsRoot = env.LOCAL_LLM_SHARED_MODELS || '/shared/models',
     // The CUDA driver's JIT cache, in the container's own filesystem (DS004).
     cudaCachePath = path.join(env.LOCAL_LLM_RUN_ROOT || '/opt/runners', '.cuda-cache'),
+    mesaCachePath = path.join(env.LOCAL_LLM_RUN_ROOT || '/opt/runners', '.mesa-cache'),
     now = () => new Date(),
 } = {}) {
     const log = createLogBuffer({ file: path.join(dataDir, 'logs', 'runner.log') });
@@ -285,6 +289,9 @@ export function createController({
     let undecidedReason = null;
     // The compute capabilities the image's CUDA runners were built for (arm64: 12.1); the amd64 image lists none.
     const capabilities = String(imageContract?.gpu_compute_capabilities || '').split(',').map((cap) => cap.trim()).filter(Boolean);
+    const vulkanContract = vulkanContractOf(imageContract);
+    const snapshotReader = snapshot ?? (({ signal } = {}) => readHardwareSnapshot({ dataDir, signal, env, vulkan: vulkanContract }));
+    let committedIcdFile = null;
     // The unified guard's view of the current runner (in memory only).
     let guardStats = null;
     // Saved parameter sets already reported as no longer valid.
@@ -368,8 +375,10 @@ export function createController({
             return null;
         }
         profile = decision.profile;
+        committedIcdFile = snap?.gpu?.backend === 'vulkan' ? snap.gpu.icdFile : null;
         profileDecision = {
             profile, cause: decision.cause, reason: decision.reason, gpuName: snap?.gpu?.name ?? null, decidedAt: now().toISOString(),
+            ...(snap?.gpu?.backend === 'vulkan' ? { gpuBackend: 'vulkan' } : {}),
         };
         const because = profile === 'cpu' ? `${decision.cause}: ${String(decision.reason).replace(/\s+/g, ' ').slice(0, 200)}` : snap.gpu.name;
         log.append('controller', `hardware profile: ${profile}${because ? ` (${because})` : ''}`);
@@ -387,7 +396,7 @@ export function createController({
     function decisionForAdmission(snap) {
         if (profile !== 'cpu' || !profileDecision) return undefined;
         const gpuRecovered = profileDecision.cause === 'unreadable-timeout'
-            && ['dedicated', 'unified'].includes(decideProfile({ snapshot: snap, capabilities, unreadable: null, nowMs: now().getTime() }).profile);
+            && ['dedicated', 'unified', 'vulkan', 'venus'].includes(decideProfile({ snapshot: snap, capabilities, unreadable: null, nowMs: now().getTime() }).profile);
         return { ...profileDecision, gpuRecovered };
     }
 
@@ -399,12 +408,13 @@ export function createController({
         const budget = overviewBudget({ observation: memoryBudgetOf(snap), cpuQuota: cpuQuotaOf(snap), gpuShare: gpuBudgetOf(snap, env).gpuShare });
         const withBudget = (limits) => (budget ? { ...(limits || {}), budget } : limits);
         if (profile === 'unified') return withBudget({ floorBytes: UNIFIED.floorBytes, hostReserveBytes: UNIFIED.hostReserveBytes });
-        if (profile !== 'cpu') return withBudget(null);
+        if (profile !== 'cpu' && profile !== 'venus') return withBudget(null);
         const pool = cpuPool(snap?.memory, snap?.cgroupMemory);
         if (!Number.isFinite(pool.totalBytes)) return withBudget(null);
         return withBudget({
             floorBytes: cpuFloorBytes(pool.totalBytes), hostReserveBytes: cpuHostReserveBytes(pool.totalBytes),
             poolBytes: pool.totalBytes, availableBytes: pool.availableBytes,
+            ...(profile === 'venus' ? { deviceCapBytes: Math.min(VENUS.deviceCapBytes, VENUS.deviceCapFraction * snap.gpu.totalBytes) } : {}),
         });
     }
 
@@ -417,7 +427,7 @@ export function createController({
         const stop = signal ? AbortSignal.any([hardwareStop.signal, signal]) : hardwareStop.signal;
         let snap;
         try {
-            snap = await untilStopped(Promise.resolve().then(() => snapshot({ signal: stop })), stop);
+            snap = await untilStopped(Promise.resolve().then(() => snapshotReader({ signal: stop })), stop);
         } catch (error) {
             if (!stop.aborted) throw error;
         }
@@ -466,7 +476,7 @@ export function createController({
 
     // The models offered in this profile (catalog v3 `profiles`).
     function catalog() {
-        const current = profile || 'dedicated';
+        const current = catalogProfileOf(profile || 'dedicated');
         return mergeCatalog(seedCatalog, state.registry).filter((model) => model.profiles.includes(current));
     }
 
@@ -538,7 +548,7 @@ export function createController({
         const availability = availabilityOf(definition);
         if (!availability.available) return refuse(availability.reason);
         // On the CPU no GPU is used, so the GPUs the image was built for do not matter.
-        const mismatch = selected === 'cpu' ? null : gpuMismatch(snap);
+        const mismatch = selected === 'cpu' || isVulkanProfile(selected) ? null : gpuMismatch(snap);
         if (mismatch) return refuse(mismatch);
         // A snapshot without a GPU is refused by admit() with the GPU's own reason.
         if (!selected && snap?.gpu?.available) return refuse(PROFILE_UNDECIDED);
@@ -940,6 +950,7 @@ export function createController({
             CUDA_CACHE_PATH: cudaCachePath,
             ...adapterEnvironment,
             ...mpsRunnerEnvironment(env, selectedProfile),
+            ...(isVulkanProfile(selectedProfile) ? { MESA_SHADER_CACHE_DIR: mesaCachePath } : {}),
         };
     }
 
@@ -1027,9 +1038,9 @@ export function createController({
     function startMemoryGuard(deployment, current) {
         const unified = deployment.profile === 'unified';
         // The pool profiles: one pool of memory, every runner watched in every phase.
-        const pooled = unified || deployment.profile === 'cpu';
+        const pooled = unified || deployment.profile === 'cpu' || deployment.profile === 'venus';
         const floor = unified ? UNIFIED.floorBytes
-            : deployment.profile === 'cpu' ? deployment.admission?.estimate?.floorBytes
+            : deployment.profile === 'cpu' || deployment.profile === 'venus' ? deployment.admission?.estimate?.floorBytes
                 : deployment.admission?.estimate?.ramFloorBytes;
         if (!Number.isFinite(floor) || floor <= 0) return () => {};
         let timer = null;
@@ -1198,6 +1209,7 @@ export function createController({
             model,
             // The profile the Run was normalized and admitted under.
             profile: deployment.profile,
+            icdFile: committedIcdFile,
             params: deployment.params,
             artifact: deployment.artifact,
             weights,

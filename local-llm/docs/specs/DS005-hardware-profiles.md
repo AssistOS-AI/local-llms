@@ -1,13 +1,13 @@
 ---
 title: DS005-hardware-profiles
-summary: The dedicated, unified and cpu hardware profiles, how the GPU's memory model and its absence are detected, what changes on a GPU that shares system memory (NVIDIA GB10 in DGX Spark), and how models run on the CPU when no NVIDIA GPU is usable.
+summary: NVIDIA dedicated and unified memory, CPU fallback, discrete AMD Vulkan and Apple Venus profiles, their detection, admission and memory guards.
 ---
 
 # DS005 Hardware Profiles
 
 ## Introduction
 
-One agent, `local-llms/local-llm`, runs on three kinds of host. The first are hosts whose GPU has its own memory (the x86 hosts it served first). The second is NVIDIA DGX Spark, whose GB10 GPU shares the machine's 119.6 GiB of system memory. The third are hosts where no NVIDIA GPU is usable, where it runs models on the CPU: a Mac through its Podman machine, a server without a GPU, or a host whose GPU is not granted to it. The three need different memory accounting, defaults and safety rules. This specification defines the three hardware profiles and how the agent detects which one applies. The agent's JavaScript is the same on every architecture; only the image's binaries and runner lock differ (DS000, DS004).
+One agent, `local-llms/local-llm`, chooses a hardware profile from the attached GPU and runtime contract. NVIDIA GPUs keep the dedicated or unified CUDA policy. A discrete AMD Radeon GPU uses Vulkan RADV. An Apple GPU uses Vulkan Venus inside a libkrun Podman machine. A host with no usable GPU uses the CPU. Each policy has its own memory accounting and safety rules. The JavaScript is the same on every architecture; only the image's binaries and runner lock differ.
 
 ## Core Content
 
@@ -18,10 +18,30 @@ One agent, `local-llms/local-llm`, runs on three kinds of host. The first are ho
 | `dedicated` | nvidia-smi reports total, used and free memory in MiB | GPU memory for the offloaded weights, KV cache and buffers; system RAM for the rest (DS003) |
 | `unified` | the GPU shares system memory | one pool: MemTotal and MemAvailable from `/proc/meminfo` |
 | `cpu` | none is used: no NVIDIA GPU is attached, or the attached one cannot be used | one pool: MemTotal and MemAvailable from `/proc/meminfo`, capped by a container memory limit when one is set |
+| `vulkan` | RADV discrete Radeon, with numeric device memory | Dedicated GPU estimates plus system RAM; unit-tested and unverified on AMD hardware |
+| `venus` | Apple GPU reached through Venus, outside the VM's memory accounting | Provisional device cap plus a conservative VM staging pool |
 
 The dedicated profile keeps DS003's admission and defaults. Some changes made for the unified profile apply to both (catalog v3, `loadMode`, the runner's OOM priority and JIT cache location, runner availability from the image); they are marked where they are described. The `cpu` profile is chosen automatically; no operator switch, catalog entry or parameter turns it on or off.
 
 ### Detecting the memory model
+
+Vulkan detection runs only after NVIDIA is absent and a character render node is present. The image's source contract must have `vulkan_contract=1`, a pinned llama.cpp version, the exact Vulkan server and vulkaninfo paths, a bounded Mesa version, and normalized absolute JSON ICD paths under `/opt/local-llm/vulkan/icd.d/`. Missing or invalid keys make the render node unusable. Only `DRIVER_ID_MESA_RADV` and `DRIVER_ID_MESA_VENUS` are accepted; CPU and software devices are refused, as are multiple accepted devices and integrated RADV devices. A usable Vulkan snapshot chooses `vulkan` for RADV and `venus` for Venus before the CUDA compute-capability check. The NVIDIA success path and ordinary CPU overviews and profile log lines retain their previous behavior.
+
+### Vulkan and Venus admission
+
+Only `llama.cpp-vulkan` has policies for these profiles. Other runners return a reason directing the administrator to the Vulkan build. A configured GPU share is refused with `gpu_share_unsupported`; Vulkan runners receive no MPS environment. If the device disappears after the profile is committed, Run is refused with a restart hint. A restart can then select the CPU.
+
+RADV reuses the dedicated CUDA estimates, with a warning that AMD support is unit-tested only and has not been measured on Vulkan. Its launch adds `--device Vulkan0` to dedicated tuning. The Vulkan catalog uses models declared for the dedicated profile; Venus uses CPU models. Stored catalog profile declarations remain unchanged.
+
+Venus exposes `ctxSize` 512 to 131072, default 4096, `parallel` 1 to 4, default 1, and load mode `auto` or `none`. Its launch fixes Vulkan0, all GPU layers, automatic flash attention, f16 K and V caches, high-performance CPU threads, batch and micro-batch 512, and cache RAM 256 MiB. Above one slot it uses a unified KV cache.
+
+Venus device need is the pinned weights plus f16 KV for context times parallel slots, the existing compute estimate with flash attention assumed off, and 256 MiB device overhead. It must fit the smaller of 2 GiB and 25 percent of the reported heap total. Above this provisional cap it is incompatible. Above reported free bytes it is insufficient-now. Reported free memory is an upper bound only: the VM cannot see the Mac's free memory, so device headroom remains unknown. Admission separately reserves VM RAM for a possible weights staging copy, 512 MiB runtime and 256 MiB prompt cache, applying the CPU pool's host reserve and floor and any finite container limit. The memory guard watches Venus as a pooled profile every 250 ms with the admission's floor. It can observe VM pressure, not host Apple GPU pressure.
+
+The 2 GiB cap is provisional. On the 16 GiB M1, the 6 GiB VM plus the cap reaches about half of host RAM. No dynamic Vulkan memory budget is used for admission. Captured live evidence is still required before claiming Apple runtime validation; AMD remains unverified until measured on a real discrete Radeon GPU.
+
+The dashboard names AMD Vulkan and Apple Venus explicitly. RADV shows its unverified hardware status. Venus shows unknown headroom, the provisional cap and VM memory. A CPU fallback decision with `gpuBackend=vulkan` names the Vulkan GPU; CPU decisions without that field retain their previous text. Runner reports read Vulkan0 model, KV and compute buffers and nested device names only on these profiles; CUDA reports retain their existing parser.
+
+### NVIDIA memory detection
 
 The hardware snapshot (`src/controller/hardware.mjs`) keeps its first nvidia-smi query unchanged (`name,memory.total,memory.used,memory.free,driver_version`). A second, optional query reads `pci.device_id,compute_cap,addressing_mode,utilization.gpu,power.draw,temperature.gpu`; when it fails (an older driver, an unknown field) the GPU keeps its first-query values and only these facts are missing. Utilization, power and temperature are telemetry: a value of `[N/A]` (laptop GPUs report `power.draw` so) becomes null and never disables the GPU.
 
@@ -62,7 +82,8 @@ The controller decides the profile with `decideProfile` (`src/controller/profile
 
 | Snapshot | Profile |
 | --- | --- |
-| A usable GPU that the image supports | `dedicated` or `unified` |
+| A usable NVIDIA GPU that the image supports | `dedicated` or `unified` |
+| A usable RADV discrete GPU or Venus device with a valid Vulkan contract | `vulkan` or `venus`; CUDA compute-capability constraints do not apply |
 | A usable GPU that reports a compute capability the image's CUDA runners were not built for | `cpu` (cause `mismatch`) |
 | `absent` or `unusable` | `cpu`, at once |
 | `unreadable`, or a usable GPU that does not report its capability on an image that lists capabilities | undecided; `cpu` (cause `unreadable-timeout`) once 60 s have passed since the first such snapshot |
@@ -81,7 +102,7 @@ A Run is normalized, admitted, launched and guarded under one committed profile,
 - Under `dedicated` or `unified`, a GPU that is no longer usable refuses every Run as `incompatible`. When the snapshot shows positive evidence (no nvidia-smi at all, or a GPU that cannot be used) the refusal says to restart local-llm, which then decides `cpu`. When the GPU is merely unreadable the refusal gives the GPU's own reason and no hint: the failure may be transient, and a restart during it could lock a GPU host into `cpu`.
 - Under `cpu`, when the cause was `unreadable-timeout` and the GPU has since become usable, every admission warns that a restart would use it. Runs continue on the CPU.
 
-The catalog's `profiles` (DS002) decide which models are offered; `recommended` and `validated` are read for the current profile.
+The catalog's `profiles` decide which models are offered. Vulkan uses the dedicated catalog and Venus uses the CPU catalog; the stored profile declarations retain DS002's schema. Existing NVIDIA and CPU recommendations and validation labels retain their previous behavior.
 
 ### llama.cpp on unified memory
 
@@ -256,4 +277,4 @@ The first CPU host has 5.76 GiB, where the unified values (16 GiB reserve, 8 GiB
 
 `profileUnsupportedReason` is set only on the `cpu` profile, on purpose: the dedicated and unified overviews must stay what they were, so a runner cannot be hidden there by a reason that only the new profile produces. A runner that serves one profile says so itself (`profiles`), and the overview, the table columns, the per-model rows, Run, preview and Install all read that one declaration. A test compares both GPU profiles' overviews with a golden file made before the runner existed.
 
-The agent picks the dedicated, unified or cpu profile from what nvidia-smi reports or from its absence. It runs models on the CPU whenever no NVIDIA GPU is usable, and it waits only while a GPU is present but unreadable. It normalizes, admits, launches and guards each Run under one committed profile. It admits unified and CPU runs, bundled or added at run time, from a labelled estimate (or, on unified memory, a trusted envelope), checked against a fresh snapshot with a host reserve and a floor and rechecked immediately before the runner starts, with a 250 ms guard as the backstop. vLLM joins only as an experimental operator choice on unified memory.
+The agent normalizes, admits, launches and guards each Run under one committed hardware profile. NVIDIA keeps the dedicated and unified policies. Vulkan is restricted to discrete RADV and Venus; Venus has a provisional device cap and a separate guarded VM staging pool. An unusable or absent supported GPU falls back to the CPU, while an unreadable query waits for the existing grace period. Every launch repeats admission against a fresh snapshot.

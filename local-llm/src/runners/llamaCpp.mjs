@@ -46,3 +46,10 @@ export const llamaCppCpuRunner = createLlamaServerRunner({
     profiles: ['cpu'],
     dialect: Object.freeze({ ...dialect, unified: false, cpu: true }),
 });
+
+export const llamaCppVulkanRunner = createLlamaServerRunner({
+    id: 'llama.cpp-vulkan', displayName: 'llama.cpp (Vulkan build)',
+    executable: '/opt/llama.cpp-vulkan/llama-server', pinnedVersion: 'b11159', port: 18086,
+    profiles: ['vulkan', 'venus'], backend: 'vulkan',
+    dialect: Object.freeze({ ...dialect, unified: false, cpu: false }),
+});

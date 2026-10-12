@@ -1,6 +1,7 @@
 import { codedError } from './params.mjs';
 import { ikLlamaCppRunner } from './ikLlamaCpp.mjs';
-import { llamaCppCpuRunner, llamaCppRunner } from './llamaCpp.mjs';
+import { llamaCppCpuRunner, llamaCppRunner, llamaCppVulkanRunner } from './llamaCpp.mjs';
+import { isVulkanProfile, vulkanRefusal } from '../controller/vulkan.mjs';
 import { lmStudioRunner } from './lmStudio.mjs';
 import { ollamaRunner } from './ollama.mjs';
 import { tabbyApiRunner } from './tabbyApi.mjs';
@@ -21,7 +22,8 @@ export const RUNNERS = Object.freeze({
     tabbyapi: tabbyApiRunner,
     lmstudio: lmStudioRunner,
     // Installed from the agent's lock, for the cpu profile only (DS004, DS005).
-    'llama.cpp-cpu': llamaCppCpuRunner
+    'llama.cpp-cpu': llamaCppCpuRunner,
+    'llama.cpp-vulkan': llamaCppVulkanRunner
 });
 
 export function getRunner(id) {
@@ -84,6 +86,7 @@ export function runnerSummary(runner, profile = 'dedicated') {
         basicParams: runner.basicParams || [],
         moeParams: runner.moeParams || [],
         ...(profile === 'cpu' && paramSchema === null ? { profileUnsupportedReason: cpuRefusal(displayName) } : {}),
+        ...(isVulkanProfile(profile) && paramSchema === null ? { profileUnsupportedReason: vulkanRefusal(displayName) } : {}),
     };
 }
 

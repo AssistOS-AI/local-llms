@@ -25,6 +25,8 @@ const GIB = 1024 * MIB;
 
 export const PROFILES = Object.freeze(['dedicated', 'unified', 'cpu']);
 
+export const VENUS = Object.freeze({ deviceCapBytes: 2 * GIB, deviceCapFraction: 0.25, deviceOverheadBytes: 256 * MIB });
+
 export const UNIFIED = Object.freeze({
     // Admission refuses a run needing more than MemTotal less this as incompatible:
     // the idle host held 8-13 GiB that was not available.
@@ -403,6 +405,9 @@ export function capabilityMismatch(gpu, capabilities = []) {
  */
 export function decideProfile({ snapshot, capabilities = [], unreadable = null, nowMs = Date.now(), commitAfterMs = UNREADABLE_COMMIT_MS } = {}) {
     const gpu = snapshot?.gpu;
+    if (gpu?.backend === 'vulkan' && gpu.available) {
+        return { profile: gpu.driver === 'radv' ? 'vulkan' : 'venus', cause: 'gpu', reason: null, unreadable: null };
+    }
     let waitingReason = 'the hardware snapshot could not be read';
     if (gpu?.available) {
         const mismatch = capabilityMismatch(gpu, capabilities);
@@ -562,6 +567,30 @@ export function admitCpuLlamaServer({ model, source, params, memory = {}, cgroup
     const estimate = estimateCpuLlamaServer({ model, source, params, pool });
     return cpuVerdict({ estimate, pool, model, cgroupMemory, disk, remainingDownloadBytes, gpu, decision, result,
         shrink: 'Reduce the context or the parallel slots, or pick a smaller model.' });
+}
+
+/** Provisional Apple device cap; the VM cannot observe the Mac's free memory. */
+export function admitVenusLlamaServer({ model, source, params, gpu, memory = {}, cgroupMemory = null, disk, remainingDownloadBytes = 0 }, result) {
+    if (!(source.size > 0)) return result('incompatible', `${model.displayName}'s pinned weight size is unknown.`, {});
+    const pool = cpuPool(memory, cgroupMemory);
+    const kvBytes = (model.memory?.kvBytesPerToken ?? DEFAULT_KV_BYTES_PER_TOKEN) * params.ctxSize * params.parallel
+        + (model.memory?.fixedKvBytes || 0);
+    const computeBytes = Math.round(computeBufferBytes({ ctxSize: params.ctxSize, ubatchSize: CPU.batchSize, flashAttn: 'off' }));
+    const deviceBytes = source.size + kvBytes + computeBytes + VENUS.deviceOverheadBytes;
+    const deviceCapBytes = Math.min(VENUS.deviceCapBytes, VENUS.deviceCapFraction * gpu.totalBytes);
+    const ramBytes = source.size + CPU.runtimeBytes + CPU.cacheRamMiB * MIB;
+    const estimate = { weightsBytes: source.size, kvBytes, computeBytes, deviceBytes, deviceCapBytes, ramBytes,
+        poolBytes: pool.totalBytes, floorBytes: Number.isFinite(pool.totalBytes) ? cpuFloorBytes(pool.totalBytes) : null,
+        hostReserveBytes: Number.isFinite(pool.totalBytes) ? cpuHostReserveBytes(pool.totalBytes) : null, measured: false,
+        basis: 'provisional Venus estimate; Mac headroom is unknown from the Podman machine' };
+    const warnings = ['Venus headroom is unknown: reported free memory is only an upper bound. The Apple device cap is provisional.'];
+    if (deviceBytes > deviceCapBytes) return result('incompatible', `Needs ${amount(deviceBytes)} of Apple GPU memory; Venus admits at most ${amount(deviceCapBytes)} in this release (provisional: the Mac's free memory is not visible from the Podman machine).`, estimate, warnings);
+    if (deviceBytes > gpu.freeBytes) return result('insufficient-now', `Needs ${amount(deviceBytes)} of Apple GPU memory; ${amount(gpu.freeBytes)} is reported free.`, estimate, warnings);
+    if (!Number.isFinite(pool.totalBytes)) return result('incompatible', CPU_MEMORY_UNREADABLE, estimate, warnings);
+    if (ramBytes > pool.totalBytes - estimate.hostReserveBytes) return result('incompatible', `The Venus staging copy and runtime need ${amount(ramBytes)} of VM RAM with ${amount(estimate.hostReserveBytes)} reserved for the host.`, estimate, warnings);
+    if (ramBytes > pool.availableBytes - estimate.floorBytes) return result('insufficient-now', `The Venus staging copy and runtime need ${amount(ramBytes)} of VM RAM with ${amount(estimate.floorBytes)} kept free.`, estimate, warnings);
+    if (Number.isFinite(disk?.freeBytes) && remainingDownloadBytes * 1.05 > disk.freeBytes) return result('insufficient-now', 'Not enough disk for the weights and the 5 % reserve.', estimate, warnings);
+    return result('ok', null, estimate, warnings);
 }
 
 // Ollama's own need on the CPU beyond the weights and the KV cache: the server and its runner process (provisional, like every CPU constant).

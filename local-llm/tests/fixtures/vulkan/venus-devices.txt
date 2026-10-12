@@ -1,0 +1,2 @@
+Available devices:
+  Vulkan0: Apple M1 (Venus) (8192 MiB, 8192 MiB free)

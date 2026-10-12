@@ -1,0 +1,5 @@
+GPU0:
+    deviceName = AMD Radeon Graphics
+    deviceType = PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
+    vendorID = 0x1002
+    driverID = DRIVER_ID_MESA_RADV

@@ -19,6 +19,12 @@ The declaration asks for that CDI device and nothing else. Ploinky attaches it o
 
 ### Hardware snapshot
 
+After NVIDIA is positively absent, Ploinky may attach exactly one Vulkan render node through the same named-agent CDI grant. The node must be a character device under `/dev/dri`, readable and writable by every user. A 0660 render node is refused with a host udev fix message; the Box receives no supplementary group or new privilege. RADV uses an amdgpu render node on Linux. Venus uses the libkrun machine's virtio-gpu render node. `/dev/kfd` and display card nodes are not granted.
+
+The agent probes Vulkan only when `readGpu` returns `absent` and `/dev/dri` contains a character render node. A failed NVIDIA query never triggers a Vulkan fallback. A node with no valid image Vulkan contract is `unusable` and asks the operator to update the image. `vulkaninfo --summary` must report exactly one accepted RADV or Venus device and no CPU or llvmpipe device. RADV must be discrete. The Vulkan runner's device list must contain exactly `Vulkan0` with the same device name and safe memory figures. The snapshot adds `backend`, `driver`, `deviceType`, `vendorId` and `icdFile` only for Vulkan; it retains total, used and free bytes and an empty process list. Failed queries and malformed output remain unreadable and use the existing 60-second decision window.
+
+Vulkan probes run with a fresh environment containing only PATH, HOME, LANG, the explicit ICD files, disabled loader layers and disabled Mesa shader caching. Runner launches use one selected `VK_DRIVER_FILES`, `VK_LOADER_LAYERS_DISABLE=~all~`, and `MESA_SHADER_CACHE_DIR=/opt/runners/.mesa-cache`, alongside PATH, HOME, LANG and CUDA_CACHE_PATH. The Mesa cache stays outside `/data`. Vulkan launches receive no LD_LIBRARY_PATH, GGML_VK_VISIBLE_DEVICES, MPS variables or agent secrets. llama.cpp's Vulkan build uses loopback port 18086.
+
 `src/controller/hardware.mjs` reads:
 
 | Value | Source |
@@ -65,7 +71,7 @@ Estimates for llama.cpp come from the model's measured memory profile when the c
 | Rule | How |
 | --- | --- |
 | Loopback only | llama.cpp and ik_llama.cpp get `--host 127.0.0.1`; Ollama gets `OLLAMA_HOST=127.0.0.1:<port>` |
-| Fixed ports | Each adapter declares its port; `defaultPorts()` refuses two runners on one port. llama.cpp 18080, ik_llama.cpp 18081, vLLM 18082, TabbyAPI 18083, LM Studio 18084 (its daemon also listens on 127.0.0.1:41343, and its engine on a random loopback port), Ollama 18434, llama.cpp's CPU build 18085, all inside the agent's network namespace |
+| Fixed ports | Each adapter declares its port; `defaultPorts()` refuses two runners on one port. llama.cpp 18080, ik_llama.cpp 18081, vLLM 18082, TabbyAPI 18083, LM Studio 18084 (its daemon also listens on 127.0.0.1:41343, and its engine on a random loopback port), Ollama 18434, llama.cpp's CPU build 18085 and its Vulkan build 18086, all inside the agent's network namespace |
 | Not reachable through the Router | `routerAccess.agentPorts: false` closes the agent-port relay for this agent |
 | Per-start credentials | llama.cpp and ik_llama.cpp get a fresh random `--api-key` on every start, and vLLM and TabbyAPI a key of their own; the chat responder reads it from the controller. LM Studio has none headless: its server relies on loopback, the agent's own network namespace and the closed relay, and the controller keeps only its own model loaded (DS001) |
 | Minimal environment | Runners get `PATH`, `HOME=/data/home`, `LANG`, `CUDA_CACHE_PATH` and their own variables only; no agent secrets. `CUDA_CACHE_PATH` (`/opt/runners/.cuda-cache`) keeps the CUDA driver's JIT cache in the container's own filesystem, never in `/data`, which other workspace processes can write (DS004). In the `cpu` profile a runner gets no `LD_LIBRARY_PATH` and an empty `CUDA_VISIBLE_DEVICES`, so the CUDA driver library is not loaded even where a GPU is attached but unusable. |

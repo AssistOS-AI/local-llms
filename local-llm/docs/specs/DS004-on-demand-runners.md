@@ -7,11 +7,13 @@ summary: Runners installed after the image is built, from a lock shipped in the 
 
 ## Introduction
 
-The amd64 image contains llama.cpp, ik_llama.cpp and Ollama; the arm64 image contains llama.cpp (DS000). Heavier runners, the PyTorch-based vLLM and ExLlamaV3 + TabbyAPI, would add several gigabytes to every Explorer deployment, so an administrator installs them only where they are wanted (runners plan, decision R2 = c). This specification defines what may be installed, where the files go, how they are checked, and when the runnable copy is rebuilt.
+The amd64 CUDA parent contains llama.cpp, ik_llama.cpp and Ollama; the arm64 CUDA parent contains llama.cpp. Both Vulkan children add llama.cpp's Vulkan build. Heavier runners, the PyTorch-based vLLM and ExLlamaV3 + TabbyAPI, would add several gigabytes to every Explorer deployment, so an administrator installs them only where they are wanted. This specification defines what may be installed, where the files go, how they are checked, and when the runnable copy is rebuilt.
 
 ## Core Content
 
 ### What may be installed
+
+The `vulkan` and `venus` profiles offer only the image-baked `llama.cpp-vulkan` build. It needs no Install step and has no lock entry. Every other runner is refused on those profiles before an install or model download. Vulkan availability requires the validated image contract and the image's executable, as described in DS005.
 
 The image ships `/opt/local-llm/runners.lock.json` (schema `local-llm.runners-lock/v1`, `src/controller/runnerLock.mjs`), and the agent's source carries one more lock per platform (below). For each installable runner a lock names the version, the kind (`python` or `archive`), the licence, every file with its URL, size and sha256, and the checks the CI install job runs. Administrators choose a runner id; they never supply a URL. The lock accepts only plain https URLs on `files.pythonhosted.org`, `github.com`, `codeload.github.com`, `download.pytorch.org`, `openaipublic.blob.core.windows.net` and `llmster.lmstudio.ai`, and each file is pinned by size and sha256 as well. A licence's `url` and `source` are plain https URLs: the dashboard shows them as links, so `javascript:` and `data:` never pass.
 

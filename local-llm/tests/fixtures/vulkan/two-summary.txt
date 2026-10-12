@@ -1,0 +1,10 @@
+GPU0:
+    deviceName = Apple M1 (Venus)
+    deviceType = PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
+    vendorID = 0x106b
+    driverID = DRIVER_ID_MESA_VENUS
+GPU1:
+    deviceName = AMD Radeon (TM) RX 7900 XTX (RADV NAVI31)
+    deviceType = PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
+    vendorID = 0x1002
+    driverID = DRIVER_ID_MESA_RADV

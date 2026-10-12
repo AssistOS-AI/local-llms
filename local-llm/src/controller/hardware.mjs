@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 
 import { HARDWARE_QUERY_REAP_MS } from '../drainBudget.mjs';
+import { hasRenderNode, readVulkanGpu } from './vulkan.mjs';
 import { attachCpuQuota, attachGpuBudget, attachMemoryBudget, observeMemoryBudget, parseCpuQuota, parseMpsBudget } from './ploinkyBudget.mjs';
 
 // The Box GPU wiring binds the host nvidia-smi here (the override is a test seam).
@@ -75,7 +76,7 @@ export function untilStopped(promise, signal) {
 // query has nothing to save) and answers once it has exited, or after
 // HARDWARE_QUERY_REAP_MS; one still running then is recorded until it exits.
 // execFile's own `signal` answers before the child has exited, so it is not used.
-function run(execFileImpl, command, args, { timeoutMs = QUERY_TIMEOUT_MS, signal } = {}) {
+export function runHardwareQuery(execFileImpl, command, args, { timeoutMs = QUERY_TIMEOUT_MS, signal, env } = {}) {
     return new Promise((resolve) => {
         if (signal?.aborted) {
             resolve({ ok: false, aborted: true, stdout: '', stderr: '', error: stoppedError() });
@@ -111,11 +112,13 @@ function run(execFileImpl, command, args, { timeoutMs = QUERY_TIMEOUT_MS, signal
         }
         signal?.addEventListener('abort', onAbort, { once: true });
         // The callback runs once the child has exited and its output is closed.
-        child = execFileImpl(command, args, { timeout: timeoutMs, killSignal: 'SIGKILL', encoding: 'utf8' }, (error, stdout, stderr) => {
+        child = execFileImpl(command, args, { timeout: timeoutMs, killSignal: 'SIGKILL', encoding: 'utf8', ...(env === undefined ? {} : { env }) }, (error, stdout, stderr) => {
             finish({ ok: !error, stdout: String(stdout || ''), stderr: String(stderr || ''), error });
         }) || null;
     });
 }
+
+const run = runHardwareQuery;
 
 // A memory figure in MiB, or NaN when nvidia-smi gives none ("[N/A]", "Not Supported", empty).
 function mib(text) {
@@ -480,11 +483,15 @@ export async function readDisk(dataDir, { statfs = (target) => fs.promises.statf
  * the GPU queries are killed (readGpu), and the free-disk read, which cannot
  * be cancelled, is not waited for; its late answer is dropped.
  */
-export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signal, env = process.env } = {}) {
+export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signal, env = process.env, vulkan = null, devDir = '/dev/dri' } = {}) {
     if (signal?.aborted) throw stoppedError();
     // Read alongside the GPU queries; it never rejects.
     const pendingDisk = readDisk(dataDir, { statfs }).catch((error) => ({ freeBytes: null, totalBytes: null, error: error.message }));
-    const gpu = await readGpu({ execFileImpl, signal, env });
+    const nvidia = await readGpu({ execFileImpl, signal, env });
+    const gpu = nvidia.state === 'absent' && hasRenderNode({ fsApi, devDir })
+        ? vulkan ? await readVulkanGpu({ execFileImpl, contract: vulkan, signal })
+            : { available: false, state: 'unusable', backend: 'vulkan', reason: 'A GPU render node is attached, but this image has no Vulkan runtime; update the local-llm image.' }
+        : nvidia;
     const disk = await untilStopped(pendingDisk, signal);
     const cgroup = captureCgroupMemory({ fsApi });
     const snapshot = {

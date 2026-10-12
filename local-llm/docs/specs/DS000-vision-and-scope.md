@@ -7,7 +7,7 @@ summary: What local-llm is, the retired shared-image agents and the services tha
 
 ## Introduction
 
-`local-llm` runs open-weight language models on the workspace's own hardware: on its NVIDIA GPU when one is attached and usable, and otherwise on the CPU (the `cpu` profile, DS005). A workspace administrator opens Local LLMs from Explorer's toolbar (or Settings → Agents → Local LLMs), picks a model and a runner, and presses Run. The agent then downloads the weights, starts the runner on the GPU or the CPU, and exposes the running model to other agents through the workspace-local Soul Gateway.
+`local-llm` runs open-weight language models on the workspace's own hardware. NVIDIA GPUs use CUDA. Discrete AMD Radeon GPUs use Vulkan RADV, and Apple GPUs use Vulkan Venus inside a libkrun Podman machine. When no usable GPU is attached it runs on the CPU, as defined in DS005. A workspace administrator opens Local LLMs from Explorer's toolbar or Settings, picks a model and a runner, and presses Run. The agent downloads the weights, starts the runner, and exposes the running model to other agents through the workspace-local Soul Gateway.
 
 ## Core Content
 
@@ -32,7 +32,7 @@ A workspace that enabled a legacy agent loses it at its next repository update: 
 | --- | --- |
 | Weights are downloaded only after an explicit Run, never at enable, restart or when a model is added. | DS002 |
 | The GPU is used only through the named-agent Box GPU grant; the agent asks for no privilege, capability or host device of its own. | DS003 |
-| A machine without a usable NVIDIA GPU runs models on the CPU, with no operator step. | DS005 |
+| A machine without a usable supported GPU runs models on the CPU, with no operator step. | DS005 |
 | Every control operation is admin-only and goes through one serialized controller. | DS001 |
 | Other agents use the running model through AchillesAgentLib and the local Soul Gateway, never through a runner port. | DS001 |
 | Admission explains, before anything is downloaded, whether a model and its parameters fit this machine. | DS003 |
@@ -41,6 +41,7 @@ A workspace that enabled a legacy agent loses it at its next repository update: 
 
 | Runner | State in this release |
 | --- | --- |
+| llama.cpp Vulkan build `b11159`, runner `llama.cpp-vulkan` | Baked into both image architectures and offered only on `vulkan` and `venus`. RADV supports discrete Radeon GPUs only and is unit-tested, unverified on hardware. Venus reaches the Apple GPU through a separate libkrun Podman machine and has a provisional device-memory cap. |
 | llama.cpp `b11159` (amd64: CUDA 12.8 build; arm64: ggml-org's CUDA 13.4 build with native sm_121a code for NVIDIA GB10) | Supported. GGUF from Hugging Face, pinned by commit, size and sha256. The default runner on a GPU that shares system memory (DGX Spark), for the listed models and models added at run time, sized by a labelled estimate or a trusted envelope (DS005); no per-model benchmark is required. On a machine without a usable NVIDIA GPU it runs on the CPU (`cpu` profile, DS005). The arm64 image's build carries CPU backends beside its CUDA backend; the amd64 build is made with the same release flags. |
 | llama.cpp's CPU build, release `b11295` (ggml-org's own `ubuntu-arm64` and `ubuntu-x64` assets) | Supported on the `cpu` profile only. It is installed on demand from the agent's own runner lock (DS004) and runs from its runnable copy, beside the image's llama.cpp. It has a CPU policy and no GPU policy, so a GPU host neither shows nor runs it. |
 | ik_llama.cpp, commit `20f7a72` (built into the image with CUDA 12.8 for sm_86 and sm_89) | Supported. A llama.cpp fork with faster hybrid CPU/GPU inference for mixture-of-experts models. It reads the same GGUF files as llama.cpp, so the two share one download. |
@@ -69,7 +70,7 @@ The agent uses none of what LM Studio adds on top of llama.cpp: its native REST 
 
 ### Out of scope
 
-Translation and reranking services (retired above), a shared host model cache, and Apple GPU acceleration through Podman libkrun/Vulkan (deferred by the user 2026-09-30, to be added later). Each needs its own decision.
+Translation and reranking services, a shared host model cache, ROCm/HIP, AMD integrated and Instinct GPUs, Intel GPUs, host-native Metal, Vulkan on NVIDIA, and GPU sharing on Vulkan are out of scope. Only llama.cpp's Vulkan build accelerates AMD and Apple GPUs in this release.
 
 ### Rationale
 
@@ -81,4 +82,4 @@ The shared image was CPU-only and arm64-first, started one fixed model per agent
 
 Plan decision D7 left CPU inference out. That made the agent unusable on a Mac (through its Podman machine) and on hosts without a GPU, although Explorer enables it by default. On 2026-09-30 the user decided that an NVIDIA GPU may not be a prerequisite. The CPU path is automatic, with no operator switch, and is sized from the machine's RAM (DS005). Revoking the GPU grant therefore no longer stops local-llm from serving models: it moves them to the CPU.
 
-`local-llm` is an opt-in, per-workspace model host. It uses the NVIDIA GPU when one is attached and the CPU otherwise, downloads nothing until an administrator runs a model, and serves other agents only through the local Soul Gateway.
+The agent downloads nothing until an administrator runs a model and serves other agents only through the local Soul Gateway.

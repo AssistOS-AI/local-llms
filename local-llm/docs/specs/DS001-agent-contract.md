@@ -35,7 +35,7 @@ The manifest declares no other `containerSecurity` field (and needs a Ploinky th
 main.mjs (controller, PID 1 under AgentEntrypoint.sh)
   ├─ control socket: a Linux abstract socket @local-llm-<random>, new on every start, and a per-start token
   ├─ AgentServer.mjs (MCP on 7000; spawns one short-lived process per tool call)
-  └─ runner: llama.cpp's or ik_llama.cpp's llama-server, ollama serve, vLLM, TabbyAPI, or LM Studio's llmster
+  └─ runner: llama.cpp's CUDA or Vulkan llama-server, ik_llama.cpp's llama-server, ollama serve, vLLM, TabbyAPI, or LM Studio's llmster
              (with its engine, a llama-server, and its workers), bound to 127.0.0.1 only, in its own process group
 ```
 
@@ -45,12 +45,14 @@ The control socket has two locks (runners plan, I5). Other agents in the Box sha
 
 ### Tools
 
+The hardware profiles are `dedicated`, `unified`, `cpu`, `vulkan` and `venus`. `profileDecision.gpuBackend` is `vulkan` only when a Vulkan GPU determined the decision, including an unusable Vulkan GPU falling back to the CPU. NVIDIA and ordinary CPU decisions retain their previous fields. The overview maps `vulkan` to the dedicated catalog and `venus` to the CPU catalog without changing stored model profile declarations. Venus limits include `deviceCapBytes`, the VM pool, reserve and floor. Venus status carries the pooled memory guard's samples. Preview, Run and weights deletion accept `llama.cpp-vulkan` through their public runner-id enums; an unknown id is still refused. The Vulkan build is image-baked and cannot be installed or uninstalled.
+
 Every tool is declared in `mcp-config.json` with `command: "node"`, `args: ["/code/tools/local_llm_tool.mjs"]`, `cwd: "/code"`, `tags: ["admin"]`, `env: { TOOL_NAME }` and a strict input schema (`additionalProperties: false`).
 
 | Tool | Controller operation |
 | --- | --- |
-| `local_llm_overview` | `overview`: the hardware profile (`dedicated`, `unified` or `cpu`) and why it was chosen (`profileDecision`: cause and reason; DS005), the pool limits (`limits`: floor and host reserve on unified memory and the CPU, and on the CPU also the pool and what is available in it, capped by a container memory limit), hardware, runners (with `supported: false` and the reason for a runner this image does not include, and, on the `cpu` profile, `profileUnsupportedReason` for a runner with no CPU policy), the models offered in the profile with per-runner download state and admission, current deployment |
-| `local_llm_status` | `status`: deployment phase, progress and log lines after `sinceSeq`, the hardware profile and `profileDecision` and, on unified memory and on the CPU, the memory guard's lowest MemAvailable, highest pressure and sample count |
+| `local_llm_overview` | `overview`: the hardware profile `dedicated`, `unified`, `cpu`, `vulkan` or `venus`, its decision cause and reason, hardware, runners, models with per-runner download state and admission, and current deployment. Pool limits show the reserve and floor on unified memory, the CPU and Venus, with CPU and Venus pool headroom capped by any container memory limit. Venus also shows its provisional device cap. A runner missing from the image is unsupported with a reason. A runner without a CPU or Vulkan policy carries `profileUnsupportedReason` on that profile. |
+| `local_llm_status` | `status`: deployment phase, progress and log lines after `sinceSeq`, the hardware profile and `profileDecision`, and, on unified memory, the CPU and Venus, the memory guard's lowest MemAvailable, highest pressure and sample count |
 | `local_llm_run` | `run`: `requestId`, `modelId`, `runnerId`, `params` (validated against the runner's schema for the profile), `replace`; a retry of an accepted `requestId` is answered as a duplicate. Every id the pattern allows, `__proto__`, `constructor` and `toString` included, is an ordinary key of the accepted-request records: fresh until accepted, recorded and persisted as data, never read from or written through a prototype. While the hardware profile is not decided (an attached GPU that could not be read, for less than 60 s since the first failed read; DS005), it is refused with `admission_incompatible` and records nothing, so the same request can be sent again; a machine with no NVIDIA GPU attached decides the `cpu` profile at once; on the `cpu` profile a runner with no CPU policy, and on any profile a runner the image does not include, is refused with `runner_unavailable` before anything downloads (the dedicated and unified profiles refuse their own runners as they always did, through parameter validation (`invalid_params`), admission and the runner's switch) |
 | `local_llm_stop` | `stop`; also cancels every Run submitted before it that has not started its job (below) |
 | `local_llm_download_cancel` | `cancelDownload`: keeps the partial file; also cancels every Run submitted before it that has not started its job (below), and then succeeds; `not_downloading` when nothing is transferring and no Run was cancelled |

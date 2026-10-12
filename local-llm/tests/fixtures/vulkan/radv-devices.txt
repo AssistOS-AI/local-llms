@@ -1,0 +1,2 @@
+Available devices:
+  Vulkan0: AMD Radeon (TM) RX 7900 XTX (RADV NAVI31) (24576 MiB, 24000 MiB free)

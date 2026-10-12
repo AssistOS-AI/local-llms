@@ -463,7 +463,7 @@ describe('vLLM runner', () => {
 describe('runner registry', () => {
     it('resolves known runners and rejects others', () => {
         // Intended change (Phase 3): llama.cpp's CPU build is registered, and offered on the cpu profile only.
-        assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi', 'lmstudio', 'llama.cpp-cpu']);
+        assert.deepEqual(Object.keys(RUNNERS), ['llama.cpp', 'ik_llama.cpp', 'ollama', 'vllm', 'tabbyapi', 'lmstudio', 'llama.cpp-cpu', 'llama.cpp-vulkan']);
         assert.equal(getRunner('llama.cpp'), llamaCppRunner);
         assert.equal(getRunner('ollama'), ollamaRunner);
         for (const id of ['toString', 'constructor', 'llamacpp', undefined, null]) {
@@ -727,13 +727,15 @@ describe('llama.cpp (CPU build)', () => {
     it('is shown on the cpu profile only', () => {
         assert.equal(offeredIn(llamaCppCpuRunner, 'cpu'), true);
         for (const profile of ['dedicated', 'unified', null, undefined]) assert.equal(offeredIn(llamaCppCpuRunner, profile), false, String(profile));
-        for (const runner of Object.values(RUNNERS).filter((candidate) => candidate !== llamaCppCpuRunner)) {
+        for (const runner of Object.values(RUNNERS).filter((candidate) => !candidate.profiles)) {
             for (const profile of ['cpu', 'dedicated', 'unified', null]) assert.equal(offeredIn(runner, profile), true, `${runner.id} ${profile}`);
         }
         assert.equal(runnerSummaries().some((summary) => summary.id === 'llama.cpp-cpu'), false);
         assert.equal(runnerSummaries(RUNNERS, 'unified').some((summary) => summary.id === 'llama.cpp-cpu'), false);
         assert.equal(runnerSummaries(RUNNERS, 'cpu').at(-1).id, 'llama.cpp-cpu');
         assert.ok(runnerSummary(llamaCppCpuRunner, 'cpu').paramSchema);
+        for (const profile of ['vulkan', 'venus']) assert.equal(offeredIn(getRunner('llama.cpp-vulkan'), profile), true);
+        for (const profile of ['cpu', 'dedicated', 'unified', null]) assert.equal(offeredIn(getRunner('llama.cpp-vulkan'), profile), false);
     });
 
     it('is detected from the installer, never by starting it', async () => {

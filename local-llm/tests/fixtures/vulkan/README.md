@@ -1,0 +1,1 @@
+All fixtures here are synthetic. RADV remains unverified on hardware. The Venus summary and device list must be replaced with captured output during the approved live validation step. The runner log covers nested parentheses in device names.

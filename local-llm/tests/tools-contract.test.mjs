@@ -437,3 +437,26 @@ test('install, preview and Run accept llama.cpp-cpu through the tool contract', 
         assert.notDeepEqual(violations(schemaOf(name), { ...inputs[name], url: 'https://evil.example.com/x' }), [], name);
     }
 });
+
+test('preview, Run and weights deletion accept llama.cpp-vulkan through the tool contract', async () => {
+    const config = read('mcp-config.json');
+    const schemaOf = (name) => config.tools.find((tool) => tool.name === name).inputSchema;
+    const seen = [];
+    const authInfo = { user: { roles: ['admin'], email: 'admin@example.com' } };
+    const inputs = {
+        local_llm_overview: { preview: { modelId: 'small-vulkan', runnerId: 'llama.cpp-vulkan' } },
+        local_llm_run: { requestId: 'request-vulkan-0001', modelId: 'small-vulkan', runnerId: 'llama.cpp-vulkan', params: { ctxSize: 2048 } },
+        local_llm_weights_delete: { modelId: 'small-vulkan', runnerId: 'llama.cpp-vulkan' },
+    };
+    for (const [name, input] of Object.entries(inputs)) {
+        assert.deepEqual(violations(schemaOf(name), input), [], name);
+        await handleTool(name, input, { authInfo, call: async (op, args) => { seen.push([op, args]); return { ok: true }; } });
+        const bad = name === 'local_llm_overview' ? { preview: { ...input.preview, runnerId: 'llama.cpp-gpu' } } : { ...input, runnerId: 'llama.cpp-gpu' };
+        assert.notDeepEqual(violations(schemaOf(name), bad), [], name);
+    }
+    assert.deepEqual(seen, [
+        ['overview', inputs.local_llm_overview],
+        ['run', { ...inputs.local_llm_run, replace: false }],
+        ['deleteWeights', inputs.local_llm_weights_delete],
+    ]);
+});

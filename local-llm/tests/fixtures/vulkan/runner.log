@@ -1,0 +1,5 @@
+llama_model_load: using device Vulkan0 (AMD Radeon (TM) RX 7900 XTX (RADV NAVI31)) (radv) - 24000 MiB free
+Vulkan0 model buffer size = 325.02 MiB
+Vulkan0 KV buffer size = 48.00 MiB
+Vulkan0 compute buffer size = 215.00 MiB
+offloaded 25/25 layers to GPU

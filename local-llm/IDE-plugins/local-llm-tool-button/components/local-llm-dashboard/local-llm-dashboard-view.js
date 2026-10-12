@@ -76,7 +76,7 @@ function cpuCardsHtml(hardware, decision, limits) {
     const memory = hardware.memory || {};
     const disk = hardware.disk || {};
     const cores = Number.isFinite(hardware.cores) ? hardware.cores : (Number.isFinite(hardware.cpus) ? hardware.cpus : null);
-    const lead = CPU_LEADS[decision?.cause] || 'no NVIDIA GPU is used';
+    const lead = decision?.gpuBackend === 'vulkan' ? 'the Vulkan GPU cannot be used' : CPU_LEADS[decision?.cause] || 'no NVIDIA GPU is used';
     const why = String(decision?.reason || '').replace(/\.+\s*$/, '');
     // A container memory limit caps the pool, so the controller says what the pool and what is available are.
     const pool = Number.isFinite(limits?.poolBytes) ? limits.poolBytes : memory.totalBytes;
@@ -84,7 +84,7 @@ function cpuCardsHtml(hardware, decision, limits) {
     const used = Number.isFinite(pool) && Number.isFinite(available) ? pool - available : null;
     return [
         statCard('compute', 'Compute', cores === null ? 'CPU' : `CPU · ${cores} ${cores === 1 ? 'core' : 'cores'}`,
-            `No NVIDIA GPU is used: ${lead}${why ? `. ${why}` : ''}.`),
+            `${decision?.gpuBackend === 'vulkan' ? 'No GPU is used' : 'No NVIDIA GPU is used'}: ${lead}${why ? `. ${why}` : ''}.`),
         statCard('memory', 'Memory available', `${formatMiB(available)} of ${formatMiB(pool)}`,
             Number.isFinite(limits?.floorBytes) ? `keeps ${formatMiB(limits.floorBytes)} free for the workspace` : '',
             meter({ label: 'Memory in use', value: used, max: pool, text: `${formatMiB(used)} in use` })),
@@ -116,6 +116,16 @@ export function hardwareCardsHtml(hardware = {}, gpuOverride = null, { profile =
     const gpu = gpuOverride?.available ? { ...(hardware.gpu || {}), ...gpuOverride } : (hardware.gpu || {});
     const cards = [];
     const memory = hardware.memory || {};
+    if (profile === 'vulkan' || profile === 'venus') {
+        cards.push(statCard('gpu', profile === 'venus' ? 'Apple GPU · Venus' : 'AMD GPU · Vulkan', gpu.name || 'Not available',
+            profile === 'venus' ? `Headroom unknown · provisional cap ${formatMiB(limits?.deviceCapBytes)}`
+                : 'Unit-tested, unverified on AMD hardware'));
+        cards.push(statCard('ram', 'VM memory available', formatMiB(limits?.availableBytes ?? memory.availableBytes),
+            Number.isFinite(limits?.floorBytes) ? `keeps ${formatMiB(limits.floorBytes)} free` : ''));
+        const disk = hardware.disk || {};
+        cards.push(statCard('disk', 'Disk free', formatBytes(disk.freeBytes), 'for model weights'));
+        return cards.join('') + budget;
+    }
     if (gpu.available && gpu.memoryModel === 'unified') {
         // One pool: the GPU and everything else share system memory (DS005).
         const users = Array.isArray(gpu.processes) && gpu.processes.length

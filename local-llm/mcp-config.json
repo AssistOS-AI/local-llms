@@ -32,7 +32,8 @@
                   "vllm",
                   "tabbyapi",
                   "lmstudio",
-                  "llama.cpp-cpu"
+                "llama.cpp-cpu",
+                "llama.cpp-vulkan"
                 ]
               },
               "params": {
@@ -114,7 +115,8 @@
               "vllm",
               "tabbyapi",
               "lmstudio",
-              "llama.cpp-cpu"
+            "llama.cpp-cpu",
+            "llama.cpp-vulkan"
             ]
           },
           "params": {
@@ -210,7 +212,8 @@
               "vllm",
               "tabbyapi",
               "lmstudio",
-              "llama.cpp-cpu"
+            "llama.cpp-cpu",
+            "llama.cpp-vulkan"
             ]
           },
           "format": {

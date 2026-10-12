@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository provides one Ploinky agent, `local-llm/`: it runs open-weight LLMs on the machine's NVIDIA GPU when one is usable, and on the CPU otherwise, with runners chosen per model (llama.cpp, ik_llama.cpp, Ollama, vLLM, TabbyAPI, and LM Studio for internal use only), on x86 hosts with a GPU of their own and on NVIDIA DGX Spark (arm64, unified memory). Its image is built in `container-image-builds/images/local-llm` (amd64 `Dockerfile`, arm64 `Dockerfile.arm64`, published as one multi-arch index). The twelve shared-image agents the repository held before were retired; `local-llm/docs/specs/DS000-vision-and-scope.md` says what went with them.
+This repository provides one Ploinky agent, `local-llm/`: it runs open-weight LLMs on NVIDIA through CUDA, on discrete AMD Radeon through Vulkan RADV, on Apple GPUs through Vulkan Venus in a libkrun Podman machine, and on the CPU otherwise. Runners are chosen per model (llama.cpp, its Vulkan build, ik_llama.cpp, Ollama, vLLM, TabbyAPI, and LM Studio for internal use only). Vulkan profiles offer only llama.cpp's Vulkan build; AMD support is unit-tested and unverified on hardware, and Venus uses a provisional memory cap. Its image is built in `container-image-builds/images/local-llm`, with preserved amd64 and arm64 CUDA parents plus a Vulkan layer, published as one multi-arch index. The twelve shared-image agents the repository held before were retired; `local-llm/docs/specs/DS000-vision-and-scope.md` says what went with them.
 
 ## Mandatory Reading Order
 
