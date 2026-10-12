@@ -81,6 +81,9 @@ test('snapshot: render node without a Vulkan contract is unusable', async () => 
 test('snapshot: Venus fixture decides venus', async () => {
     const { snap } = await snapshot();
     assert.equal(snap.gpu.driver, 'venus'); assert.equal(snap.gpu.icdFile, contract.vulkan_icd_venus);
+    assert.equal(snap.gpu.name, 'Virtio-GPU Venus (Apple M1)');
+    assert.equal(snap.gpu.totalBytes, 16384 * MIB); assert.equal(snap.gpu.freeBytes, 16384 * MIB);
+    assert.equal(snap.gpu.vendorId, '0x106b'); assert.equal(snap.gpu.deviceType, 'PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU');
     assert.equal(decideProfile({ snapshot: snap }).profile, 'venus');
 });
 test('snapshot: RADV discrete decides vulkan; RADV integrated is unusable', async () => {
@@ -112,8 +115,8 @@ test('snapshot: incompatible driver is unusable; timeout and malformed are unrea
 test('snapshot: list-devices name mismatch, zero total and oversize values', async () => {
     for (const [devices, state] of [
         [fixture('venus-devices.txt').replace('Apple M1', 'Other M1'), 'unusable'],
-        ['Available devices:\n  Vulkan0: Apple M1 (Venus) (0 MiB, 0 MiB free)\n', 'unusable'],
-        ['Available devices:\n  Vulkan0: Apple M1 (Venus) (9007199254740992 MiB, 0 MiB free)\n', 'unreadable'],
+        ['Available devices:\n  Vulkan0: Virtio-GPU Venus (Apple M1) (0 MiB, 0 MiB free)\n', 'unusable'],
+        ['Available devices:\n  Vulkan0: Virtio-GPU Venus (Apple M1) (9007199254740992 MiB, 0 MiB free)\n', 'unreadable'],
     ]) assert.equal((await snapshot({ devices })).snap.gpu.state, state);
     assert.throws(() => parseListDevices('Vulkan0: no header'), /header/);
     assert.throws(() => parseListDevices('Available devices:\n bad row'), /Malformed/);

@@ -1,1 +1,3 @@
-All fixtures here are synthetic. RADV remains unverified on hardware. The Venus summary and device list must be replaced with captured output during the approved live validation step. The runner log covers nested parentheses in device names.
+`venus-summary.txt` and `venus-devices.txt` are unmodified stdout captures from `vulkaninfo --summary` and `llama-server --list-devices` on 2026-10-12. The machine was `ploinky-gpu`, a rootless libkrun Podman machine using krunkit 1.3.2 on Apple M1, with Mesa 25.3.6 and llama.cpp b11159. The captures report `Virtio-GPU Venus (Apple M1)` and 16384 MiB total and free memory. These heap figures do not measure available host memory or change the provisional Venus admission cap.
+
+All other fixtures are synthetic. RADV remains unverified on hardware. The runner log covers nested parentheses in device names.
