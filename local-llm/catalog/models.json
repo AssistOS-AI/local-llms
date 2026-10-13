@@ -1,5 +1,5 @@
 {
-  "schema": "local-llm.catalog/v3",
+  "schema": "local-llm.catalog/v4",
   "models": [
     {
       "id": "gpt-oss-20b",

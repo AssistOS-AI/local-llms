@@ -17,6 +17,10 @@ export function controllerHandlers(controller) {
         installRunner: (args) => controller.installRunner(args),
         uninstallRunner: (args) => controller.uninstallRunner(args),
         chatTarget: () => controller.chatTarget(),
+        beginPromptObservation: (args) => controller.beginPromptObservation(args),
+        recordPromptObservation: (args) => controller.recordPromptObservation(args),
+        observePromptStop: (args) => controller.observePromptStop(args),
+        finishPromptObservation: (args) => controller.finishPromptObservation(args),
         recordCompletion: (args) => controller.recordCompletion(args),
     };
 }

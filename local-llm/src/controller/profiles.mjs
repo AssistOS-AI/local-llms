@@ -19,6 +19,7 @@ import {
     VLLM_RUNNER_RAM_BYTES,
     computeBufferBytes,
 } from './admission.mjs';
+import { cpuFallbackExplanation } from './computeDiagnostics.mjs';
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
@@ -415,7 +416,7 @@ export function decideProfile({ snapshot, capabilities = [], unreadable = null, 
         if (gpu.device?.computeCapability) return { profile: 'cpu', cause: 'mismatch', reason: mismatch, unreadable: null };
         waitingReason = mismatch;
     } else if (gpu?.state === 'absent' || gpu?.state === 'unusable') {
-        return { profile: 'cpu', cause: gpu.state, reason: gpu.reason || 'No NVIDIA GPU is usable by this agent.', unreadable: null };
+        return { profile: 'cpu', cause: gpu.state, reason: gpu.reason || 'No GPU is usable by this agent.', unreadable: null };
     } else if (gpu?.reason) {
         waitingReason = gpu.reason;
     }
@@ -507,12 +508,7 @@ export function estimateCpuLlamaServer({ model, source, params, pool = {} }) {
 }
 
 // The lead of the "Runs on the CPU" warning, by the cause of the decision (DS005).
-const CPU_LEADS = Object.freeze({
-    absent: 'no NVIDIA GPU is attached',
-    unusable: 'the NVIDIA GPU cannot be used',
-    mismatch: 'this image\'s CUDA runners were not built for this GPU',
-    'unreadable-timeout': 'the NVIDIA GPU could not be read for 60 s',
-});
+// Shared with the public decision rendered by the Compute card.
 
 // What every CPU policy ends with: the warnings, then the verdict. The need must
 // fit the pool less the host reserve (else `incompatible`), what is available now
@@ -522,10 +518,8 @@ const CPU_LEADS = Object.freeze({
 // GPU that was unreadable would now be chosen. `shrink` is the runner's own advice.
 function cpuVerdict({ estimate, pool, model, cgroupMemory, disk, remainingDownloadBytes, gpu, decision, result, shrink }) {
     const warnings = [];
-    const lead = CPU_LEADS[decision?.cause];
-    const why = String(decision?.reason || '').replace(/\.+\s*$/, '').slice(0, 300);
-    warnings.push(`Runs on the CPU: ${[lead, why && (lead ? `(${why})` : why)].filter(Boolean).join(' ') || 'no NVIDIA GPU is used'}. `
-        + 'Generation is much slower than on a GPU.');
+    const explanation = cpuFallbackExplanation(decision, decision);
+    warnings.push(explanation.summary);
     if (Number.isFinite(estimate.floorBytes)) {
         warnings.push(`Not measured on this machine: about ${amount(estimate.ramBytes)} is an estimate. The memory guard stops the runner at once `
             + `if available memory falls below ${amount(estimate.floorBytes)}.`);
@@ -534,7 +528,7 @@ function cpuVerdict({ estimate, pool, model, cgroupMemory, disk, remainingDownlo
     if (estimate.userSizing.length) warnings.push(userSizingWarning(estimate.userSizing, 'llama-server', model));
     if (pool.capped) warnings.push(`A container memory limit of ${amount(cgroupMemory.maxBytes)} applies.`);
     if (decision?.cause === 'unreadable-timeout' && decision.gpuRecovered && gpu?.available) {
-        warnings.push(`The NVIDIA GPU is readable now (${gpu.name}); restart local-llm to use it.`);
+        warnings.push(explanation.restartHint);
     }
     if (!Number.isFinite(pool.totalBytes)) return result('incompatible', CPU_MEMORY_UNREADABLE, estimate, warnings);
     if (estimate.ramBytes > pool.totalBytes - estimate.hostReserveBytes) {
@@ -584,11 +578,11 @@ export function admitVenusLlamaServer({ model, source, params, gpu, memory = {},
         hostReserveBytes: Number.isFinite(pool.totalBytes) ? cpuHostReserveBytes(pool.totalBytes) : null, measured: false,
         basis: 'provisional Venus estimate; Mac headroom is unknown from the Podman machine' };
     const warnings = ['Venus headroom is unknown: reported free memory is only an upper bound. The Apple device cap is provisional.'];
-    if (deviceBytes > deviceCapBytes) return result('incompatible', `Needs ${amount(deviceBytes)} of Apple GPU memory; Venus admits at most ${amount(deviceCapBytes)} in this release (provisional: the Mac's free memory is not visible from the Podman machine).`, estimate, warnings);
-    if (deviceBytes > gpu.freeBytes) return result('insufficient-now', `Needs ${amount(deviceBytes)} of Apple GPU memory; ${amount(gpu.freeBytes)} is reported free.`, estimate, warnings);
-    if (!Number.isFinite(pool.totalBytes)) return result('incompatible', CPU_MEMORY_UNREADABLE, estimate, warnings);
-    if (ramBytes > pool.totalBytes - estimate.hostReserveBytes) return result('incompatible', `The Venus staging copy and runtime need ${amount(ramBytes)} of VM RAM with ${amount(estimate.hostReserveBytes)} reserved for the host.`, estimate, warnings);
-    if (ramBytes > pool.availableBytes - estimate.floorBytes) return result('insufficient-now', `The Venus staging copy and runtime need ${amount(ramBytes)} of VM RAM with ${amount(estimate.floorBytes)} kept free.`, estimate, warnings);
+    if (deviceBytes > deviceCapBytes) return result('incompatible', `Needs ${amount(deviceBytes)} of Apple GPU memory; Venus admits at most ${amount(deviceCapBytes)} in this release (provisional: the Mac's free memory is not visible from the Podman machine).`, estimate, warnings, 'venus_device_cap');
+    if (deviceBytes > gpu.freeBytes) return result('insufficient-now', `Needs ${amount(deviceBytes)} of Apple GPU memory; ${amount(gpu.freeBytes)} is reported free.`, estimate, warnings, 'venus_device_free');
+    if (!Number.isFinite(pool.totalBytes)) return result('incompatible', CPU_MEMORY_UNREADABLE, estimate, warnings, 'venus_vm_unreadable');
+    if (ramBytes > pool.totalBytes - estimate.hostReserveBytes) return result('incompatible', `The Venus staging copy and runtime need ${amount(ramBytes)} of VM RAM with ${amount(estimate.hostReserveBytes)} reserved for the host.`, estimate, warnings, 'venus_vm_capacity');
+    if (ramBytes > pool.availableBytes - estimate.floorBytes) return result('insufficient-now', `The Venus staging copy and runtime need ${amount(ramBytes)} of VM RAM with ${amount(estimate.floorBytes)} kept free.`, estimate, warnings, 'venus_vm_available');
     if (Number.isFinite(disk?.freeBytes) && remainingDownloadBytes * 1.05 > disk.freeBytes) return result('insufficient-now', 'Not enough disk for the weights and the 5 % reserve.', estimate, warnings);
     return result('ok', null, estimate, warnings);
 }

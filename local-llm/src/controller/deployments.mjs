@@ -56,6 +56,10 @@ import {
 import { createRunnerInstaller, runTool } from './runnerInstaller.mjs';
 import { loadRunnerLocks } from './runnerLock.mjs';
 import { createLogBuffer, parseRunnerReport, startRunnerProcess } from './runnerProcess.mjs';
+import { measurementStatus } from './venusMetadata.mjs';
+import { cpuFallbackExplanation } from './computeDiagnostics.mjs';
+import { createObservationClock, createStartupObservations } from './startupObservations.mjs';
+import { createPromptObservations } from '../promptObservations.mjs';
 import { acceptedRequest, createStateStore, reconcileAfterRestart, recordRequest } from './stateStore.mjs';
 import { catalogProfileOf, isVulkanProfile, vulkanContractOf } from './vulkan.mjs';
 import { createWeightStores } from './weightStores.mjs';
@@ -219,7 +223,14 @@ export function createController({
     cudaCachePath = path.join(env.LOCAL_LLM_RUN_ROOT || '/opt/runners', '.cuda-cache'),
     mesaCachePath = path.join(env.LOCAL_LLM_RUN_ROOT || '/opt/runners', '.mesa-cache'),
     now = () => new Date(),
+    observationClock = () => performance.now(),
 } = {}) {
+    const observationEvents = createObservationClock({ clock: observationClock });
+    const startupObservations = createStartupObservations(observationEvents);
+    let stopObservation = null;
+    const promptObservations = createPromptObservations({ events: observationEvents, current: () => ({
+        target: chatTarget(), deploymentId: state.deployment.id, runnerIdentity: runner?.identity,
+    }) });
     const log = createLogBuffer({ file: path.join(dataDir, 'logs', 'runner.log') });
     installWarnings.write = (message) => log.append('controller', `runner install: ${message}`);
     const queue = createCommandQueue();
@@ -379,6 +390,7 @@ export function createController({
         profileDecision = {
             profile, cause: decision.cause, reason: decision.reason, gpuName: snap?.gpu?.name ?? null, decidedAt: now().toISOString(),
             ...(snap?.gpu?.backend === 'vulkan' ? { gpuBackend: 'vulkan' } : {}),
+            ...(snap?.gpu?.diagnostic ? { diagnostic: structuredClone(snap.gpu.diagnostic) } : {}),
         };
         const because = profile === 'cpu' ? `${decision.cause}: ${String(decision.reason).replace(/\s+/g, ' ').slice(0, 200)}` : snap.gpu.name;
         log.append('controller', `hardware profile: ${profile}${because ? ` (${because})` : ''}`);
@@ -386,8 +398,11 @@ export function createController({
     }
 
     // What the overview and status say about the decision (a copy).
-    function publicDecision() {
-        return profileDecision ? { ...profileDecision } : null;
+    function publicDecision(snap) {
+        return profileDecision ? { ...structuredClone(profileDecision), ...(profile === 'cpu' ? {
+            recovery: { gpuRecovered: decisionForAdmission(snap)?.gpuRecovered === true },
+            explanation: cpuFallbackExplanation(profileDecision, decisionForAdmission(snap)),
+        } : {}) } : null;
     }
 
     // The decision the CPU admission reads: why this is the CPU and, when it
@@ -718,6 +733,7 @@ export function createController({
             params: normalized,
             context: definition.describeContext ? definition.describeContext(normalized, { model, profile: profile || 'dedicated' }) : null,
             acquisition,
+            ...(profile === 'venus' ? { measurementStatus: measurementStatus(model, runnerId, normalized) } : {}),
             admission: admitHere({ definition, model, source, params: normalized, snap, remainingDownloadBytes: acquisition.bytesNeeded }),
         };
     }
@@ -793,6 +809,7 @@ export function createController({
                     size: source?.size ?? null,
                     download: disk,
                     params,
+                    ...(profile === 'venus' ? { measurementStatus: measurementStatus(model, definition.id, params) } : {}),
                     context: params && definition.describeContext ? definition.describeContext(params, { model, profile: profile || 'dedicated' }) : null,
                     admission: !availabilityOf(definition).available
                         ? admitHere({ definition, model, source, params: {}, snap })
@@ -821,7 +838,7 @@ export function createController({
         return {
             profile,
             // Why: the cause and reason of the decision (null while undecided).
-            profileDecision: publicDecision(),
+            profileDecision: publicDecision(snap),
             limits: limitsFor(snap),
             hardware: snap,
             runners: runnerList,
@@ -859,8 +876,11 @@ export function createController({
             context: describeDeploymentContext(definition, deployment),
             lastCompletion,
             profile: profile || null,
-            profileDecision: publicDecision(),
+            profileDecision: publicDecision(snap),
             memoryGuard: guardStats ? { ...guardStats } : null,
+            startupObservation: startupObservations.snapshot(),
+            stopObservation: structuredClone(stopObservation),
+            promptObservations: promptObservations.snapshot(),
         };
     }
 
@@ -918,7 +938,7 @@ export function createController({
 
     // ------------------------------------------------------------ pipelines
 
-    async function waitForHttp(url, { headers = {}, signal, process, accept = (response) => response.ok } = {}) {
+    async function waitForHttp(url, { headers = {}, signal, process, accept = (response) => response.ok, onResponse } = {}) {
         const deadline = Date.now() + readyTimeoutMs;
         while (Date.now() < deadline) {
             if (signal?.aborted) throw new LocalLlmError('aborted', 'Stopped while starting.');
@@ -928,7 +948,12 @@ export function createController({
                 // connection and never answers cannot outlast readyTimeoutMs.
                 const probeSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(PROBE_TIMEOUT_MS)]) : AbortSignal.timeout(PROBE_TIMEOUT_MS);
                 const response = await fetchImpl(url, { headers, signal: probeSignal });
-                if (accept(response)) return response;
+                const accepted = !!accept(response);
+                if (onResponse) {
+                    try { onResponse({ status: response.status, accepted }); }
+                    catch { startupObservations.error(process?.deploymentId); }
+                }
+                if (accepted) return response;
             } catch (error) {
                 if (signal?.aborted) throw new LocalLlmError('aborted', 'Stopped while starting.');
             }
@@ -998,6 +1023,7 @@ export function createController({
             get running() { return process.running; },
         };
         const current = runner;
+        current.identity = startupObservations.attach(deployment.id, current);
         const cancelGuard = startMemoryGuard(deployment, current);
         process.exited.then((result) => {
             cancelGuard();
@@ -1227,6 +1253,7 @@ export function createController({
             launch: (spec) => launchRunner(deployment, spec, apiKey, port, { definition, runnerDir }),
             exec: stepRunner(signal),
             waitForHttp: (url, options = {}) => waitForHttp(url, { ...options, signal }),
+            observeStartup: (process, event) => startupObservations.observe(deployment.id, process, event),
             setPhase: (phase) => setPhase(phase),
             progress: updateProgress,
             record: (fields) => {
@@ -1323,12 +1350,17 @@ export function createController({
             for (const note of fetched.notes || []) log.append('controller', note);
             // Every file of the download (each shard of a split GGUF); a snapshot directory is skipped.
             for (const file of fetched.files || [fetched.path]) {
+                startupObservations.cache(deployment.id, 'filesConsidered');
                 try {
-                    if (fs.statSync(file).isFile() && !dropCache(file)) {
-                        log.append('controller', `could not drop ${path.basename(file)} from the page cache (dd iflag=nocache)`);
-                    }
-                } catch {}
+                    if (fs.statSync(file).isFile()) {
+                        startupObservations.cache(deployment.id, 'attempts');
+                        const reported = dropCache(file);
+                        startupObservations.cache(deployment.id, reported === true ? 'reportedSuccesses' : reported === false ? 'reportedFailures' : 'observationErrors');
+                        if (!reported) log.append('controller', `could not drop ${path.basename(file)} from the page cache (dd iflag=nocache)`);
+                    } else startupObservations.cache(deployment.id, 'skippedNonRegular');
+                } catch { startupObservations.cache(deployment.id, 'observationErrors'); }
             }
+            startupObservations.cache(deployment.id, 'complete');
             // The sizing read from the GGUF header at lookup is unverified until the download is: read it again from the
             // verified file, so this admission, the last one and the runner's start use what the file says (DS002).
             const verified = await verifiedGgufSizing(model, deployment.artifact, fetched.path);
@@ -1621,6 +1653,7 @@ export function createController({
             updatedAt: at,
         };
         recordRequest(state.requests, requestId, { deploymentId: state.deployment.id, at });
+        startupObservations.reset(state.deployment.id);
         save();
         startJob(state.deployment, model, requestedParams);
         return { accepted: true, deployment: publicDeployment() };
@@ -1629,12 +1662,14 @@ export function createController({
     function stop() {
         invalidateSubmittedRuns();
         return queue.run(async () => {
+            stopObservation = startupObservations.stop(state.deployment, runner);
+            promptObservations.stop(stopObservation);
             await stopEverything('stop');
             // Stop also clears a failed or paused deployment (a paused partial stays on disk).
             if (state.deployment && ['error', 'paused'].includes(state.deployment.phase)) {
                 setPhase('idle', { runner: null, error: null, pausedReason: null });
             }
-            return { deployment: publicDeployment() };
+            return { deployment: publicDeployment(), stopObservation: structuredClone(stopObservation) };
         });
     }
 
@@ -2022,6 +2057,10 @@ export function createController({
         overview,
         status,
         chatTarget,
+        beginPromptObservation: promptObservations.begin,
+        recordPromptObservation: promptObservations.record,
+        observePromptStop: promptObservations.observeStop,
+        finishPromptObservation: promptObservations.finish,
         recordCompletion,
         run,
         stop,

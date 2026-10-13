@@ -1,3 +1,4 @@
+import { cpuFallbackExplanation } from '../src/controller/computeDiagnostics.mjs';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { EventEmitter } from 'node:events';
@@ -192,12 +193,12 @@ test('report: Vulkan0 buffers, device name with parentheses, offload count; CUDA
     assert.equal(parseRunnerReport(cuda).modelMiB, 325.02);
     assert.equal(parseRunnerReport(lines).modelMiB, null);
 });
-test('dashboard: Vulkan and Venus cards; CPU card text unchanged without gpuBackend', async () => {
+test('dashboard: Vulkan and Venus cards; CPU wording names only observed backends', async () => {
     const hardware = roomy(await gpu());
     assert.match(hardwareCardsHtml(hardware, null, { profile: 'venus', limits: { deviceCapBytes: VENUS.deviceCapBytes } }), /Headroom unknown/);
     assert.match(hardwareCardsHtml(hardware, null, { profile: 'vulkan' }), /unverified on AMD hardware/);
-    assert.match(hardwareCardsHtml(hardware, null, { profile: 'cpu', decision: { cause: 'absent' } }), /No NVIDIA GPU is used: no NVIDIA GPU is attached/);
-    const fallback = hardwareCardsHtml(hardware, null, { profile: 'cpu', decision: { cause: 'unusable', gpuBackend: 'vulkan' } });
+    assert.match(hardwareCardsHtml(hardware, null, { profile: 'cpu', decision: { explanation: cpuFallbackExplanation({ cause: 'absent' }) } }), /Runs on the CPU: no usable GPU was observed/);
+    const fallback = hardwareCardsHtml(hardware, null, { profile: 'cpu', decision: { explanation: cpuFallbackExplanation({ cause: 'unusable', gpuBackend: 'vulkan' }) } });
     assert.match(fallback, /the Vulkan GPU cannot be used/); assert.doesNotMatch(fallback, /NVIDIA/);
 });
 

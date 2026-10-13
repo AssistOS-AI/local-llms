@@ -17,6 +17,7 @@ import os from 'node:os';
 
 import { HARDWARE_QUERY_REAP_MS } from '../drainBudget.mjs';
 import { hasRenderNode, readVulkanGpu } from './vulkan.mjs';
+import { computeDiagnostic, plainDiagnosticText } from './computeDiagnostics.mjs';
 import { attachCpuQuota, attachGpuBudget, attachMemoryBudget, observeMemoryBudget, parseCpuQuota, parseMpsBudget } from './ploinkyBudget.mjs';
 
 // The Box GPU wiring binds the host nvidia-smi here (the override is a test seam).
@@ -191,17 +192,19 @@ export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI,
     if (!query.ok) {
         // Ploinky starts this agent without the GPU device when the Box has no
         // GPU for it, and says why (containerSecurity.gpu, Ploinky D14).
-        const attachReason = env.PLOINKY_GPU_STATUS === 'unavailable' && env.PLOINKY_GPU_REASON
-            ? String(env.PLOINKY_GPU_REASON).slice(0, 500)
-            : null;
-        const reason = query.error?.code === 'ENOENT'
-            ? (attachReason
-                ? `No GPU is attached to this agent: ${attachReason}`
-                : 'No GPU is available to this agent. On the host, `ploinky gpu status` shows why: '
+        const attachReported = env.PLOINKY_GPU_STATUS === 'unavailable';
+        const attachReason = attachReported ? plainDiagnosticText(env.PLOINKY_GPU_REASON, 300) : null;
+        const reason = attachReported
+            ? `Ploinky reports: ${attachReason || 'GPU access is unavailable; the cause is unknown. Check host `ploinky gpu status`.'}`
+            : query.error?.code === 'ENOENT'
+                ? 'No GPU is available to this agent. On the host, `ploinky gpu status` shows why: '
                     + 'revoked: run `ploinky gpu grant --agent local-llms/local-llm`; '
-                    + 'not applied yet: run `ploinky start`; or the host has no usable GPU.')
+                    + 'not applied yet: run `ploinky start`; or the host has no usable GPU.'
             : `nvidia-smi failed: ${(query.stderr || query.error?.message || '').trim().slice(0, 300)}`;
-        return { available: false, state: query.error?.code === 'ENOENT' ? 'absent' : 'unreadable', reason };
+        return { available: false, state: query.error?.code === 'ENOENT' ? 'absent' : 'unreadable', reason,
+            diagnostic: computeDiagnostic(attachReported ? 'gpu_access_unavailable' : 'gpu_unavailable', {
+                source: attachReported ? 'ploinky-environment' : 'agent-query', message: reason,
+            }) };
     }
     const [first] = csvRows(query.stdout);
     if (!first || first.length < 5) return { available: false, state: 'unreadable', reason: 'nvidia-smi reported no GPU' };
@@ -490,7 +493,8 @@ export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signa
     const nvidia = await readGpu({ execFileImpl, signal, env });
     const gpu = nvidia.state === 'absent' && hasRenderNode({ fsApi, devDir })
         ? vulkan ? await readVulkanGpu({ execFileImpl, contract: vulkan, signal })
-            : { available: false, state: 'unusable', backend: 'vulkan', reason: 'A GPU render node is attached, but this image has no Vulkan runtime; update the local-llm image.' }
+            : { available: false, state: 'unusable', backend: 'vulkan', reason: 'A GPU render node is attached, but this image lacks a supported declared Vulkan runtime; update the local-llm image.',
+                diagnostic: computeDiagnostic('vulkan_runtime_unavailable', { backend: 'vulkan', source: 'image-contract', message: 'This image lacks a supported declared Vulkan runtime.' }) }
         : nvidia;
     const disk = await untilStopped(pendingDisk, signal);
     const cgroup = captureCgroupMemory({ fsApi });

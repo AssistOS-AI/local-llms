@@ -366,7 +366,7 @@ test('with no GPU in the container, the reason says what to run on the host', as
         nvidiaSmi: '/usr/local/nvidia/bin/nvidia-smi',
         env: { PLOINKY_GPU_STATUS: 'unavailable', PLOINKY_GPU_REASON: revoked },
     });
-    assert.equal(told.reason, `No GPU is attached to this agent: ${revoked}`);
+    assert.equal(told.reason, `Ploinky reports: ${revoked}`);
 });
 
 // The JSON Schema keywords the tools' input schemas use; any other keyword that could decide a value is refused,

@@ -1,3 +1,4 @@
+import { cpuFallbackExplanation } from '../src/controller/computeDiagnostics.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
@@ -531,21 +532,21 @@ const CPU_HARDWARE = {
 const CPU_LIMITS = { floorBytes: 618099508, hostReserveBytes: 1536 * CPU_MIB, poolBytes: 6036128 * 1024, availableBytes: 3122576 * 1024 };
 
 test('on the cpu profile the cards show the CPU, memory with its floor and disk, and why no NVIDIA GPU is used', async () => {
-    const html = hardwareCardsHtml(CPU_HARDWARE, null, { profile: 'cpu', decision: { cause: 'absent', reason: `${CPU_REASON}.` }, limits: CPU_LIMITS });
+    const html = hardwareCardsHtml(CPU_HARDWARE, null, { profile: 'cpu', decision: { explanation: cpuFallbackExplanation({ cause: 'absent', reason: `${CPU_REASON}.` }) }, limits: CPU_LIMITS });
     assert.deepEqual([...html.matchAll(/data-llm-card="([a-z]+)"/g)].map((match) => match[1]), ['compute', 'memory', 'disk']);
     assert.match(html, />CPU · 4 cores</);
-    assert.match(html, /No NVIDIA GPU is used: no NVIDIA GPU is attached\. No GPU is attached to this agent: GPU not applied to this Box yet\./);
+    assert.match(html, /Runs on the CPU: no usable GPU was observed\. No GPU is attached to this agent: GPU not applied to this Box yet\./);
     assert.match(html, />3,049 MiB of 5,895 MiB</);
     assert.match(html, /keeps 589 MiB free for the workspace/);
     assert.match(html, /<meter[^>]*aria-label="Memory in use"/);
     assert.match(html, /Disk free/);
     assert.doesNotMatch(html, /GPU memory|RAM available|Unified memory|NaN|null|undefined/);
     // Every cause leads its own wording.
-    const lead = (cause) => hardwareCardsHtml(CPU_HARDWARE, null, { profile: 'cpu', decision: { cause, reason: 'r' }, limits: CPU_LIMITS });
-    assert.match(lead('unusable'), /the NVIDIA GPU cannot be used\. r\./);
+    const lead = (cause) => hardwareCardsHtml(CPU_HARDWARE, null, { profile: 'cpu', decision: { explanation: cpuFallbackExplanation({ cause, reason: 'r' }) }, limits: CPU_LIMITS });
+    assert.match(lead('unusable'), /the GPU cannot be used\. r\./);
     assert.match(lead('mismatch'), /this image&#39;s CUDA runners were not built for this GPU\. r\./);
-    assert.match(lead('unreadable-timeout'), /the NVIDIA GPU could not be read for 60 s\. r\./);
-    assert.match(lead(undefined), /No NVIDIA GPU is used: no NVIDIA GPU is used\./);
+    assert.match(lead('unreadable-timeout'), /the GPU could not be read for 60 s\. r\./);
+    assert.match(lead(undefined), /Runs on the CPU: no GPU is used\. r\./);
     // Without the controller's limits the card falls back to the snapshot, and no missing value reaches it.
     const bare = hardwareCardsHtml({ memory: {}, disk: {} }, null, { profile: 'cpu' });
     assert.doesNotMatch(bare, /NaN|null|undefined/);

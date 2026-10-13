@@ -11,6 +11,9 @@ import test from 'node:test';
 
 import { callController, newControlChannel, startControlServer } from '../src/controlSocket.mjs';
 import { LocalLlmError } from '../src/errors.mjs';
+import { createPromptObservations } from '../src/promptObservations.mjs';
+import { createObservationClock } from '../src/controller/startupObservations.mjs';
+import { controllerHandlers } from '../src/controlHandlers.mjs';
 
 const RESPONDER = new URL('../src/chatResponder.mjs', import.meta.url).pathname;
 const TOKEN = crypto.randomBytes(32).toString('base64url');
@@ -127,4 +130,26 @@ test('the chat responder still reaches the controller with the token from its en
     const without = await runResponder({ LOCAL_LLM_SOCKET: socketPath });
     assert.equal(without.reply.error, 'unauthorized');
     assert.equal(calls, 1);
+});
+
+test('observePromptStop uses the authenticated socket and exact active lease through idle and terminal settlement', async (t) => {
+    const events = createObservationClock(); let current = { deploymentId: 'deployment', runnerIdentity: { runnerStartId: 'runner', pid: 42 },
+        target: { modelId: 'model', runnerId: 'runner', baseUrl: 'http://127.0.0.1:1', apiKey: 'private-fixture' } };
+    const observations = createPromptObservations({ events, current: () => current });
+    const { socketPath } = await server(t, controllerHandlers({ beginPromptObservation: observations.begin,
+        observePromptStop: observations.observeStop, finishPromptObservation: observations.finish }));
+    const call = (op, args, token = TOKEN) => callController(op, args, { socketPath, token, timeoutMs: 1000 });
+    const begun = await call('beginPromptObservation', { observationId: 'socket_prompt' });
+    const args = { observationId: 'socket_prompt', lease: begun.lease };
+    await assert.rejects(() => call('observePromptStop', args, 'wrong'), { code: 'unauthorized' });
+    await assert.rejects(() => call('observePromptStop', { ...args, lease: 'wrong' }), { code: 'observation_stale' });
+    assert.equal((await call('observePromptStop', args)).observation.stopNotificationSequence, null);
+    observations.stop({ deploymentId: current.deploymentId, runnerIdentity: current.runnerIdentity, sequence: events.next() }); current = null;
+    const notified = (await call('observePromptStop', args)).observation;
+    assert.equal((await call('observePromptStop', args)).observation.stopNotificationSequence, notified.stopNotificationSequence);
+    assert.doesNotMatch(JSON.stringify(notified), /lease|apiKey|baseUrl|private-fixture/);
+    const cancellation = { mechanism: 'controller-stop-abort-v1', stopSequence: notified.stopSequence, notificationSequence: notified.stopNotificationSequence };
+    const finished = await call('finishPromptObservation', { ...args, outcome: 'failed', errorCode: 'prompt_cancelled_by_stop', cancellation });
+    assert.deepEqual(finished.observation.cancellation, cancellation);
+    await assert.rejects(() => call('observePromptStop', args), { code: 'observation_stale' });
 });

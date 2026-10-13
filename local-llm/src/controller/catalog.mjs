@@ -21,8 +21,9 @@ import path from 'node:path';
 
 import { LocalLlmError } from '../errors.mjs';
 import { PROFILES, UNIFIED_LOAD_MODES } from './profiles.mjs';
+import { CATALOG_V3, CATALOG_V4, METADATA_PROFILES, validateVenusParams, validateVenusMeasurements } from './venusMetadata.mjs';
 
-export const CATALOG_SCHEMA = 'local-llm.catalog/v3';
+export const CATALOG_SCHEMA = CATALOG_V4;
 
 
 const ID_RE = /^[a-z0-9][a-z0-9._-]{1,63}$/;
@@ -297,7 +298,8 @@ function validateMemory(value) {
  * they are added, by resolving the revision through the Hugging Face API.
  * Only a seed entry may carry a unified envelope or `validated` labels.
  */
-export function validateModel(value, { seed = false } = {}) {
+export function validateModel(value, { seed = false, schema = CATALOG_SCHEMA } = {}) {
+    if (![CATALOG_V3, CATALOG_V4].includes(schema)) throw invalid('Unsupported catalog schema', 'schema');
     if (!plainObject(value)) throw invalid('A model must be an object', 'model');
     // `seed` may come back from an earlier validation; it is never taken from input.
     onlyKeys(value, [
@@ -330,14 +332,16 @@ export function validateModel(value, { seed = false } = {}) {
         || new Set(profiles).size !== profiles.length) {
         throw invalid(`profiles must list one or more of ${PROFILES.join(', ')}`, 'profiles');
     }
-    const recommended = validatePerProfile(value.recommended, 'recommended', (entry, field) => {
+    const recommended = validatePerProfile(value.recommended, 'recommended', (entry, field, profile) => {
+        if (profile === 'venus') return validateVenusParams(entry, field);
         if (!plainObject(entry)) throw invalid(`${field} must be an object of parameters`, field);
         if (entry.mtp === true && value.mtp !== true) {
             throw invalid(`${field}.mtp recommends MTP for a model that does not declare a multi-token-prediction head (mtp)`, `${field}.mtp`);
         }
         return entry;
-    });
-    const validated = validatePerProfile(value.validated, 'validated', (entry, field) => optionalText(entry, field, 600));
+    }, schema);
+    const validated = validatePerProfile(value.validated, 'validated', (entry, field, profile) => profile === 'venus'
+        ? validateVenusMeasurements(entry, field, sources.gguf) : optionalText(entry, field, 600), schema);
     if (!seed) assertNoCertification(value, validated);
     const sizingSource = validateSizingSource(value.sizingSource, sources);
     return Object.freeze({
@@ -385,15 +389,16 @@ function assertNoCertification(value, validated) {
 }
 
 // `recommended` and `validated`: { <profile>: { <runner id>: value } }.
-function validatePerProfile(value, field, validateEntry) {
+function validatePerProfile(value, field, validateEntry, schema) {
     if (value === undefined || value === null) return Object.freeze({});
     if (!plainObject(value)) throw invalid(`${field} must be an object keyed by profile`, field);
     const out = {};
     for (const [profile, byRunner] of Object.entries(value)) {
-        if (!PROFILES.includes(profile)) throw invalid(`${field} has an unknown profile '${profile}'`, `${field}.${profile}`);
+        if (!(schema === CATALOG_V3 ? PROFILES : METADATA_PROFILES).includes(profile)) throw invalid(`${field} has an unknown profile '${profile}'`, `${field}.${profile}`);
         if (!plainObject(byRunner)) throw invalid(`${field}.${profile} must be an object keyed by runner`, `${field}.${profile}`);
+        if (profile === 'venus') onlyKeys(byRunner, ['llama.cpp-vulkan'], `${field}.${profile}`);
         out[profile] = Object.freeze(Object.fromEntries(Object.entries(byRunner)
-            .map(([runnerId, entry]) => [runnerId, validateEntry(entry, `${field}.${profile}.${runnerId}`)])));
+            .map(([runnerId, entry]) => [runnerId, validateEntry(entry, `${field}.${profile}.${runnerId}`, profile)])));
     }
     return Object.freeze(structuredClone(out));
 }
@@ -439,10 +444,10 @@ function validateUnified(value) {
 
 export function loadSeedCatalog(file = path.join(import.meta.dirname, '..', '..', 'catalog', 'models.json')) {
     const document = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (document.schema !== CATALOG_SCHEMA || !Array.isArray(document.models)) {
+    if (![CATALOG_V3, CATALOG_V4].includes(document.schema) || !Array.isArray(document.models)) {
         throw new Error(`Unsupported catalog ${file}`);
     }
-    const models = document.models.map((entry) => validateModel(entry, { seed: true }));
+    const models = document.models.map((entry) => validateModel(entry, { seed: true, schema: document.schema }));
     const ids = new Set();
     for (const model of models) {
         if (ids.has(model.id)) throw new Error(`Duplicate catalog id ${model.id}`);

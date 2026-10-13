@@ -408,7 +408,10 @@ export function createLlamaServerRunner({
             profile: ctx.profile, runnerDir: ctx.runnerDir, icdFile: ctx.icdFile,
         }));
         const base = `http://127.0.0.1:${ctx.port}`;
-        await ctx.waitForHttp(`${base}/health`, { process });
+        await ctx.waitForHttp(`${base}/health`, { process,
+            ...(['llama.cpp', 'llama.cpp-cpu', 'llama.cpp-vulkan'].includes(id) && ctx.observeStartup
+                ? { onResponse: (event) => ctx.observeStartup(process, event) } : {}),
+        });
         await ctx.waitForHttp(`${base}/v1/models`, { headers: { authorization: `Bearer ${ctx.apiKey}` }, process });
         return {};
     }

@@ -74,7 +74,7 @@ test('readGpu: a missing nvidia-smi is absent, a failed first query is unreadabl
     const attached = await read({ [GPU_QUERY]: enoent() }, { PLOINKY_GPU_STATUS: 'unavailable', PLOINKY_GPU_REASON: 'GPU not applied to this Box yet' });
     assert.equal(attached.gpu.available, false);
     assert.equal(attached.gpu.state, 'absent');
-    assert.equal(attached.gpu.reason, 'No GPU is attached to this agent: GPU not applied to this Box yet');
+    assert.equal(attached.gpu.reason, 'Ploinky reports: GPU not applied to this Box yet');
     const status = await read({ [GPU_QUERY]: enoent() }, { PLOINKY_GPU_STATUS: 'attached' });
     assert.equal(status.gpu.state, 'absent', 'ENOENT is absent whatever Ploinky reports');
     assert.match(status.gpu.reason, /^No GPU is available to this agent\. On the host, `ploinky gpu status` shows why/);
@@ -359,22 +359,21 @@ test('CPU admission warnings: the decision reason, and a restart hint only after
     const model = cpuModel('m', 380, { layers: 24, kv: 12288 });
     const run = (decision, gpu = absentGpu) => admitOn({ model, source: cpuSource(380), decision, gpu }).warnings;
     const absent = run(absentDecision);
-    assert.equal(absent[0], 'Runs on the CPU: no NVIDIA GPU is attached (No GPU is attached to this agent: GPU not applied to this Box yet). '
-        + 'Generation is much slower than on a GPU.');
+    assert.equal(absent[0], 'Runs on the CPU: no usable GPU was observed. No GPU is attached to this agent: GPU not applied to this Box yet.');
     assert.match(absent[1], /^Not measured on this machine: about 1\.38 GiB is an estimate\. The memory guard stops the runner at once if available memory falls below 589 MiB\.$/);
     // Every cause has its own lead, and a reason is cut at 300 characters.
     const leads = {
-        unusable: /^Runs on the CPU: the NVIDIA GPU cannot be used \(why\)\./,
-        mismatch: /^Runs on the CPU: this image's CUDA runners were not built for this GPU \(why\)\./,
-        'unreadable-timeout': /^Runs on the CPU: the NVIDIA GPU could not be read for 60 s \(why\)\./,
+        unusable: /^Runs on the CPU: the GPU cannot be used\. why\./,
+        mismatch: /^Runs on the CPU: this image's CUDA runners were not built for this GPU\. why\./,
+        'unreadable-timeout': /^Runs on the CPU: the GPU could not be read for 60 s\. why\./,
     };
     for (const [cause, pattern] of Object.entries(leads)) assert.match(run({ cause, reason: 'why.' })[0], pattern, cause);
     const long = run({ cause: 'unusable', reason: 'x'.repeat(500) })[0];
-    assert.ok(long.includes(`(${'x'.repeat(300)})`) && !long.includes('x'.repeat(301)));
-    assert.equal(run(undefined)[0], 'Runs on the CPU: no NVIDIA GPU is used. Generation is much slower than on a GPU.');
+    assert.ok(long.includes(`. ${'x'.repeat(300)}.`) && !long.includes('x'.repeat(301)));
+    assert.equal(run(undefined)[0], 'Runs on the CPU: no GPU is used.');
     // The restart hint: only for unreadable-timeout, only once the GPU would now be chosen.
     const recovered = { cause: 'unreadable-timeout', reason: 'nvidia-smi failed', gpuRecovered: true };
-    assert.equal(run(recovered, gb10).at(-1), 'The NVIDIA GPU is readable now (NVIDIA GB10); restart local-llm to use it.');
+    assert.equal(run(recovered, gb10).at(-1), 'GPU access is available now; restart local-llm to select it. Stopping and starting the model does not change the compute profile.');
     assert.equal(run({ ...recovered, gpuRecovered: false }, gb10).some((warning) => /restart local-llm/.test(warning)), false, 'not chosen now (a mismatch, say)');
     assert.equal(run(recovered, unreadableGpu).some((warning) => /restart local-llm/.test(warning)), false, 'still unreadable');
     for (const cause of ['absent', 'unusable', 'mismatch']) {
@@ -900,7 +899,7 @@ test('controller: an API-only caller reaches the cpu decision 60 s after the fir
     assert.equal((await h.controller.run({ modelId: 'small-cpu', runnerId: 'llama.cpp', requestId: 'request-0001' })).accepted, true);
     await until(() => h.controller.state.deployment?.phase === 'ready');
     // The warning of a Run decided this way names the wait and the reason.
-    assert.match(h.controller.state.deployment.admission.warnings[0], /^Runs on the CPU: the NVIDIA GPU could not be read for 60 s \(nvidia-smi failed: timed out\)\./);
+    assert.match(h.controller.state.deployment.admission.warnings[0], /^Runs on the CPU: the GPU could not be read for 60 s\. nvidia-smi failed: timed out\./);
     await h.controller.stop();
     // Only a Run first: the first refused Run starts the window, and the next Run after 60 s is accepted.
     const runOnly = harness(t, { clock, snap: () => cpuSnapshot({ gpu: unreadableGpu }) });
@@ -964,7 +963,7 @@ test('controller: a GPU the image was not built for runs CPU-offered models on t
     assert.ok(!overview.models.some((model) => model.id === 'big-moe'));
     const row = overview.models.find((model) => model.id === 'small-cpu').runners['llama.cpp'];
     assert.equal(row.admission.status, 'ok', 'the image\'s GPU list does not block a CPU run');
-    assert.match(row.admission.warnings[0], /^Runs on the CPU: this image's CUDA runners were not built for this GPU \(This image's runners are built for GPUs of compute capability 12\.1; NVIDIA Thor is 11\.0\)\./);
+    assert.match(row.admission.warnings[0], /^Runs on the CPU: this image's CUDA runners were not built for this GPU\. This image's runners are built for GPUs of compute capability 12\.1; NVIDIA Thor is 11\.0\./);
     await assert.rejects(() => h.controller.run({ modelId: 'big-moe', runnerId: 'llama.cpp', requestId: 'request-0001' }), (error) => error.code === 'unknown_model');
     assert.equal(h.calls.download.length, 0);
     // A CPU Run goes ahead although a GPU is attached: no driver library, no visible device.
