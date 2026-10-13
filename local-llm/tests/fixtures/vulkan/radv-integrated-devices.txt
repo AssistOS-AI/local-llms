@@ -1,0 +1,2 @@
+Available devices:
+  Vulkan0: AMD Radeon Graphics (16384 MiB, 16384 MiB free)

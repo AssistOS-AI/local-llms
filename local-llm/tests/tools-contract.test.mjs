@@ -267,6 +267,7 @@ test('the manifest declares the LM Studio switch as an optional variable that is
         LOCAL_LLM_MAX_COMPLETION_TOKENS: { required: false }, LOCAL_LLM_RUNNER_TIMEOUT_MS: { required: false },
         // The operator's switch for experimental vLLM on unified memory (DS004), off by default.
         [VLLM_UNIFIED_SWITCH]: { required: false },
+        LOCAL_LLM_AMD_APU: { required: false }, LOCAL_LLM_APU_GUARD_FLOOR_BYTES: { required: false },
     });
     assert.match(manifest.description, new RegExp(`ploinky var ${VLLM_UNIFIED_SWITCH} experimental`));
     assert.match(manifest.description, /LM Studio/);

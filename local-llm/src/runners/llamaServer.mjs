@@ -8,7 +8,7 @@ import path from 'node:path';
 
 import { admitLlamaServer, admissionResult } from '../controller/admission.mjs';
 import { cpuDefaultThreads, defaultThreads, performanceCoreCount, physicalCoreCount } from '../controller/hardware.mjs';
-import { CPU, UNIFIED, admitCpuLlamaServer, admitUnifiedLlamaServer, admitVenusLlamaServer } from '../controller/profiles.mjs';
+import { CPU, UNIFIED, admitApuLlamaServer, admitCpuLlamaServer, admitUnifiedLlamaServer, admitVenusLlamaServer } from '../controller/profiles.mjs';
 import { VULKAN_ALL_ICD_FILES, isVulkanProfile, vulkanProbeEnv } from '../controller/vulkan.mjs';
 import { parseRunnerReport } from '../controller/runnerProcess.mjs';
 import {
@@ -196,6 +196,14 @@ export const LLAMA_SERVER_VENUS_PARAM_SCHEMA = deepFreeze({
     },
 });
 
+export const LLAMA_SERVER_APU_PARAM_SCHEMA = deepFreeze({
+    type: 'object', additionalProperties: false,
+    properties: {
+        ctxSize: { type: 'integer', minimum: 512, maximum: 131072, default: 4096, title: 'Context size' },
+        parallel: { type: 'integer', minimum: 1, maximum: 4, default: 1, title: 'Parallel slots' },
+    },
+});
+
 function assertModelId(model) {
     if (typeof model?.id !== 'string' || model.id.length === 0) {
         throw codedError('invalid_launch', 'model.id must be a non-empty string', { field: 'model.id' });
@@ -246,6 +254,7 @@ export function createLlamaServerRunner({
         cpu: offeredOn('cpu') && dialect.cpu ? LLAMA_SERVER_CPU_PARAM_SCHEMA : null,
         vulkan: profiles?.includes('vulkan') ? paramSchema : null,
         venus: profiles?.includes('venus') ? LLAMA_SERVER_VENUS_PARAM_SCHEMA : null,
+        apu: profiles?.includes('apu') ? LLAMA_SERVER_APU_PARAM_SCHEMA : null,
     });
     let autoThreads = null;
     let unifiedThreads = null;
@@ -256,7 +265,7 @@ export function createLlamaServerRunner({
     // cores. On the CPU profile the same, and otherwise physical cores minus 1
     // up to four cores, where minus 2 would leave one or two threads. An
     // admin-set value wins; the stored parameters keep "empty".
-    const threadsFor = (values, profile) => values.threads ?? (profile === 'unified' || profile === 'venus'
+    const threadsFor = (values, profile) => values.threads ?? (profile === 'unified' || profile === 'venus' || profile === 'apu'
         ? (unifiedThreads ??= perfCores() ?? defaultThreads(cpuCores()))
         : profile === 'cpu'
             ? (cpuThreads ??= perfCores() ?? cpuDefaultThreads(cpuCores()))
@@ -326,6 +335,12 @@ export function createLlamaServerRunner({
     }
 
     function tuningArgs(values, profile) {
+        if (profile === 'apu') {
+            const args = ['--ctx-size', values.ctxSize, '--device', 'Vulkan0', '-ngl', 999, '--fit', 'off', '--flash-attn', 'auto',
+                '-ctk', 'f16', '-ctv', 'f16', '--threads', threadsFor(values, profile), '-np', values.parallel];
+            if (values.parallel > 1) args.push('--kv-unified');
+            return [...args, '-b', 512, '-ub', 512, '--cache-ram', 256];
+        }
         if (profile === 'venus') {
             const args = ['--ctx-size', values.ctxSize, '--device', 'Vulkan0', '-ngl', 999, '--flash-attn', 'auto',
                 '-ctk', 'f16', '-ctv', 'f16', '--threads', threadsFor(values, profile), '-np', values.parallel];
@@ -385,13 +400,13 @@ export function createLlamaServerRunner({
             ...dialect.quietArgs,
             '--alias', assertModelId(model),
             ...tuningArgs(values, profile),
-            ...extraArgs(values, model)
+            ...extraArgs(profile === 'apu' ? { ...values, loadMode: 'none' } : values, model)
         ];
         // The CPU launch never loads the CUDA driver library, even where a GPU is
         // attached but unusable: no library path, and no device is visible (DS003).
         let launchEnv = profile === 'cpu' ? { CUDA_VISIBLE_DEVICES: '' } : { LD_LIBRARY_PATH: NVIDIA_LIB_DIR };
         if (isVulkanProfile(profile)) {
-            const expected = profile === 'vulkan' ? 'radeon_icd.json' : 'virtio_icd.json';
+            const expected = profile === 'vulkan' || profile === 'apu' ? 'radeon_icd.json' : 'virtio_icd.json';
             vulkanProbeEnv(icdFile);
             if (icdFile !== `/opt/local-llm/vulkan/icd.d/${expected}`) throw codedError('invalid_launch', 'The ICD file does not match the hardware profile.');
             launchEnv = { VK_DRIVER_FILES: icdFile, VK_LOADER_LAYERS_DISABLE: '~all~' };
@@ -448,6 +463,7 @@ export function createLlamaServerRunner({
                 [...verdict.warnings, 'Sized with the CUDA estimates; AMD support is unit-tested only and not measured on Vulkan.'], verdict.reasonCode);
         } } : {}),
         ...(schemas.venus ? { admitVenus: (input) => admitVenusLlamaServer(input, admissionResult) } : {}),
+        ...(schemas.apu ? { admitApu: (input) => admitApuLlamaServer(input, admissionResult) } : {}),
         ...(profiles ? { profiles: Object.freeze([...profiles]) } : {}),
         parseReport: parseRunnerReport
     });

@@ -10,7 +10,7 @@ import { StringDecoder } from 'node:string_decoder';
 
 const LOG_FILE_MAX_BYTES = 20 * 1024 * 1024;
 
-export function createLogBuffer({ limit = 2000, file = null, fsApi = fs } = {}) {
+export function createLogBuffer({ limit = 2000, file = null, fsApi = fs, onLine = null } = {}) {
     let seq = 0;
     const lines = [];
     const secrets = new Set();
@@ -21,11 +21,12 @@ export function createLogBuffer({ limit = 2000, file = null, fsApi = fs } = {}) 
         return result;
     }
 
-    function append(stream, text) {
+    function append(stream, text, observer = onLine) {
         for (const raw of String(text).split(/\r?\n/)) {
             if (!raw) continue;
             seq += 1;
             const line = { seq, at: new Date().toISOString(), stream, line: redact(raw).slice(0, 2000) };
+            observer?.(line);
             lines.push(line);
             if (lines.length > limit) lines.shift();
             if (file) {
@@ -85,7 +86,7 @@ const VULKAN_DEVICE_PATTERN = /using device (Vulkan\d+) \((.*)\) \(([^()]*)\) - 
  * device never shows a CPU.
  */
 export function parseRunnerReport(lines, { profile = null } = {}) {
-    const vulkan = profile === 'vulkan' || profile === 'venus';
+    const vulkan = profile === 'vulkan' || profile === 'venus' || profile === 'apu';
     const report = { modelMiB: null, kvMiB: null, computeMiB: null, offloaded: null, device: null };
     const sums = { kvMiB: 0 };
     const cpu = { modelMiB: null, kvMiB: null, computeMiB: null };
@@ -135,6 +136,31 @@ export function parseRunnerReport(lines, { profile = null } = {}) {
     const known = ['modelMiB', 'kvMiB', 'computeMiB'].map((key) => report[key]).filter((value) => value !== null);
     report.totalMiB = known.length ? Math.round(known.reduce((total, value) => total + value, 0)) : null;
     return report;
+}
+
+/** Bounded placement facts for one APU launch, independent of log eviction. */
+export function createReportCollector() {
+    const report = { modelMiB: null, kvMiB: null, computeMiB: null, offloaded: null, device: null };
+    return Object.freeze({
+        append({ line, stream }) {
+            if (!['stdout', 'stderr'].includes(stream)) return;
+            for (const [key, pattern] of VULKAN_BUFFER_PATTERNS) {
+                const match = pattern.exec(line);
+                const value = match ? Number(match[1]) : NaN;
+                if (!Number.isFinite(value) || value < 0) continue;
+                report[key] = Math.round(((report[key] ?? 0) + value) * 100) / 100;
+            }
+            const device = VULKAN_DEVICE_PATTERN.exec(line);
+            if (device && report.device === null) report.device = `${device[1]} (${device[2]})`;
+            const offloaded = /offloaded (\d+)\/(\d+) layers to GPU/.exec(line);
+            if (offloaded && report.offloaded === null) report.offloaded = { layers: Number(offloaded[1]), of: Number(offloaded[2]) };
+        },
+        read() {
+            const known = ['modelMiB', 'kvMiB', 'computeMiB'].map((key) => report[key]).filter((value) => value !== null);
+            return { ...report, offloaded: report.offloaded && { ...report.offloaded },
+                totalMiB: known.length ? Math.round(known.reduce((sum, value) => sum + value, 0)) : null };
+        },
+    });
 }
 
 // Runner output arrives in arbitrary chunks. Only whole lines are logged, so a

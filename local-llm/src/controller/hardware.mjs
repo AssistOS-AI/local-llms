@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 
 import { HARDWARE_QUERY_REAP_MS } from '../drainBudget.mjs';
-import { hasRenderNode, readVulkanGpu } from './vulkan.mjs';
+import { APU_BUDGET_REASON, hasRenderNode, readVulkanGpu } from './vulkan.mjs';
 import { attachCpuQuota, attachGpuBudget, attachMemoryBudget, observeMemoryBudget, parseCpuQuota, parseMpsBudget } from './ploinkyBudget.mjs';
 
 // The Box GPU wiring binds the host nvidia-smi here (the override is a test seam).
@@ -483,17 +483,21 @@ export async function readDisk(dataDir, { statfs = (target) => fs.promises.statf
  * the GPU queries are killed (readGpu), and the free-disk read, which cannot
  * be cancelled, is not waited for; its late answer is dropped.
  */
-export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signal, env = process.env, vulkan = null, devDir = '/dev/dri' } = {}) {
+export async function readSnapshot({ dataDir, execFileImpl, fsApi, statfs, signal, env = process.env, vulkan = null, apu = false, devDir = '/dev/dri' } = {}) {
     if (signal?.aborted) throw stoppedError();
     // Read alongside the GPU queries; it never rejects.
     const pendingDisk = readDisk(dataDir, { statfs }).catch((error) => ({ freeBytes: null, totalBytes: null, error: error.message }));
     const nvidia = await readGpu({ execFileImpl, signal, env });
-    const gpu = nvidia.state === 'absent' && hasRenderNode({ fsApi, devDir })
-        ? vulkan ? await readVulkanGpu({ execFileImpl, contract: vulkan, signal })
+    let gpu = nvidia.state === 'absent' && hasRenderNode({ fsApi, devDir })
+        ? vulkan ? await readVulkanGpu({ execFileImpl, contract: vulkan, signal, apuEnabled: apu })
             : { available: false, state: 'unusable', backend: 'vulkan', reason: 'A GPU render node is attached, but this image has no Vulkan runtime; update the local-llm image.' }
         : nvidia;
     const disk = await untilStopped(pendingDisk, signal);
     const cgroup = captureCgroupMemory({ fsApi });
+    if (gpu.memoryModel === 'shared' && (cgroup.observation.memoryReadState === 'unknown'
+        || Number.isSafeInteger(cgroup.observation.finiteMemoryBytes))) {
+        gpu = { available: false, state: 'unusable', backend: 'vulkan', reason: APU_BUDGET_REASON };
+    }
     const snapshot = {
         at: new Date().toISOString(),
         gpu,

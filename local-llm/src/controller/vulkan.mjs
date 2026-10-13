@@ -5,11 +5,12 @@ import path from 'node:path';
 import { runHardwareQuery } from './hardware.mjs';
 
 const MIB = 1024 * 1024;
-export const VULKAN_PROFILES = Object.freeze(['vulkan', 'venus']);
+export const VULKAN_PROFILES = Object.freeze(['vulkan', 'venus', 'apu']);
 export const VULKAN_SERVER = '/opt/llama.cpp-vulkan/llama-server';
 export const VULKAN_ALL_ICD_FILES = '/opt/local-llm/vulkan/icd.d/radeon_icd.json:/opt/local-llm/vulkan/icd.d/virtio_icd.json';
 export const isVulkanProfile = (profile) => VULKAN_PROFILES.includes(profile);
-export const catalogProfileOf = (profile) => profile === 'vulkan' ? 'dedicated' : profile === 'venus' ? 'cpu' : profile;
+export const catalogProfileOf = (profile) => profile === 'vulkan' ? 'dedicated' : ['venus', 'apu'].includes(profile) ? 'cpu' : profile;
+export const APU_BUDGET_REASON = 'APU GPU use is not available while this agent has a finite or unknown container memory limit; such a limit is not verified to cap shared GPU memory.';
 export const vulkanRefusal = (name) => `${name} is not available on a Vulkan GPU in this release; use llama.cpp (Vulkan build).`;
 
 export function vulkanContractOf(contract) {
@@ -46,6 +47,10 @@ export function parseVulkanSummary(text) {
             if (matches.length !== 1) throw new Error(`GPU${device.index} has no unique ${field}.`);
             device[field] = matches[0][1].trim();
         }
+        for (const field of ['deviceID', 'driverInfo', 'apiVersion']) {
+            const matches = [...blocks[i + 1].matchAll(new RegExp(`^\\s*${field}\\s*=\\s*(\\S[^\\r\\n]*)$`, 'gm'))];
+            if (matches.length === 1) device[field] = matches[0][1].trim();
+        }
         devices.push(device);
     }
     if (!devices.length && !/^Vulkan Instance Version:\s*\d+(?:\.\d+)+\s*$/m.test(String(text))) throw new Error('Malformed Vulkan summary.');
@@ -64,7 +69,7 @@ export function parseListDevices(text) {
     });
 }
 
-export async function readVulkanGpu({ execFileImpl = execFile, contract, signal } = {}) {
+export async function readVulkanGpu({ execFileImpl = execFile, contract, signal, apuEnabled = false } = {}) {
     const unavailable = (state, reason) => ({ available: false, state, backend: 'vulkan', reason });
     async function query(command, args, icds) {
         const result = await runHardwareQuery(execFileImpl, command, args, { signal, env: vulkanProbeEnv(icds) });
@@ -82,7 +87,9 @@ export async function readVulkanGpu({ execFileImpl = execFile, contract, signal 
         || device.deviceType === 'PHYSICAL_DEVICE_TYPE_CPU')) return unavailable('unusable', 'Vulkan needs exactly one RADV or Venus GPU and no software device.');
     const device = accepted[0];
     const driver = device.driverID === 'DRIVER_ID_MESA_RADV' ? 'radv' : 'venus';
-    if (driver === 'radv' && device.deviceType !== 'PHYSICAL_DEVICE_TYPE_DISCRETE_GPU') return unavailable('unusable', 'Only discrete AMD Radeon GPUs are supported through RADV.');
+    const integrated = driver === 'radv' && device.deviceType === 'PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU';
+    if (integrated && !apuEnabled) return unavailable('unusable', `An AMD integrated GPU (${device.deviceName}) is attached. APU use is off: the operator enables it with ploinky var LOCAL_LLM_AMD_APU experimental and a restart of local-llm.`);
+    if (driver === 'radv' && !integrated && device.deviceType !== 'PHYSICAL_DEVICE_TYPE_DISCRETE_GPU') return unavailable('unusable', 'Only discrete or experimental integrated AMD Radeon GPUs are supported through RADV.');
     const icdFile = contract[driver === 'radv' ? 'vulkan_icd_radv' : 'vulkan_icd_venus'];
     const list = await query(contract.vulkan_llama_cpp_server, ['--list-devices'], icdFile);
     if (!list.ok) return unavailable('unreadable', `Vulkan device query failed: ${(list.stderr || list.error?.message || '').trim().slice(0, 300)}`);
@@ -95,6 +102,7 @@ export async function readVulkanGpu({ execFileImpl = execFile, contract, signal 
     if (![totalBytes, freeBytes].every((value) => Number.isSafeInteger(value) && value >= 0)) return unavailable('unreadable', 'Vulkan memory figures exceed safe byte counts.');
     if (totalBytes <= 0 || freeBytes > totalBytes) return unavailable('unusable', 'Vulkan reported no usable memory capacity.');
     return { available: true, backend: 'vulkan', driver, name: device.deviceName, deviceType: device.deviceType,
-        vendorId: device.vendorID, memoryModel: driver === 'radv' ? 'dedicated' : 'venus', totalBytes,
+        vendorId: device.vendorID, memoryModel: integrated ? 'shared' : driver === 'radv' ? 'dedicated' : 'venus', totalBytes,
+        ...(integrated ? Object.fromEntries(['deviceID', 'driverInfo', 'apiVersion'].filter((key) => device[key]).map((key) => [key, device[key]])) : {}),
         usedBytes: totalBytes - freeBytes, freeBytes, processes: [], icdFile };
 }

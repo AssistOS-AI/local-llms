@@ -1,13 +1,13 @@
 ---
 title: DS005-hardware-profiles
-summary: NVIDIA dedicated and unified memory, CPU fallback, discrete AMD Vulkan and Apple Venus profiles, their detection, admission and memory guards.
+summary: NVIDIA dedicated and unified memory, CPU fallback, discrete AMD Vulkan, experimental shared-memory AMD APU and Apple Venus profiles, their detection, admission and memory guards.
 ---
 
 # DS005 Hardware Profiles
 
 ## Introduction
 
-One agent, `local-llms/local-llm`, chooses a hardware profile from the attached GPU and runtime contract. NVIDIA GPUs keep the dedicated or unified CUDA policy. A discrete AMD Radeon GPU uses Vulkan RADV. An Apple GPU uses Vulkan Venus inside a libkrun Podman machine. A host with no usable GPU uses the CPU. Each policy has its own memory accounting and safety rules. The JavaScript is the same on every architecture; only the image's binaries and runner lock differ.
+One agent, `local-llms/local-llm`, chooses a hardware profile from the attached GPU and runtime contract. NVIDIA GPUs keep the dedicated or unified CUDA policy. A discrete AMD Radeon GPU uses Vulkan RADV. An AMD integrated GPU can use the experimental APU policy behind an operator switch. An Apple GPU uses Vulkan Venus inside a libkrun Podman machine. A host with no usable GPU uses the CPU. Each policy has its own memory accounting and safety rules. The JavaScript is the same on every architecture; only the image's binaries and runner lock differ.
 
 ## Core Content
 
@@ -20,12 +20,13 @@ One agent, `local-llms/local-llm`, chooses a hardware profile from the attached 
 | `cpu` | none is used: no NVIDIA GPU is attached, or the attached one cannot be used | one pool: MemTotal and MemAvailable from `/proc/meminfo`, capped by a container memory limit when one is set |
 | `vulkan` | RADV discrete Radeon, with numeric device memory | Dedicated GPU estimates plus system RAM; unit-tested and unverified on AMD hardware |
 | `venus` | Apple GPU reached through Venus, outside the VM's memory accounting | Provisional device cap plus a conservative VM staging pool |
+| `apu` | Integrated RADV, `memoryModel: shared`, default off and unqualified | One physical RAM pool for device and host bytes, with separate mapping ceilings and no finite or unknown container budget |
 
 The dedicated profile keeps DS003's admission and defaults. Some changes made for the unified profile apply to both (catalog v3, `loadMode`, the runner's OOM priority and JIT cache location, runner availability from the image); they are marked where they are described. The `cpu` profile is chosen automatically; no operator switch, catalog entry or parameter turns it on or off.
 
 ### Detecting the memory model
 
-Vulkan detection runs only after NVIDIA is absent and a character render node is present. The image's source contract must have `vulkan_contract=1`, a pinned llama.cpp version, the exact Vulkan server and vulkaninfo paths, a bounded Mesa version, and normalized absolute JSON ICD paths under `/opt/local-llm/vulkan/icd.d/`. Missing or invalid keys make the render node unusable. Only `DRIVER_ID_MESA_RADV` and `DRIVER_ID_MESA_VENUS` are accepted; CPU and software devices are refused, as are multiple accepted devices and integrated RADV devices. A usable Vulkan snapshot chooses `vulkan` for RADV and `venus` for Venus before the CUDA compute-capability check. The NVIDIA success path and ordinary CPU overviews and profile log lines retain their previous behavior.
+Vulkan detection runs only after NVIDIA is absent and a character render node is present. The image's source contract must have `vulkan_contract=1`, a pinned llama.cpp version, the exact Vulkan server and vulkaninfo paths, a bounded Mesa version, and normalized absolute JSON ICD paths under `/opt/local-llm/vulkan/icd.d/`. Missing or invalid keys make the render node unusable. Only `DRIVER_ID_MESA_RADV` and `DRIVER_ID_MESA_VENUS` are accepted; CPU and software devices and multiple accepted devices are refused. Integrated RADV remains unusable until the exact APU switch is enabled. A usable snapshot chooses `vulkan` for dedicated RADV, `apu` for shared RADV and `venus` for Venus before the CUDA compute-capability check. Venus is identified by its driver, even though its device type is integrated. The NVIDIA success path and ordinary CPU overviews and profile log lines retain their previous behavior.
 
 ### Vulkan and Venus admission
 
@@ -40,6 +41,54 @@ Venus device need is the pinned weights plus f16 KV for context times parallel s
 The 2 GiB cap is provisional. On the 16 GiB M1, the 6 GiB VM plus the cap reaches about half of host RAM. No dynamic Vulkan memory budget is used for admission. Captured live evidence is still required before claiming Apple runtime validation; AMD remains unverified until measured on a real discrete Radeon GPU.
 
 The dashboard names AMD Vulkan and Apple Venus explicitly. RADV shows its unverified hardware status. Venus shows unknown headroom, the provisional cap and VM memory. A CPU fallback decision with `gpuBackend=vulkan` names the Vulkan GPU; CPU decisions without that field retain their previous text. Runner reports read Vulkan0 model, KV and compute buffers and nested device names only on these profiles; CUDA reports retain their existing parser.
+
+### Experimental AMD APU policy
+
+`LOCAL_LLM_AMD_APU=experimental` is read once from the controller's environment, passed through `readSnapshot({ apu })` and applied in `readVulkanGpu({ apuEnabled })`. The default is false. With the switch off the GPU keeps the existing unavailable snapshot shape and selects `cpu`, cause `unusable`; the reason names the operator command. With it on, integrated RADV must still pass the unique Vulkan0 device-name and safe-byte checks. Its driver is `radv`, memory model `shared`. Finite or unknown `memoryBudgetOf` observations refuse it at discovery and at admission. Container limits have not been proven to charge GTT allocations.
+
+Only `llama.cpp-vulkan` has `admitApu`. The CPU catalog determines eligibility, while APU recommendations are empty. The schema accepts only `ctxSize`, 512 to 131072 with default 4096, and `parallel`, 1 to 4 with default 1. Parameters such as GPU layers, threads or load mode cannot override the fixed launch. The launch uses `--device Vulkan0 -ngl 999 --fit off --flash-attn auto -ctk f16 -ctv f16`, high-performance threads, `-np`, unified KV above one slot, batch and micro-batch 512, prompt cache 256 MiB and `--load-mode none`. RADV's ICD is selected explicitly. Runner environment excludes MPS, the switches, tokens and other agent secrets; the Mesa cache remains outside `/data`.
+
+The provisional constants in `APU` are:
+
+| Constant | Value |
+| --- | --- |
+| `stagingFactor` | 1.0 |
+| `runtimeBytes` | 1 GiB |
+| `deviceOverheadBytes` | 256 MiB |
+| `deviceTotalFraction` | 0.9 |
+| `deviceMarginBytes` | 512 MiB |
+| `cacheRamMiB` | 256 |
+| `batchSize` | 512 |
+| `guardSampleMs` | 250 ms |
+| `guardStaleMs` | 2000 ms |
+| `minModelBufferFraction` | null, pending hardware captures and review |
+
+`deviceBytes` is pinned weights plus f16 KV for context times parallel slots plus fixed KV bytes, the compute estimate with flash attention assumed off, and device overhead. `needLoadPeak` is `deviceBytes + stagingFactor × weights + runtimeBytes + cacheRamBytes`. This counts device bytes once in physical RAM. The BIOS carve-out gives no credit. Vulkan total and free values constrain mappings; they never represent extra RAM or available CPU headroom.
+
+| Constraint | Permanent refusal | Temporary refusal |
+| --- | --- | --- |
+| C1 physical RAM | Peak exceeds `cpuPool.totalBytes - cpuHostReserveBytes`; unreadable or contradictory meminfo | Peak exceeds `cpuPool.availableBytes - cpuFloorBytes` |
+| C2 mappings | Device need exceeds `deviceTotalFraction × gpu.totalBytes`; unreadable or contradictory device bytes | Device need exceeds `gpu.freeBytes - deviceMarginBytes` |
+| C3 budget | Finite container budget, not proven to constrain shared GPU pages | Unknown budget gives `budget_unreadable` |
+| C4 disk | No separate permanent refusal | Remaining download bytes plus 5 percent exceed free disk |
+
+Admission returns `estimate.constraint` on APU C1-C4 refusals, `measured: false`, and an experimental, unqualified warning. Every Run repeats admission from a fresh snapshot before launch. After commitment, missing GPUs and driver or shared/dedicated memory-model changes refuse Runs with restart guidance. No allocation error, pressure stop or failed offload proof retries on CPU. Clearing the switch or revoking GPU access and restarting is the rollback. Retained APU deployment records in paused, idle or error remain records and never launch automatically.
+
+The pooled guard samples MemAvailable in every phase, stops immediately when meminfo is unreadable or below the admission floor, and applies the existing PSI rule, full avg10 at least 50 percent with available memory below twice the floor. A monotonic successful-sample gap over 2000 ms kills the process group with `stopped: memory telemetry stale`. Wall-clock jumps do not trigger staleness. `guardStats.maxMonotonicGapMs` records the largest gap. A finite or unknown budget observed during a run also stops it.
+
+A floor breach supplies a typed `host-memory-floor` cause with sampled bytes. The current APU launch's `guardStop` binds those bytes and the existing floor log sequence to the controller instance, deployment, request and process. It records the monotonic kill invocation immediately before calling the captured process object's kill, then records resolved or rejected settlement. The event remains through error or idle until another launch resets it. A delayed callback from an older launch cannot publish into a newer one. Staleness, PSI and unreadable-memory stops do not become floor events by matching log text. L10 requires elapsed invocation time from launch in the inclusive range 0 to 1000 ms, resolved valid settlement, deployment error with the floor cause, independently observed group absence and an untripped host guard. Late, unsettled or rejected observations remain nonPASS.
+
+`LOCAL_LLM_APU_GUARD_FLOOR_BYTES` is an optional raise-only test setting. A decimal safe integer at least as large as the admission floor sets the runtime floor to their maximum. Malformed, unsafe or lower values are ignored with a warning in the overview and log. It never changes admission, `estimate.floorBytes` or the dashboard floor, and it affects only APU guards. A floor above MemTotal exercises the runtime kill without making the Run incompatible at admission.
+
+Readiness requires a Vulkan0 device line, complete positive layer counts as a sanity check, positive Vulkan0 KV bytes and positive Vulkan0 model bytes. Layer counts alone echo the requested offload and cannot prove placement. The per-launch `createReportCollector` receives redacted runner lines before ring-buffer eviction; it sums every matching KV and model buffer and keeps the first device and offload facts. It has constant memory use, resets for each launch and cannot reuse late output from a previous launch. A failed check kills the group and records error `gpu_offload_unproven` with observed values. The controller never marks that deployment ready or retries on CPU.
+
+Status and overview report the observed Vulkan0 model-byte ratio and its denominator. The current bounded GGUF sizing reader and catalog expose no token-embedding tensor byte length, so the denominator is the full pinned weight size, labelled explicitly. `minModelBufferFraction` remains null until a reviewed capture-based decision sets it; current positive-buffer proof does not qualify hardware. The dashboard names the integrated APU, experimental status, shared physical memory, admission floor, observed ratio and ignored guard-floor warnings.
+
+Qualification requires owner-authorized captures showing UMA buffer names and that GTT allocations lower MemAvailable, plus all functional, refusal, pressure and cancellation cases on the exact candidate with the reviewed model-buffer fraction enforced. Readable GTT telemetry alone does not prove the guard's signal. Pre-Vega GCN identifiers such as Kaveri, Carrizo, Stoney or Bristol receive an untested warning when their names identify them, but family detection never refuses a device. No family or tuple is qualified yet; ROCm/HIP and `/dev/kfd` remain outside this profile.
+
+The controller exposes APU-only activity observations for L9, including lifetime and active counts for model jobs, runner installs and every model lookup. GGUF header acquisition goes through the counted lookup boundary. A genuine initial refusal includes its validated request/configuration and before/after observations under a fresh attempt UUID. Unchanged counters across complete valid same-controller snapshots, no active operations and independent process absence derive zero model/runner-artifact acquisition by proving no acquisition entry. This is not a measurement of network bytes. Any started or overlapping operation, overflow, missing reading or instance change prevents certification. Accepted replay and unrelated errors cannot supply a refusal receipt.
+
+L11 still requires the actual load marker and continuous current-launch sequence through idle. The available admin prompt route does not observe server generation start or bind it to an inference request, so L12 remains explicit pending instrumentation with `server-generation-observation-unavailable`. A ready-runner Stop test proves only ready-runner cancellation. Functional discovery, no-entry receipts and guard invocation observations cannot qualify a tuple while L12 or any other required case is pending.
 
 ### NVIDIA memory detection
 
@@ -84,6 +133,7 @@ The controller decides the profile with `decideProfile` (`src/controller/profile
 | --- | --- |
 | A usable NVIDIA GPU that the image supports | `dedicated` or `unified` |
 | A usable RADV discrete GPU or Venus device with a valid Vulkan contract | `vulkan` or `venus`; CUDA compute-capability constraints do not apply |
+| Integrated RADV with the experimental switch, valid contract and no finite or unknown budget | `apu`; CUDA compute-capability constraints do not apply |
 | A usable GPU that reports a compute capability the image's CUDA runners were not built for | `cpu` (cause `mismatch`) |
 | `absent` or `unusable` | `cpu`, at once |
 | `unreadable`, or a usable GPU that does not report its capability on an image that lists capabilities | undecided; `cpu` (cause `unreadable-timeout`) once 60 s have passed since the first such snapshot |
@@ -102,7 +152,7 @@ A Run is normalized, admitted, launched and guarded under one committed profile,
 - Under `dedicated` or `unified`, a GPU that is no longer usable refuses every Run as `incompatible`. When the snapshot shows positive evidence (no nvidia-smi at all, or a GPU that cannot be used) the refusal says to restart local-llm, which then decides `cpu`. When the GPU is merely unreadable the refusal gives the GPU's own reason and no hint: the failure may be transient, and a restart during it could lock a GPU host into `cpu`.
 - Under `cpu`, when the cause was `unreadable-timeout` and the GPU has since become usable, every admission warns that a restart would use it. Runs continue on the CPU.
 
-The catalog's `profiles` decide which models are offered. Vulkan uses the dedicated catalog and Venus uses the CPU catalog; the stored profile declarations retain DS002's schema. Existing NVIDIA and CPU recommendations and validation labels retain their previous behavior.
+The catalog's `profiles` decide which models are offered. Vulkan uses the dedicated catalog and Venus and APU use the CPU catalog; the stored profile declarations retain DS002's schema. APU has no recommendations. Existing NVIDIA and CPU recommendations and validation labels retain their previous behavior.
 
 ### llama.cpp on unified memory
 
@@ -277,4 +327,4 @@ The first CPU host has 5.76 GiB, where the unified values (16 GiB reserve, 8 GiB
 
 `profileUnsupportedReason` is set only on the `cpu` profile, on purpose: the dedicated and unified overviews must stay what they were, so a runner cannot be hidden there by a reason that only the new profile produces. A runner that serves one profile says so itself (`profiles`), and the overview, the table columns, the per-model rows, Run, preview and Install all read that one declaration. A test compares both GPU profiles' overviews with a golden file made before the runner existed.
 
-The agent normalizes, admits, launches and guards each Run under one committed hardware profile. NVIDIA keeps the dedicated and unified policies. Vulkan is restricted to discrete RADV and Venus; Venus has a provisional device cap and a separate guarded VM staging pool. An unusable or absent supported GPU falls back to the CPU, while an unreadable query waits for the existing grace period. Every launch repeats admission against a fresh snapshot.
+The agent normalizes, admits, launches and guards each Run under one committed hardware profile. NVIDIA keeps the dedicated and unified policies. Vulkan serves discrete RADV, Venus and default-off experimental APU. Venus has a provisional device cap and a separate guarded VM staging pool; APU counts one shared physical pool and refuses finite or unknown budgets. An unusable or absent supported GPU falls back to the CPU at profile selection, while an unreadable query waits for the existing grace period. Every launch repeats admission against a fresh snapshot.

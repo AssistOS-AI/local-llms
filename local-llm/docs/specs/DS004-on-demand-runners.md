@@ -13,7 +13,7 @@ The amd64 CUDA parent contains llama.cpp, ik_llama.cpp and Ollama; the arm64 CUD
 
 ### What may be installed
 
-The `vulkan` and `venus` profiles offer only the image-baked `llama.cpp-vulkan` build. It needs no Install step and has no lock entry. Every other runner is refused on those profiles before an install or model download. Vulkan availability requires the validated image contract and the image's executable, as described in DS005.
+The `vulkan`, `venus` and experimental `apu` profiles offer only the image-baked `llama.cpp-vulkan` build. It needs no Install step and has no lock entry. Every other runner is refused on those profiles before an install or model download. Vulkan availability requires the validated image contract and the image's executable, as described in DS005. The APU path uses the existing RADV Vulkan image and b11159 executable; it adds no runner lock, download or dependency.
 
 The image ships `/opt/local-llm/runners.lock.json` (schema `local-llm.runners-lock/v1`, `src/controller/runnerLock.mjs`), and the agent's source carries one more lock per platform (below). For each installable runner a lock names the version, the kind (`python` or `archive`), the licence, every file with its URL, size and sha256, and the checks the CI install job runs. Administrators choose a runner id; they never supply a URL. The lock accepts only plain https URLs on `files.pythonhosted.org`, `github.com`, `codeload.github.com`, `download.pytorch.org`, `openaipublic.blob.core.windows.net` and `llmster.lmstudio.ai`, and each file is pinned by size and sha256 as well. A licence's `url` and `source` are plain https URLs: the dashboard shows them as links, so `javascript:` and `data:` never pass.
 

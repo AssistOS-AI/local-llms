@@ -44,6 +44,7 @@ import {
 import { lookupHuggingFaceModel } from './modelLookup.mjs';
 import { BUDGET_UNREADABLE, MPS_VARIABLES, cpuQuotaOf, gpuBudgetOf, knownByte, memoryBudgetOf, mpsRunnerEnvironment, overviewBudget } from './ploinkyBudget.mjs';
 import {
+    APU,
     UNIFIED,
     VENUS,
     UNREADABLE_COMMIT_MS,
@@ -55,7 +56,7 @@ import {
 } from './profiles.mjs';
 import { createRunnerInstaller, runTool } from './runnerInstaller.mjs';
 import { loadRunnerLocks } from './runnerLock.mjs';
-import { createLogBuffer, parseRunnerReport, startRunnerProcess } from './runnerProcess.mjs';
+import { createLogBuffer, createReportCollector, parseRunnerReport, startRunnerProcess } from './runnerProcess.mjs';
 import { acceptedRequest, createStateStore, reconcileAfterRestart, recordRequest } from './stateStore.mjs';
 import { catalogProfileOf, isVulkanProfile, vulkanContractOf } from './vulkan.mjs';
 import { createWeightStores } from './weightStores.mjs';
@@ -202,6 +203,9 @@ export function createController({
     // The unified profile's guard (DS005): every runner, sampled this often in every phase.
     readPressure = readMemoryPressure,
     unifiedGuardMs = UNIFIED.guardSampleMs,
+    monotonicNow = () => performance.now(),
+    // Trusted test seam for observer overflow; no tool or environment setting reaches it.
+    apuActivityCounterLimit = Number.MAX_SAFE_INTEGER,
     // A container memory limit's current headroom (ploinkyBudget.mjs), sampled by the guard.
     readBudget = () => readCgroupMemoryObservation(),
     // The hardware profile; null decides it from the first snapshot (DS005).
@@ -220,6 +224,14 @@ export function createController({
     mesaCachePath = path.join(env.LOCAL_LLM_RUN_ROOT || '/opt/runners', '.mesa-cache'),
     now = () => new Date(),
 } = {}) {
+    let reportCollector = null;
+    let apuLaunch = null;
+    let apuOffloadReport = null;
+    let apuLaunchRunner = null;
+    const controllerInstanceId = crypto.randomUUID();
+    const activity = { modelJobsStarted: 0, runnerInstallsStarted: 0, modelLookupsStarted: 0,
+        activeModelJobs: 0, activeRunnerInstalls: 0, activeModelLookups: 0, valid: true };
+    let lastEvidenceMonotonicMs = null;
     const log = createLogBuffer({ file: path.join(dataDir, 'logs', 'runner.log') });
     installWarnings.write = (message) => log.append('controller', `runner install: ${message}`);
     const queue = createCommandQueue();
@@ -290,10 +302,49 @@ export function createController({
     // The compute capabilities the image's CUDA runners were built for (arm64: 12.1); the amd64 image lists none.
     const capabilities = String(imageContract?.gpu_compute_capabilities || '').split(',').map((cap) => cap.trim()).filter(Boolean);
     const vulkanContract = vulkanContractOf(imageContract);
-    const snapshotReader = snapshot ?? (({ signal } = {}) => readHardwareSnapshot({ dataDir, signal, env, vulkan: vulkanContract }));
+    const apuEnabled = env.LOCAL_LLM_AMD_APU === 'experimental';
+    const snapshotReader = snapshot ?? (({ signal } = {}) => readHardwareSnapshot({ dataDir, signal, env, vulkan: vulkanContract, apu: apuEnabled }));
     let committedIcdFile = null;
     // The unified guard's view of the current runner (in memory only).
     let guardStats = null;
+
+    function evidenceMonotonicMs() {
+        let value;
+        try { value = monotonicNow(); } catch { return null; }
+        if (!Number.isFinite(value) || value < 0 || (lastEvidenceMonotonicMs !== null && value < lastEvidenceMonotonicMs)) return null;
+        lastEvidenceMonotonicMs = value;
+        return value;
+    }
+
+    function readApuActivity() {
+        const sampledMonotonicMs = evidenceMonotonicMs();
+        return { schema: 1, controllerInstanceId, sampledMonotonicMs,
+            modelJobsStarted: activity.modelJobsStarted, runnerInstallsStarted: activity.runnerInstallsStarted,
+            modelLookupsStarted: activity.modelLookupsStarted, activeModelJobs: activity.activeModelJobs,
+            activeRunnerInstalls: activity.activeRunnerInstalls, activeModelLookups: activity.activeModelLookups,
+            runnerRunning: runner?.running === true, valid: activity.valid && sampledMonotonicMs !== null };
+    }
+
+    function enterAcquisition(startedKey, activeKey) {
+        const limit = Number.isSafeInteger(apuActivityCounterLimit) && apuActivityCounterLimit > 0
+            ? Math.min(apuActivityCounterLimit, Number.MAX_SAFE_INTEGER) : 0;
+        const increment = (key) => {
+            if (!Number.isSafeInteger(activity[key]) || activity[key] < 0 || activity[key] >= limit) {
+                activity.valid = false;
+                return false;
+            }
+            activity[key] += 1;
+            return true;
+        };
+        increment(startedKey);
+        const counted = increment(activeKey);
+        let finished = false;
+        return () => {
+            if (finished) return;
+            finished = true;
+            if (counted) activity[activeKey] -= 1;
+        };
+    }
     // Saved parameter sets already reported as no longer valid.
     const resetParams = new Set();
 
@@ -396,7 +447,7 @@ export function createController({
     function decisionForAdmission(snap) {
         if (profile !== 'cpu' || !profileDecision) return undefined;
         const gpuRecovered = profileDecision.cause === 'unreadable-timeout'
-            && ['dedicated', 'unified', 'vulkan', 'venus'].includes(decideProfile({ snapshot: snap, capabilities, unreadable: null, nowMs: now().getTime() }).profile);
+            && ['dedicated', 'unified', 'vulkan', 'venus', 'apu'].includes(decideProfile({ snapshot: snap, capabilities, unreadable: null, nowMs: now().getTime() }).profile);
         return { ...profileDecision, gpuRecovered };
     }
 
@@ -408,13 +459,15 @@ export function createController({
         const budget = overviewBudget({ observation: memoryBudgetOf(snap), cpuQuota: cpuQuotaOf(snap), gpuShare: gpuBudgetOf(snap, env).gpuShare });
         const withBudget = (limits) => (budget ? { ...(limits || {}), budget } : limits);
         if (profile === 'unified') return withBudget({ floorBytes: UNIFIED.floorBytes, hostReserveBytes: UNIFIED.hostReserveBytes });
-        if (profile !== 'cpu' && profile !== 'venus') return withBudget(null);
+        if (profile !== 'cpu' && profile !== 'venus' && profile !== 'apu') return withBudget(null);
         const pool = cpuPool(snap?.memory, snap?.cgroupMemory);
         if (!Number.isFinite(pool.totalBytes)) return withBudget(null);
         return withBudget({
             floorBytes: cpuFloorBytes(pool.totalBytes), hostReserveBytes: cpuHostReserveBytes(pool.totalBytes),
             poolBytes: pool.totalBytes, availableBytes: pool.availableBytes,
             ...(profile === 'venus' ? { deviceCapBytes: Math.min(VENUS.deviceCapBytes, VENUS.deviceCapFraction * snap.gpu.totalBytes) } : {}),
+            ...(profile === 'apu' ? { experimental: true, qualified: false, offloadReport: apuOffloadReport,
+                warnings: apuGuardFloor(cpuFloorBytes(pool.totalBytes)).warning ? [apuGuardFloor(cpuFloorBytes(pool.totalBytes)).warning] : [] } : {}),
         });
     }
 
@@ -855,12 +908,18 @@ export function createController({
             logs: lines,
             nextSeq: log.seq,
             gpu,
-            runnerReport: parseReport(log.all().filter((line) => line.seq > runnerLogStart), { profile: deployment?.profile ?? profile }),
+            runnerReport: deployment?.profile === 'apu' && reportCollector
+                ? { ...reportCollector.read(), ...(apuOffloadReport || {}) }
+                : parseReport(log.all().filter((line) => line.seq > runnerLogStart), { profile: deployment?.profile ?? profile }),
             context: describeDeploymentContext(definition, deployment),
             lastCompletion,
             profile: profile || null,
             profileDecision: publicDecision(),
             memoryGuard: guardStats ? { ...guardStats } : null,
+            ...(profile === 'apu' ? { apuActivity: readApuActivity() } : {}),
+            ...(deployment?.profile === 'apu' ? { apuObservation: apuLaunch ? { ...apuLaunch, running: runner?.running === true,
+                guardStop: apuLaunch.guardStop ? { ...apuLaunch.guardStop } : null,
+                firstSeq: log.all()[0]?.seq ?? log.seq + 1, nextSeq: log.seq } : null } : {}),
         };
     }
 
@@ -981,12 +1040,23 @@ export function createController({
         fs.mkdirSync(path.join(dataDir, 'home'), { recursive: true });
         log.addSecret(apiKey);
         runnerLogStart = log.seq;
+        const launchCollector = deployment.profile === 'apu' ? createReportCollector() : null;
+        reportCollector = launchCollector;
+        apuOffloadReport = null;
+        apuLaunch = null;
         lastCompletion = null;
         log.append('controller', `starting ${launch.command} ${launch.args.join(' ')}`);
+        const launchSeq = log.seq;
+        const startedMonotonicMs = deployment.profile === 'apu' ? evidenceMonotonicMs() : monotonicNow();
         const process = startRunner({
-            command: launch.command, args: launch.args, env: runnerEnv(launch.env, deployment.profile), cwd: launch.cwd || '/', log,
+            command: launch.command, args: launch.args, env: runnerEnv(launch.env, deployment.profile), cwd: launch.cwd || '/',
+            log: launchCollector ? { ...log, append: (stream, text) => {
+                if (reportCollector === launchCollector) log.append(stream, text, (line) => launchCollector.append(line));
+            } } : log,
             filter: launch.outputFilter || null,
         });
+        if (deployment.profile === 'apu') apuLaunch = { controllerInstanceId, deploymentId: deployment.id, requestId: deployment.requestId,
+            pid: process.pid, command: launch.command, launchSeq, logSeqStart: deployment.logSeqStart, startedMonotonicMs, guardStop: null };
         runner = {
             pid: process.pid,
             port,
@@ -998,6 +1068,7 @@ export function createController({
             get running() { return process.running; },
         };
         const current = runner;
+        if (deployment.profile === 'apu') apuLaunchRunner = current;
         const cancelGuard = startMemoryGuard(deployment, current);
         process.exited.then((result) => {
             cancelGuard();
@@ -1037,11 +1108,15 @@ export function createController({
     // so admission must cover the whole known allocation.
     function startMemoryGuard(deployment, current) {
         const unified = deployment.profile === 'unified';
+        const apu = deployment.profile === 'apu';
         // The pool profiles: one pool of memory, every runner watched in every phase.
-        const pooled = unified || deployment.profile === 'cpu' || deployment.profile === 'venus';
-        const floor = unified ? UNIFIED.floorBytes
-            : deployment.profile === 'cpu' || deployment.profile === 'venus' ? deployment.admission?.estimate?.floorBytes
+        const pooled = unified || deployment.profile === 'cpu' || deployment.profile === 'venus' || apu;
+        const admissionFloor = unified ? UNIFIED.floorBytes
+            : deployment.profile === 'cpu' || deployment.profile === 'venus' || apu ? deployment.admission?.estimate?.floorBytes
                 : deployment.admission?.estimate?.ramFloorBytes;
+        const override = apu ? apuGuardFloor(admissionFloor) : { floor: admissionFloor, warning: null };
+        const floor = override.floor;
+        if (override.warning) log.append('controller', override.warning);
         if (!Number.isFinite(floor) || floor <= 0) return () => {};
         let timer = null;
         let cancelled = false;
@@ -1054,15 +1129,17 @@ export function createController({
         const budgeted = Number.isSafeInteger(sampleBudget()?.finiteMemoryBytes);
         let unreadableBudgetSamples = 0;
         if (pooled) guardStats = { floorBytes: floor, minAvailableBytes: null, maxPressureAvg10: null, samples: 0 };
+        let lastSampleMs = monotonicNow();
+        if (apu) guardStats.maxMonotonicGapMs = 0;
         const schedule = () => {
             if (cancelled) return;
             const ready = state.deployment?.id === deployment.id && state.deployment.phase === 'ready';
             timer = setTimeout(tick, pooled || budgeted ? unifiedGuardMs : (ready ? memoryGuardReadyMs : memoryGuardLoadMs));
             timer.unref?.();
         };
-        const breach = (message, { kill = pooled } = {}) => {
+        const breach = (message, { kill = pooled, cause = null } = {}) => {
             cancelled = true;
-            stopForMemory(deployment, current, message, { kill }).catch(() => {});
+            stopForMemory(deployment, current, message, { kill, cause }).catch(() => {});
         };
         // The available memory within the container budget, or undefined when
         // the budget's current use could not be read (counted, then stopped).
@@ -1091,6 +1168,21 @@ export function createController({
             // Pool profiles: watched until the process exits, through a graceful Stop
             // or Replace too (the exit cancels the guard). Dedicated: while current.
             if (cancelled || (!pooled && runner !== current)) return;
+            if (apu) {
+                const sampleMs = monotonicNow();
+                const gapMs = sampleMs - lastSampleMs;
+                guardStats.maxMonotonicGapMs = Math.max(guardStats.maxMonotonicGapMs, gapMs);
+                if (!Number.isFinite(gapMs) || gapMs < 0 || gapMs > APU.guardStaleMs) {
+                    breach('stopped: memory telemetry stale');
+                    return;
+                }
+                lastSampleMs = sampleMs;
+                const observation = sampleBudget();
+                if (observation?.memoryReadState !== 'known' || observation.finiteMemoryBytes !== null) {
+                    breach('stopped: APU shared GPU memory cannot be watched under a finite or unknown container memory limit');
+                    return;
+                }
+            }
             let available = null;
             let memory = null;
             try {
@@ -1098,7 +1190,8 @@ export function createController({
                 available = memory.availableBytes;
             } catch {}
             // An unreadable /proc/meminfo stops a pooled runner at once, before the budget is sampled.
-            if (pooled && !Number.isFinite(available)) {
+            if (pooled && (!Number.isFinite(available) || (apu && (!Number.isSafeInteger(memory?.totalBytes)
+                || !Number.isSafeInteger(available) || available < 0 || available > memory.totalBytes)))) {
                 breach('stopped: host memory cannot be read (/proc/meminfo), so the runner cannot be watched');
                 return;
             }
@@ -1114,7 +1207,8 @@ export function createController({
                 stats.minAvailableBytes = stats.minAvailableBytes === null ? available : Math.min(stats.minAvailableBytes, available);
                 if (Number.isFinite(pressure)) stats.maxPressureAvg10 = Math.max(stats.maxPressureAvg10 ?? 0, pressure);
                 if (available < floor) {
-                    breach(`stopped: host memory below the floor (${gib(available)} available, ${gib(floor)} required)`);
+                    breach(`stopped: host memory below the floor (${gib(available)} available, ${gib(floor)} required)`,
+                        { cause: apu ? { kind: 'host-memory-floor', floorBytes: floor, availableBytes: available } : null });
                     return;
                 }
                 if (Number.isFinite(pressure) && pressure >= UNIFIED.psiStopAvg10 && available < 2 * floor) {
@@ -1137,16 +1231,54 @@ export function createController({
         };
     }
 
-    async function stopForMemory(deployment, current, message, { kill = false } = {}) {
+    function apuGuardFloor(admissionFloor) {
+        const text = env.LOCAL_LLM_APU_GUARD_FLOOR_BYTES;
+        if (text === undefined) return { floor: admissionFloor, warning: null };
+        const value = typeof text === 'string' && /^\d+$/.test(text) ? Number(text) : NaN;
+        if (!Number.isSafeInteger(value) || value < admissionFloor) return { floor: admissionFloor,
+            warning: 'LOCAL_LLM_APU_GUARD_FLOOR_BYTES ignored: it must be a safe integer at least as large as the admission floor.' };
+        return { floor: Math.max(admissionFloor, value), warning: null };
+    }
+
+    async function stopForMemory(deployment, current, message, { kill = false, cause = null } = {}) {
         memoryStop = { deploymentId: deployment.id, message };
         log.append('controller', message);
+        const observedLaunch = deployment.profile === 'apu' && apuLaunch?.deploymentId === deployment.id
+            && apuLaunchRunner === current ? apuLaunch : null;
+        const floorStop = observedLaunch && kill && cause?.kind === 'host-memory-floor' ? {
+            kind: 'host-memory-floor', seq: log.seq, floorBytes: cause.floorBytes, availableBytes: cause.availableBytes,
+            killRequestedMonotonicMs: null, settledMonotonicMs: null, settlement: 'pending', valid: false,
+        } : null;
+        if (floorStop) observedLaunch.guardStop = floorStop;
+        const settleObservation = (settlement) => {
+            if (!floorStop || apuLaunch !== observedLaunch || apuLaunchRunner !== current) return;
+            floorStop.settlement = settlement;
+            floorStop.settledMonotonicMs = evidenceMonotonicMs();
+            floorStop.valid = floorStop.valid && settlement === 'resolved' && floorStop.settledMonotonicMs !== null
+                && floorStop.settledMonotonicMs >= floorStop.killRequestedMonotonicMs;
+        };
         // The host is short of memory now. Unified: the whole process group is
         // killed at once (a runner starved of memory has nothing to save).
         // Dedicated: SIGKILL follows SIGTERM within the drain's grace, not a Stop's.
         try {
-            if (kill) await current.kill();
+            if (kill) {
+                if (floorStop) {
+                    floorStop.killRequestedMonotonicMs = evidenceMonotonicMs();
+                }
+                const pendingKill = current.kill();
+                if (floorStop) {
+                    floorStop.valid = floorStop.killRequestedMonotonicMs !== null && observedLaunch.startedMonotonicMs !== null
+                        && floorStop.killRequestedMonotonicMs >= observedLaunch.startedMonotonicMs
+                        && Number.isSafeInteger(floorStop.seq) && floorStop.seq > observedLaunch.launchSeq
+                        && Number.isSafeInteger(floorStop.floorBytes) && floorStop.floorBytes >= 0
+                        && Number.isSafeInteger(floorStop.availableBytes) && floorStop.availableBytes >= 0
+                        && floorStop.availableBytes < floorStop.floorBytes;
+                }
+                await pendingKill;
+                settleObservation('resolved');
+            }
             else await current.stop({ graceMs: DRAIN_RUNNER_GRACE_MS });
-        } catch {}
+        } catch { settleObservation('rejected'); }
         // Once the agent drains, the drain settles the state; the log keeps the message.
         if (draining || queue.closed) return;
         try {
@@ -1375,6 +1507,27 @@ export function createController({
         if (!runner || runner.deploymentId !== deployment.id) {
             throw new LocalLlmError('runner_exited', 'The runner is not running after its start-up.');
         }
+        if (deployment.profile === 'apu') {
+            const report = reportCollector?.read();
+            const weightsBytes = deployment.artifact.size;
+            // The bounded sizing header does not expose tensor byte lengths, so use the full pinned size.
+            const denominatorBytes = weightsBytes;
+            const modelBytes = report?.modelMiB * 1024 * 1024;
+            apuOffloadReport = { modelBufferRatio: modelBytes / denominatorBytes, modelBufferDenominatorBytes: denominatorBytes,
+                modelBufferDenominatorBasis: 'full pinned weights; token embedding size unavailable',
+                minModelBufferFraction: APU.minModelBufferFraction };
+            const proven = /^Vulkan0 \(/.test(report?.device || '') && report?.offloaded?.layers > 0
+                && Number.isSafeInteger(report.offloaded.layers) && Number.isSafeInteger(report.offloaded.of)
+                && report.offloaded.layers === report.offloaded.of && report.kvMiB > 0 && report.modelMiB > 0
+                && Number.isFinite(apuOffloadReport.modelBufferRatio)
+                && (APU.minModelBufferFraction === null || apuOffloadReport.modelBufferRatio >= APU.minModelBufferFraction);
+            if (!proven) {
+                const stopping = runner;
+                runner = null;
+                await stopping.kill();
+                throw new LocalLlmError('gpu_offload_unproven', `gpu_offload_unproven: ${JSON.stringify({ ...report, ...apuOffloadReport })}`);
+            }
+        }
         setPhase('ready', { runner: { pid: runner.pid, port: runner.port, startedAt: now().toISOString(), ...(details || {}) } });
         startWatchdog(deployment, runner, definition, runnerDir);
     }
@@ -1412,6 +1565,7 @@ export function createController({
     }
 
     function startJob(deployment, model, requestedParams) {
+        const finishAcquisition = enterAcquisition('modelJobsStarted', 'activeModelJobs');
         const controller = new AbortController();
         const current = {
             deploymentId: deployment.id,
@@ -1453,6 +1607,7 @@ export function createController({
                 setPhase('error', { error: guarded || error.message, runner: null });
             })
             .finally(() => {
+                finishAcquisition();
                 if (job === current) job = null;
             });
         job = current;
@@ -1495,13 +1650,14 @@ export function createController({
             }
             // Submitted before a Stop or Cancel: nothing is read or recorded.
             if (stale()) throw cancelled();
+            const attempt = { attemptId: crypto.randomUUID(), before: readApuActivity() };
             // Until its job starts, a Run can be stopped: Stop, Cancel and drain abort `planning` before
             // they queue behind it (F5), which ends a hardware snapshot or the /shared walk in progress.
             // The Run then fails with `cancelled` and records nothing, so the same request can be sent again.
             const planAbort = new AbortController();
             planning = planAbort;
             try {
-                return await admitRun(planAbort.signal, { requestId, modelId, runnerId, params, replace, stale });
+                return await admitRun(planAbort.signal, { requestId, modelId, runnerId, params, replace, stale, attempt });
             } catch (error) {
                 // A drain met in a snapshot keeps its answer; any other stop of a pending Run is `cancelled`.
                 if (error.code === 'shutting_down') throw error;
@@ -1534,7 +1690,7 @@ export function createController({
     // A Run from its profile to its job's start. `signal` is the pending Run's:
     // after every step that waits it is checked, and the last check comes
     // right before anything is recorded; from there to the job's start nothing waits.
-    async function admitRun(signal, { requestId, modelId, runnerId, params, replace, stale }) {
+    async function admitRun(signal, { requestId, modelId, runnerId, params, replace, stale, attempt }) {
         const checkpoint = () => {
             if (signal.aborted || stale()) throw new LocalLlmError('aborted', 'Stopped before the Run started.');
         };
@@ -1592,13 +1748,22 @@ export function createController({
             definition, model, source, params: normalized, snap, remainingDownloadBytes: acquisition.bytesNeeded,
         });
         if (admission.status !== 'ok') {
-            throw new LocalLlmError(`admission_${admission.status.replace('-', '_')}`, admission.reason, { admission });
+            const apuAttempt = profile === 'apu' ? { schema: 1, attemptId: attempt.attemptId, controllerInstanceId,
+                requestId, modelId, runnerId, params: { ...normalized }, boundary: 'initial-admission',
+                before: attempt.before, after: readApuActivity() } : null;
+            throw new LocalLlmError(`admission_${admission.status.replace('-', '_')}`, admission.reason,
+                { admission, ...(apuAttempt ? { apuAttempt } : {}) });
         }
         state.params[paramsKey(model.id, runnerId)] = normalized;
         const at = now().toISOString();
         // The job holds this immutable copy: later registry edits cannot redirect it.
         if (draining) {
             throw new LocalLlmError('shutting_down', 'The agent is restarting; run the model again once it is back.');
+        }
+        if (profile === 'apu') {
+            reportCollector = null;
+            apuLaunch = null;
+            apuOffloadReport = null;
         }
         state.deployment = {
             id: crypto.randomUUID(),
@@ -1759,9 +1924,11 @@ export function createController({
         if (lookups.size >= MAX_LOOKUPS) throw new LocalLlmError('busy', `${MAX_LOOKUPS} lookups are already running; try again when one has finished.`);
         const stop = new AbortController();
         lookups.add(stop);
+        const finishAcquisition = enterAcquisition('modelLookupsStarted', 'activeModelLookups');
         try {
             return await lookup(args, { token: env.HF_TOKEN || '', fetchImpl, baseUrl: hfBaseUrl, signal: stop.signal });
         } finally {
+            finishAcquisition();
             lookups.delete(stop);
         }
     }
@@ -1848,6 +2015,7 @@ export function createController({
     }
 
     function startInstallJob(entry) {
+        const finishAcquisition = enterAcquisition('runnerInstallsStarted', 'activeRunnerInstalls');
         const controller = new AbortController();
         const current = { runnerId: entry.id, abort: controller, cancelReason: null, promise: null };
         current.promise = (async () => {
@@ -1877,6 +2045,7 @@ export function createController({
             }
             setInstall(entry.id, { phase: 'error', error: error.message });
         }).finally(() => {
+            finishAcquisition();
             if (installJob === current) installJob = null;
             redetectRunners();
         });

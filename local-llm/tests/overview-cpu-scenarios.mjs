@@ -1,8 +1,9 @@
 // These scenarios run against the base controller before the Vulkan change.
-// Hardware reads use readSnapshot; only host facts and process execution are injected.
+// Hardware reads use readSnapshot; host facts, runner locks and process execution are injected.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { agentRunnerLockFile, loadRunnerLocks } from '../src/controller/runnerLock.mjs';
 
 export const VULKAN_KEYS = Object.freeze({
     vulkan_contract: '1', vulkan_llama_cpp: 'b11159',
@@ -29,6 +30,11 @@ export async function collectCpuOverview({ createController, readSnapshot, loadS
     const controller = createController({
         dataDir, env: { PATH: '/usr/bin' }, hostArch: arch, imageContract,
         seedCatalog: loadSeedCatalog().filter((model) => model.id === 'qwen2.5-0.5b-instruct-q4_k_m'), sharedModelsRoot: null,
+        // Both simulated architectures retain the ARM64 lock data captured in the golden.
+        runnerLocks: loadRunnerLocks({
+            image: path.join(dataDir, 'absent-image-runner-lock.json'),
+            agent: agentRunnerLockFile('arm64'),
+        }),
         detectRunner: (runner) => ({ installed: false, version: null, reason: 'fixture' }),
         fileExists: () => false,
         snapshot: async ({ signal }) => {

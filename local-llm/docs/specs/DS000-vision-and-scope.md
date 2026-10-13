@@ -7,7 +7,7 @@ summary: What local-llm is, the retired shared-image agents and the services tha
 
 ## Introduction
 
-`local-llm` runs open-weight language models on the workspace's own hardware. NVIDIA GPUs use CUDA. Discrete AMD Radeon GPUs use Vulkan RADV, and Apple GPUs use Vulkan Venus inside a libkrun Podman machine. When no usable GPU is attached it runs on the CPU, as defined in DS005. A workspace administrator opens Local LLMs from Explorer's toolbar or Settings, picks a model and a runner, and presses Run. The agent downloads the weights, starts the runner, and exposes the running model to other agents through the workspace-local Soul Gateway.
+`local-llm` runs open-weight language models on the workspace's own hardware. NVIDIA GPUs use CUDA. Discrete AMD Radeon GPUs use Vulkan RADV, and Apple GPUs use Vulkan Venus inside a libkrun Podman machine. AMD integrated GPUs have an experimental, default-off APU profile with shared-RAM admission and no hardware qualification yet. When no usable GPU is attached it runs on the CPU, as defined in DS005. A workspace administrator opens Local LLMs from Explorer's toolbar or Settings, picks a model and a runner, and presses Run. The agent downloads the weights, starts the runner, and exposes the running model to other agents through the workspace-local Soul Gateway.
 
 ## Core Content
 
@@ -41,7 +41,7 @@ A workspace that enabled a legacy agent loses it at its next repository update: 
 
 | Runner | State in this release |
 | --- | --- |
-| llama.cpp Vulkan build `b11159`, runner `llama.cpp-vulkan` | Baked into both image architectures and offered only on `vulkan` and `venus`. RADV supports discrete Radeon GPUs only and is unit-tested, unverified on hardware. Venus reaches the Apple GPU through a separate libkrun Podman machine and has a provisional device-memory cap. |
+| llama.cpp Vulkan build `b11159`, runner `llama.cpp-vulkan` | Baked into both image architectures and offered only on `vulkan`, `venus` and experimental `apu`. Discrete RADV is unverified on hardware. Integrated RADV requires the APU operator switch, one shared physical-memory pool, no finite or unknown container budget and readiness offload proof. Venus reaches the Apple GPU through a separate libkrun Podman machine and has a provisional device-memory cap. |
 | llama.cpp `b11159` (amd64: CUDA 12.8 build; arm64: ggml-org's CUDA 13.4 build with native sm_121a code for NVIDIA GB10) | Supported. GGUF from Hugging Face, pinned by commit, size and sha256. The default runner on a GPU that shares system memory (DGX Spark), for the listed models and models added at run time, sized by a labelled estimate or a trusted envelope (DS005); no per-model benchmark is required. On a machine without a usable NVIDIA GPU it runs on the CPU (`cpu` profile, DS005). The arm64 image's build carries CPU backends beside its CUDA backend; the amd64 build is made with the same release flags. |
 | llama.cpp's CPU build, release `b11295` (ggml-org's own `ubuntu-arm64` and `ubuntu-x64` assets) | Supported on the `cpu` profile only. It is installed on demand from the agent's own runner lock (DS004) and runs from its runnable copy, beside the image's llama.cpp. It has a CPU policy and no GPU policy, so a GPU host neither shows nor runs it. |
 | ik_llama.cpp, commit `20f7a72` (built into the image with CUDA 12.8 for sm_86 and sm_89) | Supported. A llama.cpp fork with faster hybrid CPU/GPU inference for mixture-of-experts models. It reads the same GGUF files as llama.cpp, so the two share one download. |
@@ -70,7 +70,7 @@ The agent uses none of what LM Studio adds on top of llama.cpp: its native REST 
 
 ### Out of scope
 
-Translation and reranking services, a shared host model cache, ROCm/HIP, AMD integrated and Instinct GPUs, Intel GPUs, host-native Metal, Vulkan on NVIDIA, and GPU sharing on Vulkan are out of scope. Only llama.cpp's Vulkan build accelerates AMD and Apple GPUs in this release.
+Translation and reranking services, a shared host model cache, ROCm/HIP, AMD Instinct GPUs, Intel GPUs, host-native Metal, Vulkan on NVIDIA, and GPU sharing on Vulkan are out of scope. Only llama.cpp's Vulkan build accelerates AMD and Apple GPUs in this release. APU qualification, budget support and capacity tuning await owner-authorized hardware evidence for a specific tuple. No APU family is qualified by unit tests.
 
 ### Rationale
 

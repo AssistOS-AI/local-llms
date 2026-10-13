@@ -116,6 +116,18 @@ export function hardwareCardsHtml(hardware = {}, gpuOverride = null, { profile =
     const gpu = gpuOverride?.available ? { ...(hardware.gpu || {}), ...gpuOverride } : (hardware.gpu || {});
     const cards = [];
     const memory = hardware.memory || {};
+    if (profile === 'apu') {
+        const ratio = limits?.offloadReport?.modelBufferRatio;
+        const basis = limits?.offloadReport?.modelBufferDenominatorBasis;
+        cards.push(statCard('gpu', 'AMD integrated GPU · Vulkan APU', gpu.name || 'Not available',
+            'Experimental, unqualified · shares system RAM'));
+        cards.push(statCard('memory', 'Shared memory available', `${formatMiB(limits?.availableBytes ?? memory.availableBytes)} of ${formatMiB(limits?.poolBytes ?? memory.totalBytes)}`,
+            Number.isFinite(limits?.floorBytes) ? `keeps ${formatMiB(limits.floorBytes)} free` : ''));
+        if (Number.isFinite(ratio)) cards.push(statCard('offload', 'Observed model buffer ratio', ratio.toFixed(3), basis || 'full pinned weights'));
+        for (const warning of limits?.warnings || []) cards.push(statCard('apu-warning', 'APU guard warning', warning));
+        cards.push(statCard('disk', 'Disk free', formatBytes(hardware.disk?.freeBytes), 'for model weights'));
+        return cards.join('') + budget;
+    }
     if (profile === 'vulkan' || profile === 'venus') {
         cards.push(statCard('gpu', profile === 'venus' ? 'Apple GPU · Venus' : 'AMD GPU · Vulkan', gpu.name || 'Not available',
             profile === 'venus' ? `Headroom unknown · provisional cap ${formatMiB(limits?.deviceCapBytes)}`

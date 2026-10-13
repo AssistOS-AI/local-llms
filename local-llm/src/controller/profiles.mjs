@@ -27,6 +27,10 @@ export const PROFILES = Object.freeze(['dedicated', 'unified', 'cpu']);
 
 export const VENUS = Object.freeze({ deviceCapBytes: 2 * GIB, deviceCapFraction: 0.25, deviceOverheadBytes: 256 * MIB });
 
+export const APU = Object.freeze({ stagingFactor: 1, runtimeBytes: GIB, deviceOverheadBytes: 256 * MIB,
+    deviceTotalFraction: 0.9, deviceMarginBytes: 512 * MIB, cacheRamMiB: 256, batchSize: 512,
+    guardSampleMs: 250, guardStaleMs: 2000, minModelBufferFraction: null });
+
 export const UNIFIED = Object.freeze({
     // Admission refuses a run needing more than MemTotal less this as incompatible:
     // the idle host held 8-13 GiB that was not available.
@@ -406,7 +410,7 @@ export function capabilityMismatch(gpu, capabilities = []) {
 export function decideProfile({ snapshot, capabilities = [], unreadable = null, nowMs = Date.now(), commitAfterMs = UNREADABLE_COMMIT_MS } = {}) {
     const gpu = snapshot?.gpu;
     if (gpu?.backend === 'vulkan' && gpu.available) {
-        return { profile: gpu.driver === 'radv' ? 'vulkan' : 'venus', cause: 'gpu', reason: null, unreadable: null };
+        return { profile: gpu.memoryModel === 'shared' ? 'apu' : gpu.memoryModel === 'dedicated' ? 'vulkan' : 'venus', cause: 'gpu', reason: null, unreadable: null };
     }
     let waitingReason = 'the hardware snapshot could not be read';
     if (gpu?.available) {
@@ -590,6 +594,39 @@ export function admitVenusLlamaServer({ model, source, params, gpu, memory = {},
     if (ramBytes > pool.totalBytes - estimate.hostReserveBytes) return result('incompatible', `The Venus staging copy and runtime need ${amount(ramBytes)} of VM RAM with ${amount(estimate.hostReserveBytes)} reserved for the host.`, estimate, warnings);
     if (ramBytes > pool.availableBytes - estimate.floorBytes) return result('insufficient-now', `The Venus staging copy and runtime need ${amount(ramBytes)} of VM RAM with ${amount(estimate.floorBytes)} kept free.`, estimate, warnings);
     if (Number.isFinite(disk?.freeBytes) && remainingDownloadBytes * 1.05 > disk.freeBytes) return result('insufficient-now', 'Not enough disk for the weights and the 5 % reserve.', estimate, warnings);
+    return result('ok', null, estimate, warnings);
+}
+
+/** APU mappings share physical RAM; device capacity is only an additional ceiling. */
+export function admitApuLlamaServer({ model, source, params, gpu, memory = {}, cgroupMemory = null, disk, remainingDownloadBytes = 0 }, result) {
+    if (!Number.isSafeInteger(source.size) || source.size <= 0) return result('incompatible', `${model.displayName}'s pinned weight size is unknown.`, {});
+    const pool = cpuPool(memory, cgroupMemory);
+    const kvBytes = (model.memory?.kvBytesPerToken ?? DEFAULT_KV_BYTES_PER_TOKEN) * params.ctxSize * params.parallel
+        + (model.memory?.fixedKvBytes || 0);
+    const computeBytes = Math.round(computeBufferBytes({ ctxSize: params.ctxSize, ubatchSize: APU.batchSize, flashAttn: 'off' }));
+    const deviceBytes = source.size + kvBytes + computeBytes + APU.deviceOverheadBytes;
+    const stagingBytes = APU.stagingFactor * source.size;
+    const cacheRamBytes = APU.cacheRamMiB * MIB;
+    const needLoadPeak = deviceBytes + stagingBytes + APU.runtimeBytes + cacheRamBytes;
+    const estimate = { weightsBytes: source.size, kvBytes, computeBytes, deviceBytes, stagingBytes, runtimeBytes: APU.runtimeBytes,
+        cacheRamBytes, needLoadPeak, ramBytes: needLoadPeak, poolBytes: pool.totalBytes,
+        floorBytes: Number.isFinite(pool.totalBytes) ? cpuFloorBytes(pool.totalBytes) : null,
+        hostReserveBytes: Number.isFinite(pool.totalBytes) ? cpuHostReserveBytes(pool.totalBytes) : null,
+        deviceCapBytes: APU.deviceTotalFraction * gpu.totalBytes, measured: false,
+        basis: 'provisional APU estimate: weights, f16 KV, compute and driver bytes counted once in shared RAM, plus a staging copy, runtime and prompt cache' };
+    const warnings = ['AMD integrated GPU: experimental, unqualified. Vulkan free memory is a mapping ceiling, not physical RAM headroom.'];
+    if (/\b(?:KAVERI|CARRIZO|STONEY|BRISTOL|GFX[78])\b/i.test(gpu.name || '')) warnings.push('Pre-Vega GCN, untested.');
+    const refuse = (status, constraint, reason) => result(status, reason, { ...estimate, constraint }, warnings);
+    if (![pool.totalBytes, pool.availableBytes].every((value) => Number.isSafeInteger(value) && value >= 0)
+        || pool.totalBytes <= 0 || pool.availableBytes > pool.totalBytes) return refuse('incompatible', 'C1', 'System memory is unreadable or contradictory (/proc/meminfo).');
+    if (![gpu.totalBytes, gpu.freeBytes, deviceBytes, needLoadPeak].every((value) => Number.isSafeInteger(value) && value >= 0)
+        || gpu.totalBytes <= 0 || gpu.freeBytes > gpu.totalBytes) return refuse('incompatible', 'C2', 'APU device memory is unreadable or contradictory.');
+    if (Number.isSafeInteger(cgroupMemory?.maxBytes)) return refuse('incompatible', 'C3', 'APU shared GPU memory cannot be used under a container memory limit.');
+    if (needLoadPeak > pool.totalBytes - estimate.hostReserveBytes) return refuse('incompatible', 'C1', `APU load needs ${amount(needLoadPeak)} of shared RAM, with ${amount(estimate.hostReserveBytes)} reserved for the host. Reduce context or slots, or choose a smaller model.`);
+    if (deviceBytes > estimate.deviceCapBytes) return refuse('incompatible', 'C2', `APU mappings need ${amount(deviceBytes)}; the device ceiling is ${amount(estimate.deviceCapBytes)}.`);
+    if (needLoadPeak > pool.availableBytes - estimate.floorBytes) return refuse('insufficient-now', 'C1', `APU load needs ${amount(needLoadPeak)} of shared RAM and ${amount(estimate.floorBytes)} kept free; ${amount(pool.availableBytes)} is available now.`);
+    if (deviceBytes > gpu.freeBytes - APU.deviceMarginBytes) return refuse('insufficient-now', 'C2', `APU mappings need ${amount(deviceBytes)} plus ${amount(APU.deviceMarginBytes)} margin; ${amount(gpu.freeBytes)} is reported free.`);
+    if (Number.isFinite(disk?.freeBytes) && remainingDownloadBytes * 1.05 > disk.freeBytes) return refuse('insufficient-now', 'C4', 'Not enough disk for the weights and the 5 % reserve.');
     return result('ok', null, estimate, warnings);
 }
 

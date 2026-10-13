@@ -46,6 +46,7 @@ function renderFs() {
 async function snapshot(options = {}, vulkan = contract, fsApi = renderFs()) {
     const host = probe(options);
     const snap = await readSnapshot({ dataDir: '/tmp', vulkan, fsApi, execFileImpl: host.execFileImpl,
+        apu: options.apu === true,
         env: { PLOINKY_GPU_STATUS: 'attached' }, statfs: async () => ({ bsize: 4096, blocks: 1000000, bavail: 999000 }) });
     return { snap, calls: host.calls };
 }
@@ -90,8 +91,16 @@ test('snapshot: RADV discrete decides vulkan; RADV integrated is unusable', asyn
     const { snap } = await snapshot({ summary: fixture('radv-summary.txt'), devices: fixture('radv-devices.txt') });
     assert.equal(decideProfile({ snapshot: snap }).profile, 'vulkan');
     assert.equal(snap.gpu.name, 'AMD Radeon (TM) RX 7900 XTX (RADV NAVI31)');
-    const integrated = await snapshot({ summary: fixture('radv-integrated-summary.txt') });
+    const integrated = await snapshot({ summary: fixture('radv-integrated-summary.txt'), devices: fixture('radv-integrated-devices.txt') });
     assert.equal(integrated.snap.gpu.state, 'unusable');
+    assert.match(integrated.snap.gpu.reason, /LOCAL_LLM_AMD_APU/);
+    assert.equal(decideProfile({ snapshot: integrated.snap }).profile, 'cpu');
+    assert.equal(decideProfile({ snapshot: integrated.snap }).cause, 'unusable');
+    assert.equal(integrated.calls.some((call) => call.args.includes('--list-devices')), false);
+    const mismatched = await snapshot({ summary: fixture('radv-integrated-summary.txt'), devices: fixture('venus-devices.txt'), apu: true });
+    assert.equal(mismatched.snap.gpu.state, 'unusable');
+    assert.match(mismatched.snap.gpu.reason, /exactly Vulkan0 matching vulkaninfo/);
+    assert.doesNotMatch(mismatched.snap.gpu.reason, /APU use is off/);
 });
 test('snapshot: two accepted devices, llvmpipe present, (none) are unusable', async () => {
     const software = fixture('venus-summary.txt') + '\nGPU1:\n deviceName = llvmpipe\n deviceType = PHYSICAL_DEVICE_TYPE_CPU\n vendorID = 0x10005\n driverID = DRIVER_ID_MESA_LLVMPIPE\n';
