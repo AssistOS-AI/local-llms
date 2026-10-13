@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "local-llm.catalog/v3",
+  "$id": "local-llm.catalog/v4",
   "title": "local-llm model catalog",
-  "description": "Schema v3. Seed catalog entries (read-only, shipped with the agent) and user registry entries share this shape. Sources are keyed by weight format; every runner reads one format, so runners that read the same format share one download. Seed Hugging Face sources must pin commit, size and sha256; user sources are pinned when added. `recommended` and `validated` are keyed by hardware profile (dedicated, unified; DS005), then by runner id. `unified` and `validated` labels come only from the trusted seed (the shipped catalog or the operator's LOCAL_LLM_CATALOG_FILE); a user registry entry carrying either is refused. Entries of earlier schemas are not migrated.",
+  "description": "Schema v4. Venus recommendations and historical measurements are separate from eligibility. The runtime also accepts v3 with its original three metadata profiles. Seed catalog entries (read-only, shipped with the agent) and user registry entries share this shape. Sources are keyed by weight format; every runner reads one format, so runners that read the same format share one download. Seed Hugging Face sources must pin commit, size and sha256; user sources are pinned when added. `recommended` and `validated` are keyed by hardware profile (dedicated, unified; DS005), then by runner id. `unified` and `validated` labels come only from the trusted seed (the shipped catalog or the operator's LOCAL_LLM_CATALOG_FILE); a user registry entry carrying either is refused. Entries of earlier schemas are not migrated.",
   "type": "object",
   "required": [
     "schema",
@@ -11,7 +11,7 @@
   "additionalProperties": false,
   "properties": {
     "schema": {
-      "const": "local-llm.catalog/v3"
+      "const": "local-llm.catalog/v4"
     },
     "models": {
       "type": "array",
@@ -143,6 +143,36 @@
               "additionalProperties": {
                 "type": "object"
               }
+            },
+            "venus": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [],
+              "properties": {
+                "llama.cpp-vulkan": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [],
+                  "properties": {
+                    "ctxSize": {
+                      "type": "integer",
+                      "minimum": 512,
+                      "maximum": 131072
+                    },
+                    "parallel": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 4
+                    },
+                    "loadMode": {
+                      "enum": [
+                        "auto",
+                        "none"
+                      ]
+                    }
+                  }
+                }
+              }
             }
           }
         },
@@ -170,6 +200,21 @@
               "additionalProperties": {
                 "type": "string",
                 "maxLength": 600
+              }
+            },
+            "venus": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [],
+              "properties": {
+                "llama.cpp-vulkan": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 16,
+                  "items": {
+                    "$ref": "#/$defs/venusMeasurement"
+                  }
+                }
               }
             }
           }
@@ -422,6 +467,211 @@
         },
         "quantization": {
           "type": "string"
+        }
+      }
+    },
+    "venusParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ctxSize",
+        "parallel",
+        "loadMode"
+      ],
+      "properties": {
+        "ctxSize": {
+          "type": "integer",
+          "minimum": 512,
+          "maximum": 131072
+        },
+        "parallel": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "loadMode": {
+          "enum": [
+            "auto",
+            "none"
+          ]
+        }
+      }
+    },
+    "venusMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "id",
+        "measuredAt",
+        "evidence",
+        "modelSource",
+        "configuration"
+      ],
+      "properties": {
+        "schema": {
+          "const": "local-llm.venus-measurement/v1"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+        },
+        "measuredAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "runId",
+            "manifestSha256",
+            "reference"
+          ],
+          "properties": {
+            "runId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,128}$"
+            },
+            "manifestSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "reference": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 400,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+            }
+          }
+        },
+        "modelSource": {
+          "type": "object",
+          "required": [
+            "type",
+            "repo",
+            "file",
+            "commit",
+            "size"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "huggingface"
+            },
+            "repo": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"
+            },
+            "file": {
+              "type": "string",
+              "pattern": "\\.gguf$",
+              "description": "A single-file GGUF in the repository."
+            },
+            "revision": {
+              "type": "string"
+            },
+            "commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "quantization": {
+              "type": "string"
+            },
+            "shards": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 64,
+              "description": "A split GGUF: every shard in canonical order (<prefix>-0000k-of-0000N.gguf, one directory), each pinned by size and sha256. `file` is then the first shard, `size` their sum, and there is no top-level sha256.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "file",
+                  "size",
+                  "sha256"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                }
+              }
+            }
+          },
+          "anyOf": [
+            {
+              "required": [
+                "sha256"
+              ]
+            },
+            {
+              "required": [
+                "shards"
+              ]
+            }
+          ]
+        },
+        "configuration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "params",
+            "resolvedThreads",
+            "hostChip",
+            "hostRamBytes",
+            "vmCpus",
+            "vmRamBytes"
+          ],
+          "properties": {
+            "params": {
+              "$ref": "#/$defs/venusParams"
+            },
+            "resolvedThreads": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            },
+            "hostChip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+            },
+            "hostRamBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "vmCpus": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            },
+            "vmRamBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
         }
       }
     }

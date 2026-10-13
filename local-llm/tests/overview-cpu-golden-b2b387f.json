@@ -11,7 +11,21 @@
           "profile": "cpu",
           "cause": "absent",
           "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
-          "gpuName": null
+          "gpuName": null,
+          "diagnostic": {
+            "code": "gpu_unavailable",
+            "backend": null,
+            "driver": null,
+            "source": "agent-query",
+            "message": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+          },
+          "recovery": {
+            "gpuRecovered": false
+          },
+          "explanation": {
+            "summary": "Runs on the CPU: no usable GPU was observed. No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
+            "restartHint": "After changing GPU access, machine or provider, restart the agent or Box through Ploinky to select a new compute profile."
+          }
         },
         "limits": {
           "floorBytes": 644245095,
@@ -23,7 +37,14 @@
           "gpu": {
             "available": false,
             "state": "absent",
-            "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+            "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
+            "diagnostic": {
+              "code": "gpu_unavailable",
+              "backend": null,
+              "driver": null,
+              "source": "agent-query",
+              "message": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+            }
           },
           "memory": {
             "totalBytes": 6442450944,
@@ -533,7 +554,7 @@
                     "isEstimate": true
                   },
                   "warnings": [
-                    "Runs on the CPU: no NVIDIA GPU is attached (No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU). Generation is much slower than on a GPU.",
+                    "Runs on the CPU: no usable GPU was observed. No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
                     "Not measured on this machine: about 1.47 GiB is an estimate. The memory guard stops the runner at once if available memory falls below 614 MiB."
                   ]
                 }
@@ -558,7 +579,21 @@
           "profile": "cpu",
           "cause": "absent",
           "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
-          "gpuName": null
+          "gpuName": null,
+          "diagnostic": {
+            "code": "gpu_unavailable",
+            "backend": null,
+            "driver": null,
+            "source": "agent-query",
+            "message": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+          },
+          "recovery": {
+            "gpuRecovered": false
+          },
+          "explanation": {
+            "summary": "Runs on the CPU: no usable GPU was observed. No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
+            "restartHint": "After changing GPU access, machine or provider, restart the agent or Box through Ploinky to select a new compute profile."
+          }
         },
         "limits": {
           "floorBytes": 644245095,
@@ -570,7 +605,14 @@
           "gpu": {
             "available": false,
             "state": "absent",
-            "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+            "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
+            "diagnostic": {
+              "code": "gpu_unavailable",
+              "backend": null,
+              "driver": null,
+              "source": "agent-query",
+              "message": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+            }
           },
           "memory": {
             "totalBytes": 6442450944,
@@ -1080,7 +1122,7 @@
                     "isEstimate": true
                   },
                   "warnings": [
-                    "Runs on the CPU: no NVIDIA GPU is attached (No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU). Generation is much slower than on a GPU.",
+                    "Runs on the CPU: no usable GPU was observed. No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
                     "Not measured on this machine: about 1.47 GiB is an estimate. The memory guard stops the runner at once if available memory falls below 614 MiB."
                   ]
                 }
@@ -1105,7 +1147,21 @@
           "profile": "cpu",
           "cause": "absent",
           "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
-          "gpuName": null
+          "gpuName": null,
+          "diagnostic": {
+            "code": "gpu_unavailable",
+            "backend": null,
+            "driver": null,
+            "source": "agent-query",
+            "message": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+          },
+          "recovery": {
+            "gpuRecovered": false
+          },
+          "explanation": {
+            "summary": "Runs on the CPU: no usable GPU was observed. No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
+            "restartHint": "After changing GPU access, machine or provider, restart the agent or Box through Ploinky to select a new compute profile."
+          }
         },
         "limits": {
           "floorBytes": 644245095,
@@ -1117,7 +1173,14 @@
           "gpu": {
             "available": false,
             "state": "absent",
-            "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+            "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
+            "diagnostic": {
+              "code": "gpu_unavailable",
+              "backend": null,
+              "driver": null,
+              "source": "agent-query",
+              "message": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+            }
           },
           "memory": {
             "totalBytes": 6442450944,
@@ -1627,7 +1690,7 @@
                     "isEstimate": true
                   },
                   "warnings": [
-                    "Runs on the CPU: no NVIDIA GPU is attached (No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU). Generation is much slower than on a GPU.",
+                    "Runs on the CPU: no usable GPU was observed. No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
                     "Not measured on this machine: about 1.47 GiB is an estimate. The memory guard stops the runner at once if available memory falls below 614 MiB."
                   ]
                 }
@@ -1652,7 +1715,21 @@
           "profile": "cpu",
           "cause": "absent",
           "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
-          "gpuName": null
+          "gpuName": null,
+          "diagnostic": {
+            "code": "gpu_unavailable",
+            "backend": null,
+            "driver": null,
+            "source": "agent-query",
+            "message": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+          },
+          "recovery": {
+            "gpuRecovered": false
+          },
+          "explanation": {
+            "summary": "Runs on the CPU: no usable GPU was observed. No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
+            "restartHint": "After changing GPU access, machine or provider, restart the agent or Box through Ploinky to select a new compute profile."
+          }
         },
         "limits": {
           "floorBytes": 644245095,
@@ -1664,7 +1741,14 @@
           "gpu": {
             "available": false,
             "state": "absent",
-            "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+            "reason": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
+            "diagnostic": {
+              "code": "gpu_unavailable",
+              "backend": null,
+              "driver": null,
+              "source": "agent-query",
+              "message": "No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU."
+            }
           },
           "memory": {
             "totalBytes": 6442450944,
@@ -2174,7 +2258,7 @@
                     "isEstimate": true
                   },
                   "warnings": [
-                    "Runs on the CPU: no NVIDIA GPU is attached (No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU). Generation is much slower than on a GPU.",
+                    "Runs on the CPU: no usable GPU was observed. No GPU is available to this agent. On the host, `ploinky gpu status` shows why: revoked: run `ploinky gpu grant --agent local-llms/local-llm`; not applied yet: run `ploinky start`; or the host has no usable GPU.",
                     "Not measured on this machine: about 1.47 GiB is an estimate. The memory guard stops the runner at once if available memory falls below 614 MiB."
                   ]
                 }

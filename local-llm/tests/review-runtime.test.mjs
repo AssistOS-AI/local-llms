@@ -437,7 +437,7 @@ test('only the seed loader validates with seed trust', () => {
         }
     };
     walk(root);
-    assert.deepEqual(hits, ['controller/catalog.mjs: const models = document.models.map((entry) => validateModel(entry, { seed: true }));']);
+    assert.deepEqual(hits, ['controller/catalog.mjs: const models = document.models.map((entry) => validateModel(entry, { seed: true, schema: document.schema }));']);
 });
 
 // --------------------------------------------------------------- load mode

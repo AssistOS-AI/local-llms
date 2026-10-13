@@ -112,3 +112,9 @@ The overview adds `limits.budget.gpuShare={smPercent,vramBytes,assurance:"best-e
 The GGUF header gives tensor sizes but not the CUDA compute buffers or the runtime's allocation behaviour, which differ by build and flash-attention mode. A profile measured on real hardware and stored with the catalog entry is accurate for the seed model; the file-size heuristic is the fallback for user models and is labelled as such.
 
 The agent reaches the GPU through its manifest declaration, which the operator can revoke, refuses before downloading when a model cannot fit, keeps runners on loopback behind a per-start key, and never exposes a runner port through the Router.
+
+### Diagnostic provenance
+
+Unavailable GPU observations may include a diagnostic with code, backend, driver, source and a bounded message. Sources are agent-query, image-contract or ploinky-environment. gpu_access_unavailable attributes sanitized text as "Ploinky reports"; gpu_unavailable leaves the host cause unknown and directs the operator to host ploinky gpu status. A render node with no valid declared runtime uses vulkan_runtime_unavailable, which says only that this image lacks a supported declared runtime. Query failure uses vulkan_query_unreadable. Parser, topology, device-match and memory checks emit vulkan_response_invalid, vulkan_device_unsupported, vulkan_device_mismatch and vulkan_memory_invalid respectively. Driver identity is included only after an actual device observation.
+
+The agent cannot observe a wrong host provider or denied grant directly from the current free-text environment protocol. Those explanations remain attributed to Ploinky. CPU architecture, absent nvidia-smi and image Vulkan keys do not establish Apple hardware. No new host probe, grant operation or environment protocol is introduced.

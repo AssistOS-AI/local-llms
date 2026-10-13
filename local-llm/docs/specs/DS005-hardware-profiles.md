@@ -40,7 +40,7 @@ Venus device need is the pinned weights plus f16 KV for context times parallel s
 
 The 2 GiB cap is provisional. On the 16 GiB M1, the 6 GiB VM plus the cap reaches about half of host RAM. No dynamic Vulkan memory budget is used for admission. Captured live evidence is still required before claiming Apple runtime validation; AMD remains unverified until measured on a real discrete Radeon GPU.
 
-The dashboard names AMD Vulkan and Apple Venus explicitly. RADV shows its unverified hardware status. Venus shows unknown headroom, the provisional cap and VM memory. A CPU fallback decision with `gpuBackend=vulkan` names the Vulkan GPU; CPU decisions without that field retain their previous text. Runner reports read Vulkan0 model, KV and compute buffers and nested device names only on these profiles; CUDA reports retain their existing parser.
+The dashboard names AMD Vulkan and Apple Venus explicitly. RADV shows its unverified hardware status. Venus shows unknown headroom, the provisional cap and VM memory. A CPU fallback decision with `gpuBackend=vulkan` names the Vulkan GPU; CPU decisions without a known backend use generic GPU wording. Runner reports read Vulkan0 model, KV and compute buffers and nested device names only on these profiles; CUDA reports retain their existing parser.
 
 ### Experimental AMD APU policy
 
@@ -88,7 +88,7 @@ Qualification requires owner-authorized captures showing UMA buffer names and th
 
 The controller exposes APU-only activity observations for L9, including lifetime and active counts for model jobs, runner installs and every model lookup. GGUF header acquisition goes through the counted lookup boundary. A genuine initial refusal includes its validated request/configuration and before/after observations under a fresh attempt UUID. Unchanged counters across complete valid same-controller snapshots, no active operations and independent process absence derive zero model/runner-artifact acquisition by proving no acquisition entry. This is not a measurement of network bytes. Any started or overlapping operation, overflow, missing reading or instance change prevents certification. Accepted replay and unrelated errors cannot supply a refusal receipt.
 
-L11 still requires the actual load marker and continuous current-launch sequence through idle. The available admin prompt route does not observe server generation start or bind it to an inference request, so L12 remains explicit pending instrumentation with `server-generation-observation-unavailable`. A ready-runner Stop test proves only ready-runner cancellation. Functional discovery, no-entry receipts and guard invocation observations cannot qualify a tuple while L12 or any other required case is pending.
+L11 still requires the actual load marker and continuous current-launch sequence through idle. HTTP 503 startup observations cannot replace that marker. The opt-in `observedPrompt` operation supplies first-token and Stop observations, but APU L12 adoption still requires reviewed inference-request, deployment and runner binding, bounded concurrent routed execution, Stop-caused settlement and independent process-group absence. L12 remains explicit pending with `server-generation-observation-unavailable`. A ready-runner Stop test proves only ready-runner cancellation. Functional discovery, no-entry receipts and guard invocation observations cannot qualify a tuple while L12 or any other required case is pending.
 
 ### NVIDIA memory detection
 
@@ -202,7 +202,7 @@ The estimate reports the need as `ramBytes`, names every defaulted input and car
 | --- | --- |
 | `incompatible` | the need is above the pool less the host reserve, min(16 GiB, max(1.5 GiB, 25 % of the pool)); or memory cannot be read; or the weight size is not pinned |
 | `insufficient-now` | the need is above what is available less the floor, min(8 GiB, max(512 MiB, 10 % of the pool)); or the download does not fit the disk |
-| `ok` | otherwise, with warnings: the run is on the CPU and slower than on a GPU (with the decision's reason); the figure is an estimate; the guard stops the runner below the floor |
+| `ok` | otherwise, with warnings: the run is on the CPU, with the decision's reason; the figure is an estimate; the guard stops the runner below the floor |
 
 Reserve and floor round up to whole bytes. On the 6 GiB Podman machine of a 16 GiB Mac (MemTotal 5.76 GiB) the reserve is 1.5 GiB and the floor 0.58 GiB. The constants are provisional, like the unified ones.
 
@@ -283,7 +283,7 @@ On unified memory the Local LLMs dashboard shows one "Unified memory available" 
 
 In the `cpu` profile the dashboard shows three cards:
 
-- a Compute card: the CPU, its cores, and why no NVIDIA GPU is used, led by the decision's cause;
+- a Compute card: the CPU, its cores, and why no GPU is used, with the shared decision explanation;
 - a Memory card: what is available of the pool, with a meter and the floor;
 - the disk card.
 
@@ -328,3 +328,11 @@ The first CPU host has 5.76 GiB, where the unified values (16 GiB reserve, 8 GiB
 `profileUnsupportedReason` is set only on the `cpu` profile, on purpose: the dedicated and unified overviews must stay what they were, so a runner cannot be hidden there by a reason that only the new profile produces. A runner that serves one profile says so itself (`profiles`), and the overview, the table columns, the per-model rows, Run, preview and Install all read that one declaration. A test compares both GPU profiles' overviews with a golden file made before the runner existed.
 
 The agent normalizes, admits, launches and guards each Run under one committed hardware profile. NVIDIA keeps the dedicated and unified policies. Vulkan serves discrete RADV, Venus and default-off experimental APU. Venus has a provisional device cap and a separate guarded VM staging pool; APU counts one shared physical pool and refuses finite or unknown budgets. An unusable or absent supported GPU falls back to the CPU at profile selection, while an unreadable query waits for the existing grace period. Every launch repeats admission against a fresh snapshot.
+
+### Historical Venus measurements and restart explanations
+
+Venus overview runner entries and Run previews add measurementStatus with state unverified or historical, applicability unknown or mismatch, record-specific reasons and structured records. Trusted historical records are compared independently against effective parameters. The aggregate is mismatch only when every record has a proven mismatch. Matching parameters still leave applicability unknown because the agent cannot observe the full host, VM and runtime identity. The active-profile raw validated map remains present. The dashboard renders history as escaped text without activating evidence references as links.
+
+History never changes admission or the memory guard. estimate.measured stays false. The device cap remains min(2 GiB, 25 percent of reported heap). Existing refusal comparisons add reason codes venus_device_cap, venus_device_free, venus_vm_unreadable, venus_vm_capacity and venus_vm_available. Disk refusal and status classification are unchanged.
+
+The CPU admission and public profile decision share cpuFallbackExplanation; Compute renders the supplied explanation. Unknown hardware is called GPU, an observed Vulkan backend is called Vulkan GPU, and Apple Venus requires observed Venus identity. There is no unconditional CPU speed claim. The committed decision, diagnostic and timestamp remain unchanged for the controller lifetime. Current recovery is published separately. Recovery after unreadable-timeout can advise restarting local-llm; it never switches the current CPU execution. Model Stop and Run do not reset the profile. Changing grants, machine or provider requires the supported agent or Box restart before profile reselection.

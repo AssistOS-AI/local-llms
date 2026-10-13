@@ -554,7 +554,7 @@ test('Ollama on the cpu profile is admitted from its pinned size, and refused wh
     assert.deepEqual([small.estimate.poolBytes, small.estimate.floorBytes, small.estimate.hostReserveBytes, small.estimate.measured],
         [M1_TOTAL, cpuFloorBytes(M1_TOTAL), cpuHostReserveBytes(M1_TOTAL), false]);
     assert.deepEqual(small.estimate.defaulted, []);
-    assert.match(small.warnings[0], /^Runs on the CPU: no NVIDIA GPU is attached \(No GPU is attached to this agent: GPU not applied to this Box yet\)\. Generation is much slower than on a GPU\.$/);
+    assert.match(small.warnings[0], /^Runs on the CPU: no usable GPU was observed\. No GPU is attached to this agent: GPU not applied to this Box yet\.$/);
     // A size that is not pinned is refused, with the way out, before any estimate.
     for (const size of [undefined, 0]) {
         const unpinned = admitOllamaOnCpu({ size });

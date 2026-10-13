@@ -15,6 +15,13 @@ import {
 } from '../../../local-llm-settings/local-llm-settings-model.js';
 
 export const ACTIVE_PHASES = new Set(['downloading', 'copying', 'verifying', 'pulling', 'starting', 'loading', 'ready', 'stopping']);
+export function measurementHtml(status) {
+    if (!status) return '';
+    const text = status.state === 'historical' ? `Historical measurements. Current applicability: ${status.applicability}. `
+        + (status.records || []).map((record) => `${record.id}, ${record.measuredAt}, ${record.evidence.reference}${record.reasons?.length ? `: ${record.reasons.join('; ')}` : ''}`).join(' · ')
+        : 'Unverified on this configuration.';
+    return `<div class="settings-card-meta">${escapeHtml(text)}</div>`;
+}
 const DOWNLOAD_PHASES = new Set(['downloading', 'copying', 'verifying', 'pulling', 'paused']);
 
 /**
@@ -63,28 +70,19 @@ function statCard(name, title, value, meta = '', extra = '') {
         </div>`;
 }
 
-// Why no NVIDIA GPU is used, led by the cause of the profile decision (DS005).
-const CPU_LEADS = Object.freeze({
-    absent: 'no NVIDIA GPU is attached',
-    unusable: 'the NVIDIA GPU cannot be used',
-    mismatch: 'this image\'s CUDA runners were not built for this GPU',
-    'unreadable-timeout': 'the NVIDIA GPU could not be read for 60 s',
-});
-
 // The cpu profile: the compute device and why it is the CPU, the memory pool with the floor kept free, and the disk.
 function cpuCardsHtml(hardware, decision, limits) {
     const memory = hardware.memory || {};
     const disk = hardware.disk || {};
     const cores = Number.isFinite(hardware.cores) ? hardware.cores : (Number.isFinite(hardware.cpus) ? hardware.cpus : null);
-    const lead = decision?.gpuBackend === 'vulkan' ? 'the Vulkan GPU cannot be used' : CPU_LEADS[decision?.cause] || 'no NVIDIA GPU is used';
-    const why = String(decision?.reason || '').replace(/\.+\s*$/, '');
+    const explanation = decision?.explanation;
     // A container memory limit caps the pool, so the controller says what the pool and what is available are.
     const pool = Number.isFinite(limits?.poolBytes) ? limits.poolBytes : memory.totalBytes;
     const available = Number.isFinite(limits?.availableBytes) ? limits.availableBytes : memory.availableBytes;
     const used = Number.isFinite(pool) && Number.isFinite(available) ? pool - available : null;
     return [
         statCard('compute', 'Compute', cores === null ? 'CPU' : `CPU · ${cores} ${cores === 1 ? 'core' : 'cores'}`,
-            `${decision?.gpuBackend === 'vulkan' ? 'No GPU is used' : 'No NVIDIA GPU is used'}: ${lead}${why ? `. ${why}` : ''}.`),
+            explanation ? [explanation.summary, explanation.restartHint].filter(Boolean).join(' ') : 'Runs on the CPU. No GPU is used.'),
         statCard('memory', 'Memory available', `${formatMiB(available)} of ${formatMiB(pool)}`,
             Number.isFinite(limits?.floorBytes) ? `keeps ${formatMiB(limits.floorBytes)} free for the workspace` : '',
             meter({ label: 'Memory in use', value: used, max: pool, text: `${formatMiB(used)} in use` })),
@@ -321,6 +319,7 @@ export function detailInfoHtml(model, { runners = [], activeModelId = '' } = {})
                     <div>
                         <div class="settings-card-title">${escapeHtml(labelOf(runnerId, runners))}</div>
                         <div class="settings-card-meta">${escapeHtml(admissionLabel(entry.admission))}</div>
+                        ${measurementHtml(entry.measurementStatus)}
                     </div>
                 </li>`).join('');
     const facts = [modelSizes(model), model.license, model.id].filter(Boolean).join(' · ');
@@ -464,7 +463,7 @@ export function installMessage(runner = {}) {
  * GPU and RAM estimate meters for the run form. On the cpu profile the controller's pool `limits` say
  * what is available under a container memory limit, which the host's figure does not.
  */
-export function estimateHtml({ admission = null, context = null, error = '' } = {}, hardware = {}, { limits = null } = {}) {
+export function estimateHtml({ admission = null, context = null, error = '', measurementStatus = null } = {}, hardware = {}, { limits = null } = {}) {
     if (error) return `<div class="settings-status error">${escapeHtml(error)}</div>`;
     const estimate = admission?.estimate || {};
     const gpu = hardware.gpu || {};
@@ -498,7 +497,7 @@ export function estimateHtml({ admission = null, context = null, error = '' } = 
     const warnings = Array.isArray(admission?.warnings) ? admission.warnings : [];
     const summary = [admissionLabel(admission), estimate.basis ? `estimate from ${estimate.basis}` : '', ...warnings].filter(Boolean).join(' · ');
     return `
-        ${parts.join('')}
+        ${parts.join('')}${measurementHtml(measurementStatus)}
         ${context ? `<div class="settings-card-meta">Context: ${escapeHtml(contextLabel(context))}</div>` : ''}
         ${summary ? `<div class="settings-card-meta">${escapeHtml(summary)}</div>` : ''}`;
 }

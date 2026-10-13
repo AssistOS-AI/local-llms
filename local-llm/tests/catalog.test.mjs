@@ -30,9 +30,9 @@ function tempStore(t, content) {
     return store;
 }
 
-test('the seed catalog is schema v3: sources by weight format, parameters and measurements by profile, then runner', () => {
+test('the seed catalog is schema v4: sources by weight format, parameters and measurements by profile, then runner', () => {
     const document = JSON.parse(fs.readFileSync(new URL('../catalog/models.json', import.meta.url), 'utf8'));
-    assert.equal(document.schema, 'local-llm.catalog/v3');
+    assert.equal(document.schema, 'local-llm.catalog/v4');
     const [gpt, awq, exl3] = loadSeedCatalog();
     assert.deepEqual(Object.keys(gpt.sources), ['gguf', 'ollama', 'hf']);
     assert.equal(gpt.sources.gguf.sha256, '27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901');
@@ -48,9 +48,9 @@ test('the seed catalog is schema v3: sources by weight format, parameters and me
     assert.match(gpt.validated.dedicated['ik_llama.cpp'], /12 threads: 5,340 MiB VRAM, 40\.5 tok\/s generation, 386\.6 tok\/s prompt/);
     assert.match(gpt.validated.dedicated['llama.cpp'], /b11159, 16k context, 12 threads: 4,798 MiB VRAM, 38\.4 tok\/s generation/);
     const schema = JSON.parse(fs.readFileSync(new URL('../catalog/schema.json', import.meta.url), 'utf8'));
-    assert.equal(schema.$id, 'local-llm.catalog/v3');
+    assert.equal(schema.$id, 'local-llm.catalog/v4');
     assert.deepEqual(Object.keys(schema.$defs.model.properties.sources.properties), Object.keys(WEIGHT_FORMATS));
-    assert.deepEqual(Object.keys(schema.$defs.model.properties.recommended.properties), ['dedicated', 'unified', 'cpu']);
+    assert.deepEqual(Object.keys(schema.$defs.model.properties.recommended.properties), ['dedicated', 'unified', 'cpu', 'venus']);
 });
 
 test('an entry is validated per format; runner-keyed sources are refused', () => {

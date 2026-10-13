@@ -1,0 +1,37 @@
+{
+  "revision": "c70ecd013793b919fd9a51ce8ae5001a2fd1dae9",
+  "purpose": "Historical catalog v3 validator and raw state persistence compatibility",
+  "files": [
+    {
+      "path": "src/controller/catalog.mjs",
+      "sourcePath": "local-llm/src/controller/catalog.mjs",
+      "sourceSha256": "36812657f8941ec9eba5a6d975c8bd2d580d92d834d27313bb62e9c803b2c9a0",
+      "sha256": "36812657f8941ec9eba5a6d975c8bd2d580d92d834d27313bb62e9c803b2c9a0",
+      "capture": "whole-file-unmodified"
+    },
+    {
+      "path": "src/controller/stateStore.mjs",
+      "sourcePath": "local-llm/src/controller/stateStore.mjs",
+      "sourceSha256": "b051f66a29d2564488c45bf1b5a8ca88e4197006b70fd23b676f6b8fa5790f3c",
+      "sha256": "b051f66a29d2564488c45bf1b5a8ca88e4197006b70fd23b676f6b8fa5790f3c",
+      "capture": "whole-file-unmodified"
+    },
+    {
+      "path": "src/errors.mjs",
+      "sourcePath": "local-llm/src/errors.mjs",
+      "sourceSha256": "28581726cb33a6a5519af94815f212e69e5d469bf0a9505359dd1316e3b1febc",
+      "sha256": "28581726cb33a6a5519af94815f212e69e5d469bf0a9505359dd1316e3b1febc",
+      "capture": "whole-file-unmodified"
+    },
+    {
+      "path": "src/controller/profiles.mjs",
+      "sourcePath": "local-llm/src/controller/profiles.mjs",
+      "sourceSha256": "9125b829ac5cfb4b18a49f65aba193a7b3e9cfaefe5705544f27a574f337f102",
+      "sha256": "edc38da7945ca00fec40972e17758887fd2ee1f4aeea5daffb055d9525c65026",
+      "selectedLines": [
+        26,
+        75
+      ]
+    }
+  ]
+}

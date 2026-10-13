@@ -92,7 +92,7 @@ export async function handleTool(name, input, { authInfo, call = callController,
     assertAdmin(authInfo);
     if (name === 'local_llm_test_prompt') {
         const run = testPrompt || (await import('../src/testPrompt.mjs')).runTestPrompt;
-        return run({ prompt: input.prompt, maxTokens: input.maxTokens, call });
+        return run({ prompt: input.prompt, maxTokens: input.maxTokens, ...(input.observationId !== undefined ? { observationId: input.observationId } : {}), call });
     }
     const operation = TOOL_OPERATIONS[name];
     return call(operation.op, operation.args(input || {}, authInfo));

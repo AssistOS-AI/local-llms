@@ -840,7 +840,7 @@ test('the operations main.mjs serves are exactly those the tools and the chat re
     const called = new Set(Object.values(TOOL_OPERATIONS).map(({ op }) => op));
     for (const file of ['../src/chatResponder.mjs', '../src/testPrompt.mjs']) {
         const source = fs.readFileSync(new URL(file, import.meta.url), 'utf8');
-        for (const [, op] of source.matchAll(/\bcall\('([A-Za-z]+)'/g)) called.add(op);
+        for (const [, op] of source.matchAll(/\b(?:call|observedCall)\('([A-Za-z]+)'/g)) called.add(op);
     }
     assert.ok(called.has('chatTarget') && called.has('recordCompletion'));
     const served = Object.keys(controllerHandlers({}));

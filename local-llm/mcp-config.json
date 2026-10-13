@@ -347,6 +347,11 @@
             "minLength": 1,
             "maxLength": 4000
           },
+          "observationId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,128}$",
+            "description": "Optional transient observation ID for a bounded streamed admin prompt."
+          },
           "maxTokens": {
             "type": "integer",
             "minimum": 1,
