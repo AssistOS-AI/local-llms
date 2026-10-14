@@ -23,6 +23,7 @@ import { DRAIN_QUEUE_WAIT_MS } from '../src/drainBudget.mjs';
 import { modelEntryFromForm } from '../IDE-plugins/local-llm-settings/local-llm-settings-model.js';
 import { TOOL_OPERATIONS, handleTool } from '../tools/local_llm_tool.mjs';
 import { GGUF_TYPE as T, ggufBytes, modelPairs } from './gguf-fixture.mjs';
+import { createTestTransport } from './net-fixture.mjs';
 
 const MIB = 1024 * 1024;
 const COMMIT = 'c'.repeat(40);
@@ -370,12 +371,12 @@ test('lookup reports gated repositories and licences, and 401 or 403 as access_d
 
 test('lookup follows only same-origin tree pages and never sends the token to another origin', async (t) => {
     const tree = [[lfs('one-Q4_K_M.gguf', MIB, sha('a'))], [lfs('two-Q4_K_M.gguf', MIB, sha('b'))]];
-    // A next link on another origin is not followed, and that server sees nothing at all.
+    // A next link on another origin is not followed, and that server sees nothing at all: what was listed is not the
+    // whole directory, so the lookup fails as incomplete instead of offering part of it.
     const elsewhere = await listen(t, (req, res) => sendJson(res, 200, [lfs('planted-Q4_K_M.gguf', MIB, sha('c'))]));
     const linked = await fakeHf(t, { tree: { '': tree }, link: (dir, index) => `${elsewhere.origin}/api/models/${REPO}/tree/${COMMIT}?cursor=${index + 1}` });
-    const cut = await ask(linked, { repo: REPO }, { token: TOKEN });
-    assert.deepEqual(cut.files.map((row) => row.file), ['one-Q4_K_M.gguf'], 'only the first page');
-    assert.equal(cut.truncated, true, 'a listing cut short says so');
+    await assert.rejects(() => ask(linked, { repo: REPO }, { token: TOKEN }),
+        (error) => error.code === 'lookup_failed' && error.details?.reason === 'listing-incomplete', 'a listing cut short by a next page on another origin fails');
     assert.deepEqual(elsewhere.requests, [], 'the other origin was never contacted');
     // The same pages behind a same-origin link are read, with the token.
     const same = await fakeHf(t, { tree: { '': tree } });
@@ -854,6 +855,8 @@ function harness(t, { hf, weights = null, download = null, registry = null, seed
         env: { PATH: '/usr/bin', HF_TOKEN: TOKEN },
         seedCatalog: seed,
         hfBaseUrl: hf?.origin ?? 'http://hf.invalid',
+        // The lookup and the pins go through the guarded transport, which may reach the loopback fake.
+        registryTransport: createTestTransport(),
         stateStore: createStateStore({ dataDir: dir }),
         snapshot: async () => (dedicated ? dedicatedSnapshot() : cpuSnapshot()),
         download: download ?? (async ({ artifact }) => { downloads.push(artifact.file); return { status: 'complete', path: file, bytesTransferred: 0 }; }),

@@ -9,8 +9,10 @@
 // the metadata calls and the ranged read alike, follows redirects by hand and
 // drops `Authorization` from any hop whose origin is not the Hugging Face one
 // (the file hosts' CDN is another origin), and a tree page named by a `Link`
-// header on another origin is never followed. Nothing here relies on the
-// fetch implementation's own redirect handling.
+// header on another origin is never followed: the lookup fails as
+// `listing-incomplete` instead. Nothing here relies on the fetch
+// implementation's own redirect handling. The controller passes its guarded
+// transport (netGuard.mjs) as `fetchImpl`, so every address is checked.
 
 import crypto from 'node:crypto';
 
@@ -20,6 +22,7 @@ import {
     DownloadError,
     MAX_TREE_PAGES,
     METADATA_TIMEOUT_MS,
+    TREE_PAGE_REJECTED,
     assertFile,
     assertRepo,
     assertRevision,
@@ -30,6 +33,10 @@ import {
     resolveCommit,
 } from './downloader.mjs';
 import { GGUF_LIMITS, createGgufHeaderReader, ggufSizing } from './ggufHeader.mjs';
+import { originGuardedFetch } from './netGuard.mjs';
+
+// The redirect-following fetch moved to the network guard; it is re-exported for its earlier importers.
+export { originGuardedFetch };
 
 const FORMATS = Object.freeze(['gguf', 'hf', 'exl3']);
 const INPUT_KEYS = Object.freeze(['provider', 'repo', 'revision', 'format', 'file']);
@@ -37,14 +44,12 @@ const MAX_DIRECTORIES = 32;
 const MAX_FILES = 500;
 // Tree entries held while listing, whatever their kind, so a huge directory cannot grow memory.
 const MAX_ENTRIES = 5000;
-const MAX_REDIRECTS = 5;
 // The tool's own timeout is 60 s; the lookup ends before it.
 export const LOOKUP_TIMEOUT_MS = 55_000;
 // The most the lookup reads of one metadata response (model info, revision, a tree page); a larger one is lookup_failed.
 export const LOOKUP_METADATA_MAX_BYTES = 8 * 1024 * 1024;
 // A config.json is a few kilobytes; one beyond this is not read.
 const CONFIG_MAX_BYTES = 1024 * 1024;
-const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 const SHA1_RE = /^[a-f0-9]{40}$/;
 const TOKEN_HINT = 'set a token with `ploinky var HF_TOKEN <token>` and restart local-llm';
 
@@ -71,6 +76,7 @@ function lookupError(error, signal, token = '') {
     if (error instanceof DownloadError) {
         if (error.code === 'INVALID_SOURCE') return failure('invalid_request', error.message);
         if (error.code === 'NOT_FOUND') return failure('not_found', error.message);
+        if (error.code === 'ADDRESS_REFUSED') return failure('address_refused', error.message, error.details);
         const status = error.details?.status;
         if (Number.isInteger(status)) return statusError(status, 'this repository, revision or file', token);
         return failure('lookup_failed', error.message, error.details?.reason ? { reason: error.details.reason } : undefined);
@@ -110,54 +116,7 @@ export function normalizeLookupInput(args) {
     return { repo: args.repo, revision, format, ...(file === undefined ? {} : { file }) };
 }
 
-// A DownloadError, not a LocalLlmError: `fetchJson` keeps one that its fetch throws, where it would flatten any other error.
-const refused = (message) => new DownloadError('RESOLVE_FAILED', message, { details: { reason: 'redirect' } });
-
 const encodePath = (value) => value.split('/').map(encodeURIComponent).join('/');
-
-async function discard(response) {
-    try {
-        await response.body?.cancel();
-    } catch {
-        // The connection is being dropped anyway.
-    }
-}
-
-/**
- * A fetch that follows redirects itself, up to five, and drops `Authorization`
- * from every request whose origin is not the Hugging Face one. Each request
- * also ends at `deadline`. With `sameOriginOnly` (the metadata calls, whose
- * answers are taken as Hugging Face's own) a redirect to another origin is
- * refused instead of followed; file reads may be sent to the file host's CDN.
- */
-export function originGuardedFetch({ fetchImpl, baseUrl, deadline, sameOriginOnly = false }) {
-    const home = new URL(baseUrl);
-    return async function guarded(url, init = {}) {
-        let current = new URL(url);
-        for (let hops = 0; ; hops += 1) {
-            const headers = { ...init.headers };
-            if (current.origin !== home.origin) {
-                for (const name of Object.keys(headers)) {
-                    if (name.toLowerCase() === 'authorization') delete headers[name];
-                }
-            }
-            const signal = init.signal ? AbortSignal.any([init.signal, deadline]) : deadline;
-            const response = await fetchImpl(current.href, { ...init, headers, signal, redirect: 'manual' });
-            if (!REDIRECTS.has(response.status)) return response;
-            const location = response.headers?.get?.('location');
-            await discard(response);
-            if (!location || hops >= MAX_REDIRECTS) throw refused('Hugging Face redirected the request too often, or without saying where.');
-            const next = new URL(location, current);
-            if (!['http:', 'https:'].includes(next.protocol) || (current.protocol === 'https:' && next.protocol !== 'https:')) {
-                throw refused('Hugging Face redirected the request to an address that is not https.');
-            }
-            if (sameOriginOnly && next.origin !== home.origin) {
-                throw refused('Hugging Face redirected a metadata request to another origin, which is not followed.');
-            }
-            current = next;
-        }
-    };
-}
 
 function gatedOf(info) {
     return info.gated === false || info.gated === 'auto' || info.gated === 'manual' ? info.gated : null;
@@ -199,8 +158,12 @@ async function listTree(context, dir = '') {
             entries.push(entry);
         }
         const next = nextTreePage(link, baseUrl);
-        // A next page on another origin is not followed, so what was listed is not the whole directory.
-        if (next === null && /rel="?next"?/.test(link ?? '')) budget.truncated = true;
+        // A next page the registry names but that is not followed (another origin, or outside its prefix) leaves the
+        // listing incomplete, so nothing is offered from it.
+        if (next === TREE_PAGE_REJECTED) {
+            throw failure('lookup_failed', 'The registry named a next page of the file list that is not followed, so the list is incomplete.',
+                { reason: 'listing-incomplete' });
+        }
         url = next;
     }
     return entries;

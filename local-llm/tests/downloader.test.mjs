@@ -15,6 +15,7 @@ import {
     removeArtifact,
     resolveHuggingFaceArtifact,
 } from '../src/controller/downloader.mjs';
+import { VIAS, fetchVia, named } from './net-fixture.mjs';
 
 const REPO = 'org/model-GGUF';
 const FILE = 'model-Q4_K_M.gguf';
@@ -187,7 +188,8 @@ function classify(pathname) {
     return 'api';
 }
 
-async function startServer(t, options = {}) {
+// `via` (net-fixture.mjs) picks the fetch the downloader gets: its default fetch, or the guarded test transport.
+async function startServer(t, options = {}, via = 'fetch') {
     const state = {
         options,
         requests: [],
@@ -212,6 +214,7 @@ async function startServer(t, options = {}) {
         return new Promise((resolve) => server.close(resolve));
     });
     state.baseUrl = `http://127.0.0.1:${server.address().port}`;
+    state.fetchImpl = fetchVia(via, state.baseUrl);
     return state;
 }
 
@@ -234,6 +237,7 @@ function download(server, root, extra = {}) {
         artifact: ARTIFACT,
         root,
         baseUrl: server.baseUrl,
+        fetchImpl: server.fetchImpl,
         progressIntervalMs: 0,
         sleep: noSleep,
         ...extra,
@@ -271,9 +275,9 @@ function rangeStarts(server) {
         .map((r) => Number(/^bytes=(\d+)-$/.exec(r.headers.range)[1]));
 }
 
-test('resolve pins main to the commit and reads size and sha256 from the tree', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t);
-    const artifact = await resolveHuggingFaceArtifact({ repo: REPO, file: FILE, baseUrl: server.baseUrl });
+for (const via of VIAS) test(named('resolve pins main to the commit and reads size and sha256 from the tree', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, {}, via);
+    const artifact = await resolveHuggingFaceArtifact({ repo: REPO, file: FILE, baseUrl: server.baseUrl, fetchImpl: server.fetchImpl });
     assert.deepEqual(artifact, { ...ARTIFACT });
     assert.ok(Object.isFrozen(artifact));
     assert.deepEqual(server.requests.map((r) => r.url), [
@@ -283,29 +287,30 @@ test('resolve pins main to the commit and reads size and sha256 from the tree', 
     assert.equal(server.requests[0].headers.authorization, undefined);
 });
 
-test('resolve skips the revision lookup for a commit and lists subdirectories', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t);
+for (const via of VIAS) test(named('resolve skips the revision lookup for a commit and lists subdirectories', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, {}, via);
     const artifact = await resolveHuggingFaceArtifact({
         repo: REPO,
         file: `sub/${FILE}`,
         revision: COMMIT,
         baseUrl: server.baseUrl,
+        fetchImpl: server.fetchImpl,
     });
     assert.equal(artifact.commit, COMMIT);
     assert.equal(artifact.size, SIZE);
     assert.deepEqual(server.requests.map((r) => r.url), [`/api/models/${REPO}/tree/${COMMIT}/sub`]);
 });
 
-test('resolve rejects an unknown file with NOT_FOUND', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t);
+for (const via of VIAS) test(named('resolve rejects an unknown file with NOT_FOUND', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, {}, via);
     await assert.rejects(
-        resolveHuggingFaceArtifact({ repo: REPO, file: 'missing.gguf', baseUrl: server.baseUrl }),
+        resolveHuggingFaceArtifact({ repo: REPO, file: 'missing.gguf', baseUrl: server.baseUrl, fetchImpl: server.fetchImpl }),
         (err) => err instanceof DownloadError && err.code === 'NOT_FOUND',
     );
 });
 
-test('resolve rejects invalid sources before any request', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t);
+for (const via of VIAS) test(named('resolve rejects invalid sources before any request', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, {}, via);
     const cases = [
         { repo: 'no-owner', file: FILE },
         { repo: 'a/b/c', file: FILE },
@@ -321,7 +326,7 @@ test('resolve rejects invalid sources before any request', { timeout: TIMEOUT },
     ];
     for (const input of cases) {
         await assert.rejects(
-            resolveHuggingFaceArtifact({ ...input, baseUrl: server.baseUrl }),
+            resolveHuggingFaceArtifact({ ...input, baseUrl: server.baseUrl, fetchImpl: server.fetchImpl }),
             (err) => err instanceof DownloadError && err.code === 'INVALID_SOURCE',
             JSON.stringify(input),
         );
@@ -329,10 +334,10 @@ test('resolve rejects invalid sources before any request', { timeout: TIMEOUT },
     assert.equal(server.requests.length, 0);
 });
 
-test('resolve sends the token as Bearer and never exposes it', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t, { failWhenAuthorized: true });
+for (const via of VIAS) test(named('resolve sends the token as Bearer and never exposes it', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, { failWhenAuthorized: true }, via);
     const token = 'hf_SuperSecretToken123';
-    const err = await resolveHuggingFaceArtifact({ repo: REPO, file: FILE, token, baseUrl: server.baseUrl })
+    const err = await resolveHuggingFaceArtifact({ repo: REPO, file: FILE, token, baseUrl: server.baseUrl, fetchImpl: server.fetchImpl })
         .then(() => null, (error) => error);
     assert.ok(err instanceof DownloadError);
     assert.equal(err.code, 'RESOLVE_FAILED');
@@ -343,8 +348,8 @@ test('resolve sends the token as Bearer and never exposes it', { timeout: TIMEOU
     }
 });
 
-test('an aborted download keeps its partial and resumes with Range', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t);
+for (const via of VIAS) test(named('an aborted download keeps its partial and resumes with Range', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, {}, via);
     const root = tempRoot(t);
     const paths = artifactPaths({ root, artifact: ARTIFACT });
     await abortAt(server, root, 0.4);
@@ -363,8 +368,8 @@ test('an aborted download keeps its partial and resumes with Range', { timeout: 
     assertComplete(root);
 });
 
-test('a server that ignores Range restarts from zero', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t, { ignoreRange: true });
+for (const via of VIAS) test(named('a server that ignores Range restarts from zero', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, { ignoreRange: true }, via);
     const root = tempRoot(t);
     seedPartial(root, 1_500_000);
     const result = await download(server, root);
@@ -373,8 +378,8 @@ test('a server that ignores Range restarts from zero', { timeout: TIMEOUT }, asy
     assertComplete(root);
 });
 
-test('an invalid Content-Range discards the partial and restarts', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t, { badContentRange: true });
+for (const via of VIAS) test(named('an invalid Content-Range discards the partial and restarts', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, { badContentRange: true }, via);
     const root = tempRoot(t);
     seedPartial(root, 1_500_000);
     const result = await download(server, root);
@@ -386,8 +391,8 @@ test('an invalid Content-Range discards the partial and restarts', { timeout: TI
     assertComplete(root);
 });
 
-test('a partial with a different upstream identity is discarded before any Range request', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t);
+for (const via of VIAS) test(named('a partial with a different upstream identity is discarded before any Range request', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, {}, via);
     const root = tempRoot(t);
     seedPartial(root, 1_500_000, { ...ARTIFACT, sha256: 'f'.repeat(64) });
     assert.deepEqual(await inspectArtifact({ root, artifact: ARTIFACT }), { state: 'absent', bytes: 0 });
@@ -397,8 +402,8 @@ test('a partial with a different upstream identity is discarded before any Range
     assertComplete(root);
 });
 
-test('an expired signed redirect is re-resolved from the resolve URL', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t, { redirect: true });
+for (const via of VIAS) test(named('an expired signed redirect is re-resolved from the resolve URL', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, { redirect: true }, via);
     const root = tempRoot(t);
     const result = await download(server, root);
     assert.equal(result.bytesTransferred, SIZE);
@@ -411,8 +416,8 @@ test('an expired signed redirect is re-resolved from the resolve URL', { timeout
     assertComplete(root);
 });
 
-test('wrong bytes of the right length fail with SHA256_MISMATCH and leave nothing', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t, { wrongBytes: true });
+for (const via of VIAS) test(named('wrong bytes of the right length fail with SHA256_MISMATCH and leave nothing', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, { wrongBytes: true }, via);
     const root = tempRoot(t);
     const paths = artifactPaths({ root, artifact: ARTIFACT });
     await assert.rejects(
@@ -425,8 +430,8 @@ test('wrong bytes of the right length fail with SHA256_MISMATCH and leave nothin
     assert.equal(exists(paths.meta), false);
 });
 
-test('insufficient free space fails before any request or byte', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t);
+for (const via of VIAS) test(named('insufficient free space fails before any request or byte', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, {}, via);
     const root = tempRoot(t);
     const paths = artifactPaths({ root, artifact: ARTIFACT });
     const probed = [];
@@ -446,8 +451,8 @@ test('insufficient free space fails before any request or byte', { timeout: TIME
     assert.deepEqual(probed, [path.resolve(root)]);
 });
 
-test('a resume needs space only for the remaining bytes', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t);
+for (const via of VIAS) test(named('a resume needs space only for the remaining bytes', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, {}, via);
     const root = tempRoot(t);
     const have = 2 * MIB;
     seedPartial(root, have);
@@ -460,8 +465,8 @@ test('a resume needs space only for the remaining bytes', { timeout: TIMEOUT }, 
     assertComplete(root);
 });
 
-test('ENOSPC mid-transfer pauses and keeps the partial', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t);
+for (const via of VIAS) test(named('ENOSPC mid-transfer pauses and keeps the partial', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, {}, via);
     const root = tempRoot(t);
     const paths = artifactPaths({ root, artifact: ARTIFACT });
     let written = 0;
@@ -499,8 +504,8 @@ test('ENOSPC mid-transfer pauses and keeps the partial', { timeout: TIMEOUT }, a
     assertComplete(root);
 });
 
-test('a truncated connection resumes with Range in the same call', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t, { truncateFirst: true });
+for (const via of VIAS) test(named('a truncated connection resumes with Range in the same call', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, { truncateFirst: true }, via);
     const root = tempRoot(t);
     const result = await download(server, root);
     assert.equal(result.bytesTransferred, SIZE);
@@ -532,8 +537,8 @@ test('repeated server errors give up with NETWORK and keep the partial', { timeo
     assert.ok(exists(paths.identity));
 });
 
-test('inspect reports states and a complete download is a no-op', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t);
+for (const via of VIAS) test(named('inspect reports states and a complete download is a no-op', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, {}, via);
     const root = tempRoot(t);
     assert.deepEqual(await inspectArtifact({ root, artifact: ARTIFACT }), { state: 'absent', bytes: 0 });
     seedPartial(root, 1000);
@@ -580,8 +585,8 @@ test('artifactPaths keeps every path under the root', () => {
     }
 });
 
-test('removeArtifact deletes every file and the empty directories', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t);
+for (const via of VIAS) test(named('removeArtifact deletes every file and the empty directories', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, {}, via);
     const root = tempRoot(t);
     const paths = artifactPaths({ root, artifact: ARTIFACT });
     await download(server, root);
@@ -597,8 +602,8 @@ test('removeArtifact deletes every file and the empty directories', { timeout: T
     assert.equal(await removeArtifact({ root, artifact: ARTIFACT }), 0);
 });
 
-test('a stop during the resume re-hash aborts before any request', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t);
+for (const via of VIAS) test(named('a stop during the resume re-hash aborts before any request', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, {}, via);
     const root = tempRoot(t);
     const paths = seedPartial(root, 2 * MIB);
     const controller = new AbortController();
@@ -631,8 +636,8 @@ test('files with the same name in different folders of one commit get different 
     assert.equal(artifactPaths({ root, artifact: { ...base, file: 'm.gguf' } }).file, `/data/models/gguf/owner/repo/${'c'.repeat(40)}/m.gguf`);
 });
 
-test('a file in a subfolder downloads into that folder and is removed with it', { timeout: TIMEOUT }, async (t) => {
-    const server = await startServer(t);
+for (const via of VIAS) test(named('a file in a subfolder downloads into that folder and is removed with it', via), { timeout: TIMEOUT }, async (t) => {
+    const server = await startServer(t, {}, via);
     const root = tempRoot(t);
     const artifact = { ...ARTIFACT, file: `sub/${FILE}` };
     const result = await download(server, root, { artifact });
@@ -642,7 +647,7 @@ test('a file in a subfolder downloads into that folder and is removed with it', 
     assert.equal(fs.existsSync(path.join(root, 'org')), false);
 });
 
-test('a metadata request that never answers fails after its deadline', { timeout: TIMEOUT }, async (t) => {
+for (const via of VIAS) test(named('a metadata request that never answers fails after its deadline', via), { timeout: TIMEOUT }, async (t) => {
     const silent = http.createServer(() => {});
     await new Promise((resolve) => silent.listen(0, '127.0.0.1', resolve));
     t.after(() => {
@@ -650,8 +655,9 @@ test('a metadata request that never answers fails after its deadline', { timeout
         return new Promise((resolve) => silent.close(resolve));
     });
     const started = Date.now();
+    const baseUrl = `http://127.0.0.1:${silent.address().port}`;
     await assert.rejects(
-        resolveHuggingFaceArtifact({ repo: REPO, file: FILE, baseUrl: `http://127.0.0.1:${silent.address().port}`, timeoutMs: 200 }),
+        resolveHuggingFaceArtifact({ repo: REPO, file: FILE, baseUrl, fetchImpl: fetchVia(via, baseUrl), timeoutMs: 200 }),
         (err) => err instanceof DownloadError && err.code === 'RESOLVE_FAILED' && err.details?.reason === 'timeout',
     );
     assert.ok(Date.now() - started < 2000);

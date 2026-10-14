@@ -13,6 +13,12 @@
 // Update model; and, when the controller fetches, `fetch(...)`, `plan(...)`
 // (how each file would be obtained and the disk it needs, C12) and
 // `recheck(...)` (the last check before a runner loads the files).
+//
+// Every request a store makes to the registry goes through `registryTransport`,
+// the controller's guarded transport (netGuard.mjs): pins read metadata from
+// the registry origin only, and downloads may follow a redirect to the file
+// host's CDN, which never receives the token. A store made without one (a
+// test of the store alone) uses the downloader's own fetch.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -29,6 +35,7 @@ import {
     verifyArtifact,
     verifySnapshotFile,
 } from './downloader.mjs';
+import { followRedirects } from './netGuard.mjs';
 import { freedBytes, orderCandidates, regularFilesIn, walkShared } from './workspaceReuse.mjs';
 import { splitGgufFiles, splitGgufName } from './catalog.mjs';
 import {
@@ -64,7 +71,14 @@ export function createWeightStores({
     // is used through a private, verified copy instead of a download.
     sharedModelsRoot = null,
     fsApi = fs,
+    registryTransport = null,
 }) {
+    // Metadata (pins) is taken from the registry origin only; file reads may be redirected to a CDN.
+    const viaTransport = (options) => (registryTransport
+        ? { fetchImpl: followRedirects(registryTransport, { homeOrigin: hfBaseUrl, ...options }) }
+        : {});
+    const metadataFetch = () => viaTransport({ sameOriginOnly: true });
+    const fileFetch = () => viaTransport({});
     const adoptFrom = sharedModelsRoot ? [sharedModelsRoot] : [];
     // One walk of /shared per artifact (or per overview), for every size it needs.
     const sharedIndex = async (sizes, signal) => (adoptFrom.length ? walkShared(fsApi, adoptFrom, sizes, signal) : new Map());
@@ -141,6 +155,7 @@ export function createWeightStores({
                     root: ggufRoot,
                     token: env.HF_TOKEN || '',
                     baseUrl: hfBaseUrl,
+                    ...fileFetch(),
                     candidates: candidatesFor(file),
                     onProgress: (progress) => onProgress?.({
                         ...progress,
@@ -166,7 +181,7 @@ export function createWeightStores({
             return freed;
         },
         // Pinning reads Hugging Face metadata only; no weights are downloaded.
-        async pin(source) {
+        async pin(source, { signal } = {}) {
             if (huggingface.isPinned(source)) return source;
             const resolve = (file, revision) => resolveHf({
                 repo: source.repo,
@@ -174,6 +189,8 @@ export function createWeightStores({
                 revision,
                 token: env.HF_TOKEN || '',
                 baseUrl: hfBaseUrl,
+                signal,
+                ...metadataFetch(),
             });
             const resolved = await resolve(source.file, source.revision || 'main');
             const files = splitGgufFiles(source.file);
@@ -349,6 +366,7 @@ export function createWeightStores({
                     artifact,
                     token: env.HF_TOKEN || '',
                     baseUrl: hfBaseUrl,
+                    ...fileFetch(),
                     candidates: candidatesFor(artifact),
                     signal,
                     onProgress: (progress) => onProgress({
@@ -378,13 +396,15 @@ export function createWeightStores({
             return freed;
         },
         // Pinning reads Hugging Face metadata only; no weights are downloaded.
-        async pin(source) {
+        async pin(source, { signal } = {}) {
             if (source.commit && source.files) return source;
             const resolved = await resolveSnapshot({
                 repo: source.repo,
                 revision: source.revision || 'main',
                 token: env.HF_TOKEN || '',
                 baseUrl: hfBaseUrl,
+                signal,
+                ...metadataFetch(),
             });
             const files = resolved.files.map((file) => ({ ...file }));
             return { ...source, commit: resolved.commit, files, size: files.reduce((sum, file) => sum + file.size, 0) };

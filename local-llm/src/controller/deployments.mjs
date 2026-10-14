@@ -42,6 +42,7 @@ import {
     untilStopped,
 } from './hardware.mjs';
 import { lookupHuggingFaceModel } from './modelLookup.mjs';
+import { createGuardedTransport } from './netGuard.mjs';
 import { BUDGET_UNREADABLE, MPS_VARIABLES, cpuQuotaOf, gpuBudgetOf, knownByte, memoryBudgetOf, mpsRunnerEnvironment, overviewBudget } from './ploinkyBudget.mjs';
 import {
     APU,
@@ -146,9 +147,11 @@ function sleep(ms, signal) {
 export function createController({
     dataDir = '/data',
     env = process.env,
-    // Test and development seams; production uses the shipped catalog and Hugging Face.
+    // Test and development seams; production uses the shipped catalog and Hugging Face. The base URL is a code
+    // option only, and every model request goes through the guarded transport (netGuard.mjs).
     seedCatalog = loadSeedCatalog(env.LOCAL_LLM_CATALOG_FILE || undefined),
-    hfBaseUrl = env.LOCAL_LLM_HF_BASE_URL || 'https://huggingface.co',
+    hfBaseUrl = 'https://huggingface.co',
+    registryTransport = createGuardedTransport(),
     stateStore = createStateStore({ dataDir }),
     runners = RUNNERS,
     // A snapshot's queries stop when `signal` aborts (a Stop, a Cancel or the drain).
@@ -399,6 +402,7 @@ export function createController({
         verify,
         verifySnapshot,
         sharedModelsRoot,
+        registryTransport,
     });
 
     // A drain has a fixed time budget (drainBudget.mjs); a Stop gives the
@@ -1961,7 +1965,7 @@ export function createController({
         lookups.add(stop);
         const finishAcquisition = enterAcquisition('modelLookupsStarted', 'activeModelLookups');
         try {
-            return await lookup(args, { token: env.HF_TOKEN || '', fetchImpl, baseUrl: hfBaseUrl, signal: stop.signal });
+            return await lookup(args, { token: env.HF_TOKEN || '', fetchImpl: registryTransport, baseUrl: hfBaseUrl, signal: stop.signal });
         } finally {
             finishAcquisition();
             lookups.delete(stop);

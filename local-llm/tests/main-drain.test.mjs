@@ -14,6 +14,8 @@ import { createStateStore } from '../src/controller/stateStore.mjs';
 import { RUNNERS } from '../src/runners/index.mjs';
 
 const MAIN = new URL('../src/main.mjs', import.meta.url).pathname;
+// With a fake Hugging Face, the test entry: the same agent process with the loopback test transport.
+const TEST_ENTRY = new URL('./fixtures/main-test-entry.mjs', import.meta.url).pathname;
 const MIB = 1024 * 1024;
 const PAYLOAD = crypto.randomBytes(4 * MIB);
 const SHA256 = crypto.createHash('sha256').update(PAYLOAD).digest('hex');
@@ -71,8 +73,8 @@ async function slowServer(t) {
     return `http://127.0.0.1:${server.address().port}`;
 }
 
-function startMain(f, extraEnv = {}) {
-    const child = spawn(process.execPath, [MAIN], {
+function startMain(f, extraEnv = {}, base = undefined) {
+    const child = spawn(process.execPath, base ? [TEST_ENTRY, base] : [MAIN], {
         env: {
             PATH: process.env.PATH,
             LOCAL_LLM_DATA_DIR: f.dataDir,
@@ -131,7 +133,7 @@ test('main hands a fresh per-start token and its abstract socket only to AgentSe
 test('SIGTERM during a download drains and exits 0, keeping the partial and its identity', async (t) => {
     const f = fixture(t);
     const base = await slowServer(t);
-    const main = startMain(f, { LOCAL_LLM_HF_BASE_URL: base });
+    const main = startMain(f, {}, base);
     let opts = await channel(f);
     await callController('run', { requestId: 'drain-000001', modelId: 'tiny', runnerId: 'llama.cpp' }, opts);
     await until(async () => (await callController('status', {}, opts)).deployment.download.bytes > 256 * 1024);
@@ -150,7 +152,7 @@ test('SIGTERM during a download drains and exits 0, keeping the partial and its 
 
     // After the restart nothing resumes by itself; the next Run resumes with Range.
     fs.rmSync(f.agentEnv);
-    const again = startMain(f, { LOCAL_LLM_HF_BASE_URL: base });
+    const again = startMain(f, {}, base);
     opts = await channel(f);
     assert.equal((await callController('status', {}, opts)).phase, 'paused');
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -254,7 +256,7 @@ const FINAL_SNAPSHOT = 4;
 
 test('SIGTERM during a slow final hardware snapshot kills the query, launches nothing and drains cleanly', { timeout: 60_000 }, async (t) => {
     const f = slowSnapshotFixture(t, { slowSnapshot: FINAL_SNAPSHOT, delayMs: 8000, agentDrainMs: 8000 });
-    const main = startMain(f, { LOCAL_LLM_HF_BASE_URL: await fastServer(t), LOCAL_LLM_SHARED_MODELS: path.join(f.root, 'no-shared') });
+    const main = startMain(f, { LOCAL_LLM_SHARED_MODELS: path.join(f.root, 'no-shared') }, await fastServer(t));
     t.after(() => { try { main.child.kill('SIGKILL'); } catch {} });
     const opts = await channel(f);
     const accepted = await callController('run', { requestId: 'drain-slow-smi-01', modelId: 'tiny', runnerId: 'llama.cpp' }, opts);
@@ -283,7 +285,7 @@ test('SIGTERM during a slow final hardware snapshot kills the query, launches no
 
 test('without SIGTERM a slow final hardware snapshot is waited for and the launch goes ahead', { timeout: 60_000 }, async (t) => {
     const f = slowSnapshotFixture(t, { slowSnapshot: FINAL_SNAPSHOT, delayMs: 1500, agentDrainMs: 0 });
-    const main = startMain(f, { LOCAL_LLM_HF_BASE_URL: await fastServer(t), LOCAL_LLM_SHARED_MODELS: path.join(f.root, 'no-shared') });
+    const main = startMain(f, { LOCAL_LLM_SHARED_MODELS: path.join(f.root, 'no-shared') }, await fastServer(t));
     t.after(() => { try { main.child.kill('SIGKILL'); } catch {} });
     const opts = await channel(f);
     await callController('run', { requestId: 'slow-smi-launch-01', modelId: 'tiny', runnerId: 'llama.cpp' }, opts);

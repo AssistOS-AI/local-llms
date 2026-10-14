@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -24,7 +25,9 @@ import {
     snapshotPaths,
     verifyArtifact,
 } from '../src/controller/downloader.mjs';
+import { followRedirects } from '../src/controller/netGuard.mjs';
 import { createWeightStores } from '../src/controller/weightStores.mjs';
+import { VIAS, createTestTransport, named } from './net-fixture.mjs';
 
 const SIZE = 256 * 1024 + 7;
 const CHUNK = 64 * 1024;
@@ -74,6 +77,37 @@ function setup(t) {
     return { base, dataDir, root, shared, requests, bodies, fetchImpl, common, get, place, paths: artifactPaths({ root, artifact: ARTIFACT }) };
 }
 
+// The same fixture, with downloads through the guarded test transport to a loopback server that serves the same
+// bodies the same way and records into the same request list (`via` 'transport'); 'fetch' keeps the in-process fake.
+async function setupVia(t, via) {
+    const s = setup(t);
+    if (via === 'fetch') return s;
+    const server = http.createServer((req, res) => {
+        const range = req.headers.range ?? null;
+        s.requests.push({ url: req.url, range });
+        const body = s.bodies.get(decodeURIComponent(new URL(req.url, 'http://placeholder.invalid').pathname.split('/').pop()));
+        if (!body) { res.writeHead(404, { 'content-length': 7 }); res.end('missing'); return; }
+        const start = range ? Number(/bytes=(\d+)-/.exec(range)[1]) : 0;
+        const slice = body.subarray(start);
+        res.writeHead(range ? 206 : 200, range
+            ? { 'content-length': String(slice.length), 'content-range': `bytes ${start}-${body.length - 1}/${body.length}` }
+            : { 'content-length': String(body.length) });
+        res.end(slice);
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const transport = createTestTransport();
+    t.after(() => {
+        transport.close();
+        server.closeAllConnections();
+        return new Promise((resolve) => server.close(resolve));
+    });
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    const fetchImpl = followRedirects(transport, { homeOrigin: baseUrl });
+    Object.assign(s.common, { fetchImpl, baseUrl });
+    s.fetchImpl = fetchImpl;
+    return s;
+}
+
 const meta = (paths) => JSON.parse(fs.readFileSync(paths.meta, 'utf8'));
 const fileSha = (file) => sha256(fs.readFileSync(file));
 const stagingLeft = (paths) => fs.existsSync(path.dirname(paths.partial))
@@ -121,8 +155,8 @@ test('a verified candidate in /shared/models is copied, hashed as it is written,
     assert.ok(fs.existsSync(source));
 });
 
-test('1. a fresh HF snapshot is adopted from /shared/models with git-oid and sha256 files, then a partial and a mixed one', async (t) => {
-    const s = setup(t);
+for (const via of VIAS) test(named('1. a fresh HF snapshot is adopted from /shared/models with git-oid and sha256 files, then a partial and a mixed one', via), async (t) => {
+    const s = await setupVia(t, via);
     const config = Buffer.from('{"architectures":["Test"],"hidden_size":8}\n');
     const weights = PAYLOAD;
     const extra = corrupt(PAYLOAD, 5);
@@ -135,7 +169,7 @@ test('1. a fresh HF snapshot is adopted from /shared/models with git-oid and sha
     const make = () => createWeightStores({
         dataDir: s.dataDir,
         env: {},
-        hfBaseUrl: 'http://hf.invalid',
+        hfBaseUrl: s.common.baseUrl,
         sharedModelsRoot: s.shared,
         downloadSnapshot: (options) => downloadSnapshotFile({ ...options, fetchImpl: s.fetchImpl, sleep: async () => {} }),
         state: () => ({}),
@@ -170,9 +204,9 @@ test('1. a fresh HF snapshot is adopted from /shared/models with git-oid and sha
 
 // -------------------------------------------------------- bound verification
 
-test('2. a write during hashing, even after the last chunk, is never recorded as verified, and the next Run does not trust it', async (t) => {
+for (const via of VIAS) test(named('2. a write during hashing, even after the last chunk, is never recorded as verified, and the next Run does not trust it', via), async (t) => {
     // In place: the file at the store path is rewritten while it is hashed.
-    const s = setup(t);
+    const s = await setupVia(t, via);
     fs.mkdirSync(path.dirname(s.paths.file), { recursive: true });
     fs.writeFileSync(s.paths.file, PAYLOAD);
     let written = false;
@@ -192,7 +226,7 @@ test('2. a write during hashing, even after the last chunk, is never recorded as
     assert.equal(fileSha(s.paths.file), ARTIFACT.sha256);
 
     // Copy: the shared source is rewritten after the last chunk was read; that candidate is not used.
-    const c = setup(t);
+    const c = await setupVia(t, via);
     const source = c.place('model-Q8_0.gguf');
     written = false;
     const copied = await c.get({ onProgress: (p) => {
@@ -209,8 +243,8 @@ test('2. a write during hashing, even after the last chunk, is never recorded as
     assert.equal(meta(c.paths).stat.ino, fs.statSync(c.paths.file).ino);
 });
 
-test('2b. a recorded file whose bytes change later (same size) is hashed again at the next Run and replaced', async (t) => {
-    const s = setup(t);
+for (const via of VIAS) test(named('2b. a recorded file whose bytes change later (same size) is hashed again at the next Run and replaced', via), async (t) => {
+    const s = await setupVia(t, via);
     await s.get({ adoptFrom: [] });
     const fd = fs.openSync(s.paths.file, 'r+');
     fs.writeSync(fd, Buffer.from([PAYLOAD[10] ^ 0xff]), 0, 1, 10);
@@ -221,8 +255,8 @@ test('2b. a recorded file whose bytes change later (same size) is hashed again a
     assert.equal(fileSha(s.paths.file), ARTIFACT.sha256);
 });
 
-test('3. a symbolic link at the store path, or in an ancestor, is never adopted or trusted', async (t) => {
-    const s = setup(t);
+for (const via of VIAS) test(named('3. a symbolic link at the store path, or in an ancestor, is never adopted or trusted', via), async (t) => {
+    const s = await setupVia(t, via);
     const outside = path.join(s.base, 'outside.gguf');
     fs.writeFileSync(outside, PAYLOAD);
     fs.mkdirSync(path.dirname(s.paths.file), { recursive: true });
@@ -239,7 +273,7 @@ test('3. a symbolic link at the store path, or in an ancestor, is never adopted 
     await assert.rejects(verifyArtifact({ root: s.root, artifact: ARTIFACT }), (err) => err.code === 'CHANGED_AFTER_VERIFY');
 
     // A link in an ancestor directory: refused before anything is read, created or downloaded.
-    const a = setup(t);
+    const a = await setupVia(t, via);
     const elsewhere = path.join(a.base, 'elsewhere');
     fs.mkdirSync(path.join(elsewhere, COMMIT), { recursive: true });
     fs.writeFileSync(path.join(elsewhere, COMMIT, ARTIFACT.file), PAYLOAD);
@@ -252,8 +286,8 @@ test('3. a symbolic link at the store path, or in an ancestor, is never adopted 
 
 // ------------------------------------------------------- staging and resume
 
-test('4. a wrong same-size candidate beside a valid partial: the download resumes from the partial (also after a copy error or a Stop)', async (t) => {
-    const s = setup(t);
+for (const via of VIAS) test(named('4. a wrong same-size candidate beside a valid partial: the download resumes from the partial (also after a copy error or a Stop)', via), async (t) => {
+    const s = await setupVia(t, via);
     seedPartial(s, 131_072);
     s.place('model-Q8_0.gguf', corrupt(PAYLOAD));
     const result = await s.get();
@@ -263,7 +297,7 @@ test('4. a wrong same-size candidate beside a valid partial: the download resume
     assert.deepEqual(stagingLeft(s.paths), []);
 
     // A read error while copying is an error, not "no candidate"; the partial stays.
-    const e = setup(t);
+    const e = await setupVia(t, via);
     seedPartial(e, 131_072);
     e.place('model-Q8_0.gguf');
     const failingRead = {
@@ -287,7 +321,7 @@ test('4. a wrong same-size candidate beside a valid partial: the download resume
     assert.deepEqual(e.requests.map((request) => request.range), ['bytes=131072-']);
 
     // A Stop while copying.
-    const c = setup(t);
+    const c = await setupVia(t, via);
     seedPartial(c, 131_072);
     const source = c.place('model-Q8_0.gguf');
     const stop = new AbortController();
@@ -547,8 +581,8 @@ test('13. many same-size decoys: at most 3 are hashed per file, and the walk sto
     assert.ok(opened <= 4, `the walk went on: ${opened} directories`);
 });
 
-test('14. a file whose stat changed at the last check before loading is hashed again; changed bytes are refused', async (t) => {
-    const s = setup(t);
+for (const via of VIAS) test(named('14. a file whose stat changed at the last check before loading is hashed again; changed bytes are refused', via), async (t) => {
+    const s = await setupVia(t, via);
     await s.get({ adoptFrom: [] });
     // Same bytes, new timestamps: hashed again and kept.
     const later = new Date(Date.now() + 5000);
@@ -562,8 +596,8 @@ test('14. a file whose stat changed at the last check before loading is hashed a
     await assert.rejects(verifyArtifact({ root: s.root, artifact: ARTIFACT }), (err) => err.code === 'CHANGED_AFTER_VERIFY');
 });
 
-test('a file verified before stats were recorded is checked once, then trusted by its stat', async (t) => {
-    const s = setup(t);
+for (const via of VIAS) test(named('a file verified before stats were recorded is checked once, then trusted by its stat', via), async (t) => {
+    const s = await setupVia(t, via);
     await s.get({ adoptFrom: [] });
     const record = meta(s.paths);
     delete record.stat;

@@ -20,6 +20,7 @@ import {
     snapshotPaths,
 } from '../src/controller/downloader.mjs';
 import { createWeightStores } from '../src/controller/weightStores.mjs';
+import { VIAS, createTestTransport, fetchVia, named } from './net-fixture.mjs';
 
 const REPO = 'org/model-AWQ';
 const COMMIT = 'b'.repeat(40);
@@ -128,20 +129,20 @@ test('a snapshot source pins every file with its digest, sums the size, and take
     }
 });
 
-test('pinning lists the top-level model files at the commit: sha256 for LFS files, the git oid for the rest', async (t) => {
+for (const via of VIAS) test(named('pinning lists the top-level model files at the commit: sha256 for LFS files, the git oid for the rest', via), async (t) => {
     const { base } = await hub(t);
-    const pinned = await resolveHuggingFaceSnapshot({ repo: REPO, revision: 'main', baseUrl: base });
+    const pinned = await resolveHuggingFaceSnapshot({ repo: REPO, revision: 'main', baseUrl: base, fetchImpl: fetchVia(via, base) });
     assert.equal(pinned.commit, COMMIT);
     assert.deepEqual(pinned.files, pinnedFiles());
 });
 
-test('each file is verified before it lands in the snapshot directory, which never holds partial or bookkeeping files', async (t) => {
+for (const via of VIAS) test(named('each file is verified before it lands in the snapshot directory, which never holds partial or bookkeeping files', via), async (t) => {
     const { base } = await hub(t);
     const root = tempRoot(t);
     const { dir, stateDir } = snapshotPaths({ root, repo: REPO, commit: COMMIT });
     for (const file of pinnedFiles()) {
         const artifact = { repo: REPO, commit: COMMIT, file: file.path, size: file.size, sha256: file.sha256, gitOid: file.gitOid };
-        const result = await downloadSnapshotFile({ root, artifact, baseUrl: base, sleep: noSleep });
+        const result = await downloadSnapshotFile({ root, artifact, baseUrl: base, fetchImpl: fetchVia(via, base), sleep: noSleep });
         assert.equal(result.path, path.join(dir, file.path));
         assert.equal((await inspectSnapshotFile({ root, artifact })).state, 'complete');
     }
@@ -151,13 +152,13 @@ test('each file is verified before it lands in the snapshot directory, which nev
     assert.ok(fs.readdirSync(stateDir).every((name) => name.endsWith('.json')));
 });
 
-test('bytes that match neither the sha256 nor the git oid are refused and nothing is kept', async (t) => {
+for (const via of VIAS) test(named('bytes that match neither the sha256 nor the git oid are refused and nothing is kept', via), async (t) => {
     const root = tempRoot(t);
     for (const name of ['config.json', 'model.safetensors']) {
         const { base } = await hub(t, { wrong: name });
         const file = pinnedFiles().find((entry) => entry.path === name);
         const artifact = { repo: REPO, commit: COMMIT, file: name, size: file.size, sha256: file.sha256, gitOid: file.gitOid };
-        await assert.rejects(() => downloadSnapshotFile({ root, artifact, baseUrl: base, sleep: noSleep }),
+        await assert.rejects(() => downloadSnapshotFile({ root, artifact, baseUrl: base, fetchImpl: fetchVia(via, base), sleep: noSleep }),
             (error) => error instanceof DownloadError && error.code === 'SHA256_MISMATCH');
         assert.equal((await inspectSnapshotFile({ root, artifact })).state, 'absent');
     }
@@ -209,9 +210,11 @@ test('a cut transfer resumes from the partial with Range', async (t) => {
     assert.deepEqual(await inspectSnapshotFile({ root, artifact }), { state: 'complete', bytes: file.size });
 });
 
-function stores(t, root, base) {
+// With `via` 'transport' the stores get the guarded test transport, as the controller gives them its own.
+function stores(t, root, base, via = 'fetch') {
     let state = {};
     return createWeightStores({
+        ...(via === 'transport' ? { registryTransport: createTestTransport() } : {}),
         dataDir: root,
         env: {},
         hfBaseUrl: base,
@@ -228,10 +231,10 @@ function stores(t, root, base) {
     })['hf-snapshot'];
 }
 
-test('a partial snapshot is never ready; fetch completes it; Delete removes the snapshot and its bookkeeping', async (t) => {
+for (const via of VIAS) test(named('a partial snapshot is never ready; fetch completes it; Delete removes the snapshot and its bookkeeping', via), async (t) => {
     const { base } = await hub(t);
     const root = tempRoot(t);
-    const store = stores(t, root, base);
+    const store = stores(t, root, base, via);
     const source = validateModel({ id: 'snap-model', sources: { hf: snapshotSource() } }, { seed: true }).sources.hf;
     assert.equal(store.type, 'hf-snapshot');
     assert.equal(store.fetchedBy, 'controller');
@@ -240,7 +243,7 @@ test('a partial snapshot is never ready; fetch completes it; Delete removes the 
     assert.deepEqual(await store.state(source), { state: 'absent', bytes: 0, total: source.size });
     // One file of three: partial, never complete.
     const [first] = source.files;
-    await downloadSnapshotFile({ root: path.join(root, 'models', 'hf'), artifact: { repo: REPO, commit: COMMIT, file: first.path, size: first.size, gitOid: first.gitOid }, baseUrl: base });
+    await downloadSnapshotFile({ root: path.join(root, 'models', 'hf'), artifact: { repo: REPO, commit: COMMIT, file: first.path, size: first.size, gitOid: first.gitOid }, baseUrl: base, fetchImpl: fetchVia(via, base) });
     const partial = await store.state(source);
     assert.equal(partial.state, 'partial');
     assert.equal(partial.bytes, first.size);
@@ -258,9 +261,9 @@ test('a partial snapshot is never ready; fetch completes it; Delete removes the 
     assert.equal(fs.existsSync(path.join(root, 'models', 'hf', '.state', ...REPO.split('/'), COMMIT)), false);
 });
 
-test('Add pins a revision to a commit and its files; an update keeps the pin while repository and revision stay', async (t) => {
+for (const via of VIAS) test(named('Add pins a revision to a commit and its files; an update keeps the pin while repository and revision stay', via), async (t) => {
     const { base } = await hub(t);
-    const store = stores(t, tempRoot(t), base);
+    const store = stores(t, tempRoot(t), base, via);
     const pinned = await store.pin({ type: 'hf-snapshot', repo: REPO, revision: 'main' });
     assert.equal(pinned.commit, COMMIT);
     assert.deepEqual(pinned.files, pinnedFiles());
@@ -269,7 +272,7 @@ test('Add pins a revision to a commit and its files; an update keeps the pin whi
     assert.equal(store.carryPin({ type: 'hf-snapshot', repo: REPO, revision: 'v2' }, pinned).commit, undefined);
 });
 
-test('a git-oid file whose partial must restart from zero still verifies by its git oid', async (t) => {
+for (const via of VIAS) test(named('a git-oid file whose partial must restart from zero still verifies by its git oid', via), async (t) => {
     // A server that ignores Range answers 200 with the whole file: the partial restarts.
     const { base, requests } = await hub(t, { ignoreRange: true });
     const root = tempRoot(t);
@@ -279,15 +282,15 @@ test('a git-oid file whose partial must restart from zero still verifies by its 
     fs.mkdirSync(stateDir, { recursive: true });
     fs.writeFileSync(path.join(stateDir, 'config.json.partial'), FILES['config.json'].subarray(0, 10));
     fs.writeFileSync(path.join(stateDir, 'config.json.partial.json'), JSON.stringify({ repo: REPO, commit: COMMIT, file: file.path, size: file.size, gitOid: file.gitOid }));
-    const result = await downloadSnapshotFile({ root, artifact, baseUrl: base, sleep: noSleep });
+    const result = await downloadSnapshotFile({ root, artifact, baseUrl: base, fetchImpl: fetchVia(via, base), sleep: noSleep });
     assert.equal(result.status, 'complete');
     assert.equal(requests.at(-1).range, 'bytes=10-');
     assert.equal((await inspectSnapshotFile({ root, artifact })).state, 'complete');
 });
 
-test('pinning refuses an LFS entry whose sizes disagree instead of trusting its pointer', async (t) => {
+for (const via of VIAS) test(named('pinning refuses an LFS entry whose sizes disagree instead of trusting its pointer', via), async (t) => {
     const { base } = await hub(t, { badLfs: true });
-    await assert.rejects(() => resolveHuggingFaceSnapshot({ repo: REPO, revision: 'main', baseUrl: base }),
+    await assert.rejects(() => resolveHuggingFaceSnapshot({ repo: REPO, revision: 'main', baseUrl: base, fetchImpl: fetchVia(via, base) }),
         (error) => error instanceof DownloadError && error.code === 'RESOLVE_FAILED');
 });
 

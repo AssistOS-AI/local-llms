@@ -2,14 +2,22 @@
 // `shards` pin every shard by size and sha256, in canonical order, in one
 // directory; one artifact for in-use checks, disk, progress and deletion.
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
 import { splitGgufFiles, splitGgufName, validateModel } from '../src/controller/catalog.mjs';
-import { artifactPaths } from '../src/controller/downloader.mjs';
+import {
+    artifactPaths,
+    downloadArtifact,
+    inspectArtifact,
+    removeArtifact,
+    resolveHuggingFaceArtifact,
+} from '../src/controller/downloader.mjs';
 import { createWeightStores } from '../src/controller/weightStores.mjs';
+import { VIAS, createTestTransport, fakeServer, named } from './net-fixture.mjs';
 
 const COMMIT = 'c'.repeat(40);
 const REPO = 'unsloth/Qwen3.5-122B-A10B-GGUF';
@@ -120,4 +128,55 @@ test('Add model pins a split GGUF from its first shard: every shard at the first
     assert.equal(validateModel(entry(pinned)).sources.gguf.size, 60);
     // An update of the same entry keeps the pin.
     assert.deepEqual(store.carryPin({ type: 'huggingface', repo: REPO, file: FIRST, revision: 'main' }, pinned).shards, SHARDS);
+});
+
+// Over HTTP, with the real resolver and downloader: through the downloader's own fetch, and through the guarded
+// transport the controller gives its stores (net-fixture.mjs).
+for (const via of VIAS) test(named('a split GGUF pins every shard from one listing and downloads each one, verified, over HTTP', via), async (t) => {
+    const bodies = SHARDS.map((shard, index) => crypto.randomBytes(4096 + index));
+    const listed = SHARDS.map((shard, index) => ({
+        type: 'file', path: shard.file, size: bodies[index].length, oid: 'f'.repeat(40),
+        lfs: { oid: crypto.createHash('sha256').update(bodies[index]).digest('hex'), size: bodies[index].length, pointerSize: 134 },
+    }));
+    const hf = await fakeServer((req, res, url) => {
+        const json = (value) => { const text = JSON.stringify(value); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(text) }); res.end(text); };
+        if (url.pathname === `/api/models/${REPO}/revision/main`) return json({ sha: COMMIT });
+        if (url.pathname === `/api/models/${REPO}/tree/${COMMIT}/MXFP4_MOE`) return json(listed);
+        const index = SHARDS.findIndex((shard) => url.pathname === `/${REPO}/resolve/${COMMIT}/${shard.file}`);
+        if (index < 0) { res.writeHead(404, { 'Content-Length': 0 }); res.end(); return; }
+        res.writeHead(200, { 'Content-Length': bodies[index].length });
+        res.end(bodies[index]);
+    });
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-split-http-'));
+    const transport = via === 'transport' ? createTestTransport() : null;
+    t.after(async () => {
+        transport?.close();
+        await hf.close();
+        fs.rmSync(dataDir, { recursive: true, force: true });
+    });
+    const store = createWeightStores({
+        dataDir,
+        env: {},
+        hfBaseUrl: hf.origin,
+        inspect: inspectArtifact,
+        download: (options) => downloadArtifact({ ...options, sleep: async () => {} }),
+        remove: removeArtifact,
+        resolveHf: resolveHuggingFaceArtifact,
+        state: () => ({}),
+        save: () => {},
+        activeArtifact: () => null,
+        ...(transport ? { registryTransport: transport } : {}),
+    }).huggingface;
+    const pinned = await store.pin({ type: 'huggingface', repo: REPO, file: FIRST, revision: 'main' });
+    assert.deepEqual(pinned.shards.map((shard) => [shard.file, shard.size, shard.sha256]), listed.map((entry) => [entry.path, entry.size, entry.lfs.oid]));
+    const model = validateModel(entry(pinned), { seed: true }).sources.gguf;
+    const fetched = await store.fetch({ artifact: model });
+    assert.equal(fetched.files.length, 3);
+    for (const [index, file] of fetched.files.entries()) assert.ok(fs.readFileSync(file).equals(bodies[index]), file);
+    assert.equal((await store.state(model)).state, 'complete');
+    assert.deepEqual(hf.requests.map((request) => request.url), [
+        `/api/models/${REPO}/revision/main`,
+        ...SHARDS.map(() => `/api/models/${REPO}/tree/${COMMIT}/MXFP4_MOE`),
+        ...SHARDS.map((shard) => `/${REPO}/resolve/${COMMIT}/${shard.file}`),
+    ]);
 });

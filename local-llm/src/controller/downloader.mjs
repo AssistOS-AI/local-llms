@@ -18,6 +18,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import { isSnapshotFile } from './catalog.mjs';
 import { DownloadError, abortedError, throwIfAborted } from './downloadError.mjs';
+import { readCapped } from './netGuard.mjs';
 import {
     CHUNK_BYTES,
     MAX_CANDIDATES_PER_FILE,
@@ -140,32 +141,14 @@ async function discardBody(response) {
 // its own deadline, which also covers reading the body.
 export const METADATA_TIMEOUT_MS = 15_000;
 
-// The body of a metadata response as text, never more than `maxBytes`: a larger Content-Length, or a body that
-// grows past it, ends the read and the connection.
-async function readCapped(response, maxBytes) {
-    const declared = Number(response.headers.get('content-length'));
-    const tooLarge = () => new DownloadError('RESOLVE_FAILED', `Hugging Face metadata response is larger than ${maxBytes} bytes`,
-        { details: { reason: 'too-large' } });
-    if (Number.isFinite(declared) && declared > maxBytes) {
-        await discardBody(response);
-        throw tooLarge();
-    }
-    const parts = [];
-    let total = 0;
-    for await (const chunk of response.body ?? []) {
-        total += chunk.length;
-        if (total > maxBytes) {
-            await discardBody(response);
-            throw tooLarge();
-        }
-        parts.push(chunk);
-    }
-    return Buffer.concat(parts, total).toString('utf8');
-}
+// The most a pin reads of one metadata response (revision, a tree page), as the lookup does; a larger one is RESOLVE_FAILED.
+export const PIN_METADATA_MAX_BYTES = 8 * 1024 * 1024;
 
-// `maxBytes`, when given, bounds the body (the lookup's metadata reads); without it the body is read whole, as downloads always did.
-export async function fetchJson(url, { token, fetchImpl, timeoutMs = METADATA_TIMEOUT_MS, maxBytes = undefined }) {
-    const signal = AbortSignal.timeout(timeoutMs);
+// `maxBytes`, when given, bounds the body (the lookup's and the pins' metadata reads, through `readCapped` in
+// netGuard.mjs); without it the body is read whole. `signal` (a drain) ends the request as the timeout does.
+export async function fetchJson(url, { token, fetchImpl, timeoutMs = METADATA_TIMEOUT_MS, maxBytes = undefined, signal: stop = undefined }) {
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const signal = stop ? AbortSignal.any([timeout, stop]) : timeout;
     let response;
     try {
         response = await fetchImpl(url, { headers: { Accept: 'application/json', ...authHeaders(token) }, signal });
@@ -194,7 +177,7 @@ export async function fetchJson(url, { token, fetchImpl, timeoutMs = METADATA_TI
         if (err instanceof DownloadError) {
             throw err;
         }
-        if (signal.aborted) {
+        if (timeout.aborted) {
             throw new DownloadError('RESOLVE_FAILED', 'Hugging Face metadata request timed out', {
                 retryable: true,
                 details: { reason: 'timeout' },
@@ -215,12 +198,12 @@ function networkReason(err) {
     return err?.name === 'TypeError' ? 'fetch-failed' : 'unknown';
 }
 
-export async function resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs, maxBytes = undefined }) {
+export async function resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs, maxBytes = undefined, signal = undefined }) {
     if (COMMIT_RE.test(revision)) {
         return revision;
     }
     const url = `${baseUrl}/api/models/${encodeSegments(repo)}/revision/${encodeURIComponent(revision)}`;
-    const { json } = await fetchJson(url, { token, fetchImpl, timeoutMs, maxBytes });
+    const { json } = await fetchJson(url, { token, fetchImpl, timeoutMs, maxBytes, signal });
     const sha = typeof json?.sha === 'string' ? json.sha.toLowerCase() : '';
     if (!COMMIT_RE.test(sha)) {
         throw new DownloadError('RESOLVE_FAILED', 'Hugging Face revision response has no commit sha');
@@ -228,37 +211,67 @@ export async function resolveCommit({ repo, revision, token, fetchImpl, baseUrl,
     return sha;
 }
 
-// The tree API pages large directories through a Link header. Only same-origin
-// next links are followed, so the token is never sent anywhere else.
+/** What `nextTreePage` returns for a next link that is present but not followed. */
+export const TREE_PAGE_REJECTED = Object.freeze({ rejected: true });
+
+// The tree API pages large directories through a Link header. A next link is
+// followed only on the base origin and under the base URL's path prefix, so
+// the token is never sent anywhere else; a root-relative `/api/models/...`
+// link is taken under the prefix. Any other next link is TREE_PAGE_REJECTED:
+// the listing it continues is incomplete.
 export function nextTreePage(link, baseUrl) {
     const match = /<([^>]+)>\s*;\s*rel="?next"?/.exec(link ?? '');
     if (!match) {
         return null;
     }
+    let base;
+    let next;
     try {
-        const next = new URL(match[1], baseUrl);
-        return next.origin === new URL(baseUrl).origin ? next.href : null;
+        base = new URL(baseUrl);
+        next = new URL(match[1], baseUrl);
     } catch {
-        return null;
+        return TREE_PAGE_REJECTED;
     }
+    if (next.origin !== base.origin) {
+        return TREE_PAGE_REJECTED;
+    }
+    const prefix = base.pathname.replace(/\/+$/, '');
+    if (!prefix || next.pathname.startsWith(`${prefix}/`)) {
+        return next.href;
+    }
+    if (next.pathname.startsWith('/api/models/')) {
+        next.pathname = `${prefix}${next.pathname}`;
+        return next.href;
+    }
+    return TREE_PAGE_REJECTED;
 }
 
-async function findTreeEntry({ repo, file, commit, token, fetchImpl, baseUrl, timeoutMs }) {
+function listingIncomplete(details) {
+    return new DownloadError('RESOLVE_FAILED', 'The registry named a next page of the file list that is not followed, so the list is incomplete', {
+        details: { reason: 'listing-incomplete', ...details },
+    });
+}
+
+async function findTreeEntry({ repo, file, commit, token, fetchImpl, baseUrl, timeoutMs, maxBytes, signal }) {
     const dirname = path.posix.dirname(file);
     let url = `${baseUrl}/api/models/${encodeSegments(repo)}/tree/${commit}`;
     if (dirname !== '.') {
         url += `/${encodeSegments(dirname)}`;
     }
     for (let page = 0; url && page < MAX_TREE_PAGES; page += 1) {
-        const { json, link } = await fetchJson(url, { token, fetchImpl, timeoutMs });
+        const { json, link } = await fetchJson(url, { token, fetchImpl, timeoutMs, maxBytes, signal });
         if (!Array.isArray(json)) {
             throw new DownloadError('RESOLVE_FAILED', 'Hugging Face tree response is not a list');
+        }
+        const next = nextTreePage(link, baseUrl);
+        if (next === TREE_PAGE_REJECTED) {
+            throw listingIncomplete({ repo, commit });
         }
         const entry = json.find((item) => item?.path === file);
         if (entry) {
             return entry;
         }
-        url = nextTreePage(link, baseUrl);
+        url = next;
     }
     return null;
 }
@@ -280,12 +293,14 @@ export async function resolveHuggingFaceArtifact({
     fetchImpl = globalThis.fetch,
     baseUrl = 'https://huggingface.co',
     timeoutMs = METADATA_TIMEOUT_MS,
+    maxBytes = PIN_METADATA_MAX_BYTES,
+    signal = undefined,
 }) {
     assertRepo(repo);
     assertFile(file);
     assertRevision(revision);
-    const commit = await resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs });
-    const entry = await findTreeEntry({ repo, file, commit, token, fetchImpl, baseUrl, timeoutMs });
+    const commit = await resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs, maxBytes, signal });
+    const entry = await findTreeEntry({ repo, file, commit, token, fetchImpl, baseUrl, timeoutMs, maxBytes, signal });
     const identity = entry ? lfsIdentity(entry) : null;
     if (!identity) {
         throw new DownloadError('NOT_FOUND', 'Model file not found as an LFS object at the pinned commit', {
@@ -1188,14 +1203,16 @@ export async function resolveHuggingFaceSnapshot({
     fetchImpl = globalThis.fetch,
     baseUrl = 'https://huggingface.co',
     timeoutMs = METADATA_TIMEOUT_MS,
+    maxBytes = PIN_METADATA_MAX_BYTES,
+    signal = undefined,
 }) {
     assertRepo(repo);
     assertRevision(revision);
-    const commit = await resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs });
+    const commit = await resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs, maxBytes, signal });
     let url = `${baseUrl}/api/models/${encodeSegments(repo)}/tree/${commit}`;
     const files = [];
     for (let page = 0; url && page < MAX_TREE_PAGES; page += 1) {
-        const { json, link } = await fetchJson(url, { token, fetchImpl, timeoutMs });
+        const { json, link } = await fetchJson(url, { token, fetchImpl, timeoutMs, maxBytes, signal });
         if (!Array.isArray(json)) {
             throw new DownloadError('RESOLVE_FAILED', 'Hugging Face tree response is not a list');
         }
@@ -1212,6 +1229,10 @@ export async function resolveHuggingFaceSnapshot({
             if (GIT_OID_RE.test(oid) && Number.isSafeInteger(entry.size) && entry.size > 0) files.push({ path: entry.path, size: entry.size, gitOid: oid });
         }
         url = nextTreePage(link, baseUrl);
+        if (url === TREE_PAGE_REJECTED) {
+            // A next page that is not followed would pin an incomplete snapshot.
+            throw listingIncomplete({ repo, commit });
+        }
     }
     if (url) {
         // A listing cut short would pin an incomplete snapshot.

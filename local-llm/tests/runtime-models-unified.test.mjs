@@ -845,6 +845,7 @@ test('the operations main.mjs serves are exactly those the tools and the chat re
     assert.ok(called.has('chatTarget') && called.has('recordCompletion'));
     const served = Object.keys(controllerHandlers({}));
     assert.deepEqual(served.sort(), [...called].sort());
-    const main = fs.readFileSync(new URL('../src/main.mjs', import.meta.url), 'utf8');
+    // main.mjs starts the agent process, whose body serves the handlers.
+    const main = fs.readFileSync(new URL('../src/agentProcess.mjs', import.meta.url), 'utf8');
     assert.match(main, /handlers: controllerHandlers\(controller\)/);
 });

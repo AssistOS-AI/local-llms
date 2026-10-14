@@ -18,8 +18,8 @@ test('the worst-case drain leaves at least 5 s under the deadline and lets Agent
     assert.ok(DRAIN_DEADLINE_MS < 35_000);
     assert.equal(AGENT_SERVER_SHUTDOWN_MS, 20_000);
     assert.ok(AGENT_SERVER_KILL_MS > AGENT_SERVER_SHUTDOWN_MS);
-    // The controller and main use the budget instead of their own numbers.
-    const main = fs.readFileSync(new URL('../src/main.mjs', import.meta.url), 'utf8');
+    // The controller and the agent process (main.mjs's body) use the budget instead of their own numbers.
+    const main = fs.readFileSync(new URL('../src/agentProcess.mjs', import.meta.url), 'utf8');
     const deployments = fs.readFileSync(new URL('../src/controller/deployments.mjs', import.meta.url), 'utf8');
     assert.doesNotMatch(main, /const (DRAIN_DEADLINE_MS|AGENT_SERVER_KILL_MS) = \d/);
     assert.doesNotMatch(deployments, /const DRAIN_QUEUE_WAIT_MS = \d/);
