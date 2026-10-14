@@ -439,7 +439,7 @@
     {
       "name": "local_llm_model_lookup",
       "title": "Look up a model",
-      "description": "Look a model up before adding it, on huggingface.co (when registry is left out) or in a Hugging Face-compatible registry an administrator added under Registries: the commit the revision resolves to, whether the repository is gated, its licence, and the files of the format with their sizes and sha256 (GGUF files with their quantization, a split GGUF grouped under its first shard). The answer names the registry. For one GGUF file it also reads the start of that file (at most 32 MiB) for its layer count, training context and KV cache size; for a safetensors or EXL3 snapshot the sizing comes from its config.json, checked against the digest in the repository listing. Downloads no weights and writes nothing; add the model with local_llm_model_add, then Run it. Registries are reached only at globally routable addresses.",
+      "description": "Look a model up before adding it, on huggingface.co (when registry is left out) or in a Hugging Face-compatible or ModelScope registry an administrator added or enabled under Registries: the commit the revision resolves to, whether the repository is gated, its licence, and the files of the format with their sizes and sha256 (GGUF files with their quantization, a split GGUF grouped under its first shard). The answer names the registry. For one GGUF file it also reads the start of that file (at most 32 MiB) for its layer count, training context and KV cache size; for a safetensors or EXL3 snapshot the sizing comes from its config.json, checked against the digest in the repository listing. Downloads no weights and writes nothing; add the model with local_llm_model_add, then Run it. Registries are reached only at globally routable addresses.",
       "command": "node",
       "args": [
         "/code/tools/local_llm_tool.mjs"
@@ -466,13 +466,13 @@
             "type": "string",
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(\\/[A-Za-z0-9][A-Za-z0-9._-]{0,95}){1,3}$",
             "maxLength": 255,
-            "description": "A repository id, owner/name for Hugging Face-compatible registries."
+            "description": "A repository id, owner/name for Hugging Face-compatible and ModelScope registries."
           },
           "revision": {
             "type": "string",
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$",
             "maxLength": 128,
-            "description": "A branch, tag or commit; main when left out."
+            "description": "A branch, tag or commit; main when left out (master for a ModelScope registry)."
           },
           "format": {
             "type": "string",

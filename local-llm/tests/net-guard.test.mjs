@@ -425,7 +425,11 @@ function runSeeds() {
     const onMirror = (model, id, format) => validateModel({
         ...model, id, sources: { ...model.sources, [format]: { ...model.sources[format], registry: 'mirror' } },
     }, { seed: true });
-    return [gguf, split, snapshot, onMirror(gguf, 'a5m-gguf', 'gguf'), onMirror(split, 'a5m-split', 'gguf'), onMirror(snapshot, 'a5m-snapshot', 'hf')];
+    const onMs = (model, id, format) => validateModel({
+        ...model, id, sources: { ...model.sources, [format]: { ...model.sources[format], registry: 'ms' } },
+    }, { seed: true });
+    return [gguf, split, snapshot, onMirror(gguf, 'a5m-gguf', 'gguf'), onMirror(split, 'a5m-split', 'gguf'), onMirror(snapshot, 'a5m-snapshot', 'hf'),
+        onMs(gguf, 'a5s-gguf', 'gguf'), onMs(split, 'a5s-split', 'gguf'), onMs(snapshot, 'a5s-snapshot', 'hf')];
 }
 
 // Earlier requests of a flow answered in process, so the row's own request is the one that reaches the transport.
@@ -488,13 +492,46 @@ function a5Rows({ prefix = '', registry = null } = {}) {
         { name: 'snapshot Run', kind: 'run', answers: null, target: '/resolve/', act: (c) => c.run({ modelId: registry ? 'a5m-snapshot' : 'qwen3-4b-awq', runnerId: 'vllm', requestId: 'a5-run-snap-01' }) },
     ].map((row) => ({ ...row, name: named(row.name), registry }));
 }
-const A5_ROWS = [...a5Rows(), ...a5Rows({ prefix: '/p', registry: 'mirror' })];
+
+// The same rows for the ModelScope registry `ms` (`https://localhost:<port>`): its requests are commits, the listing,
+// the advisory OpenAPI and the /repo reads (a GGUF header, config.json, a download). `answers` are the earlier requests.
+function msRows() {
+    const api = `/api/v1/models/${REPO}`;
+    const envelope = (Data) => ({ Code: 200, Data, Success: true });
+    const blob = (path_, size, char) => ({ Type: 'blob', Path: path_, Size: size, Sha256: char.repeat(64) });
+    const commits = { [`${api}/commits`]: { body: envelope({ Commit: [{ Id: COMMIT }] }) } };
+    const filesOf = (entries) => ({ [`${api}/repo/files`]: { body: envelope({ Files: entries }) } });
+    const openapi = { [`/openapi/v1/models/${REPO}`]: { body: { success: true, data: { gated: false } } } };
+    const ggufFiles = [blob('m-Q4_K_M.gguf', 4 * MIB, 'a'), blob(SHARD_1, 2 * MIB, 'b'), blob(SHARD_2, 2 * MIB, 'c')];
+    const snapshotFiles = [blob('config.json', CONFIG.length, 'e'), blob('model.safetensors', MIB, 'd')];
+    const repoRead = /\/api\/v1\/models\/[^?]+\/repo$/;
+    const add = (format, source) => (c) => c.addModel({ id: 'a5-added', sources: { [format]: { registry: 'ms', revision: 'master', repo: REPO, ...source } } });
+    const gguf = (file) => add('gguf', { type: 'huggingface', file });
+    const lookup = (extra = {}) => (c) => c.lookupModel({ registry: 'ms', repo: REPO, ...extra });
+    return [
+        { name: 'lookup: commits', kind: 'lookup', answers: null, target: `${api}/commits`, act: lookup() },
+        { name: 'lookup: listing', kind: 'lookup', answers: { ...commits }, target: `${api}/repo/files`, act: lookup() },
+        { name: 'lookup: openapi', kind: 'lookup', answers: { ...commits, ...filesOf(ggufFiles) }, target: `/openapi/v1/models/${REPO}`, act: lookup() },
+        { name: 'lookup: GGUF header', kind: 'lookup', answers: { ...commits, ...filesOf(ggufFiles), ...openapi }, target: repoRead, act: lookup({ file: 'm-Q4_K_M.gguf' }) },
+        { name: 'lookup: config.json', kind: 'lookup', answers: { ...commits, ...filesOf(snapshotFiles), ...openapi }, target: repoRead, act: lookup({ format: 'hf' }) },
+        { name: 'GGUF pin: commits', kind: 'pin', answers: null, target: `${api}/commits`, act: gguf('m-Q4_K_M.gguf') },
+        { name: 'GGUF pin: listing', kind: 'pin', answers: { ...commits }, target: `${api}/repo/files`, act: gguf('m-Q4_K_M.gguf') },
+        { name: 'split pin: listing', kind: 'pin', answers: { ...commits }, target: `${api}/repo/files`, act: gguf(SHARD_1) },
+        { name: 'snapshot pin: listing', kind: 'pin', answers: { ...commits }, target: `${api}/repo/files`, act: add('hf', { type: 'hf-snapshot' }) },
+        { name: 'GGUF Run', kind: 'run', answers: null, target: repoRead, act: (c) => c.run({ modelId: 'a5s-gguf', runnerId: 'llama.cpp', requestId: 'a5-run-gguf-02' }) },
+        { name: 'split Run', kind: 'run', answers: null, target: repoRead, act: (c) => c.run({ modelId: 'a5s-split', runnerId: 'llama.cpp', requestId: 'a5-run-split-2' }) },
+        { name: 'snapshot Run', kind: 'run', answers: null, target: repoRead, act: (c) => c.run({ modelId: 'a5s-snapshot', runnerId: 'vllm', requestId: 'a5-run-snap-02' }) },
+    ].map((row) => ({ ...row, name: `ms: ${row.name}`, registry: 'ms' }));
+}
+const A5_ROWS = [...a5Rows(), ...a5Rows({ prefix: '/p', registry: 'mirror' }), ...msRows()];
 
 // The admin registry list a mirror row's controller starts with: `mirror` at a name that resolves to loopback.
 function writeMirrorRegistry(dataDir, port) {
     fs.mkdirSync(path.join(dataDir, 'state'), { recursive: true });
     fs.writeFileSync(path.join(dataDir, 'state', 'registries.json'), JSON.stringify({
-        version: 1, registries: [{ id: 'mirror', kind: 'huggingface', url: `https://localhost:${port}/p` }], builtins: {},
+        version: 1,
+        registries: [{ id: 'mirror', kind: 'huggingface', url: `https://localhost:${port}/p` }, { id: 'ms', kind: 'modelscope', url: `https://localhost:${port}` }],
+        builtins: {},
     }));
 }
 

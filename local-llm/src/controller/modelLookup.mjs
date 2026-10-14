@@ -52,10 +52,10 @@ export const LOOKUP_TIMEOUT_MS = 55_000;
 // The most the lookup reads of one metadata response (model info, revision, a tree page); a larger one is lookup_failed.
 export const LOOKUP_METADATA_MAX_BYTES = 8 * 1024 * 1024;
 // A config.json is a few kilobytes; one beyond this is not read.
-const CONFIG_MAX_BYTES = 1024 * 1024;
+export const CONFIG_MAX_BYTES = 1024 * 1024;
 const SHA1_RE = /^[a-f0-9]{40}$/;
 const TOKEN_HINT = 'set a token with `ploinky var HF_TOKEN <token>` and restart local-llm';
-const REGISTRY_TOKEN_HINT = 'set a credential for this registry with local_llm_registry_credential_set';
+export const REGISTRY_TOKEN_HINT = 'set a credential for this registry with local_llm_registry_credential_set';
 
 function failure(code, message, details = undefined) {
     return new LocalLlmError(code, message, details);
@@ -63,7 +63,7 @@ function failure(code, message, details = undefined) {
 
 // Hugging Face answers 401 for a repository that does not exist when no token is sent, so without a token a refusal
 // says that the repository may be missing, not only that access was refused.
-function statusError(status, what, token = '', { subject = 'Hugging Face', hint = TOKEN_HINT } = {}) {
+export function statusError(status, what, token = '', { subject = 'Hugging Face', hint = TOKEN_HINT } = {}) {
     if (status === 401 || status === 403) {
         return failure('access_denied', token
             ? `${subject} refused access to ${what} (HTTP ${status}). For a gated or private repository, ${hint}.`
@@ -74,7 +74,7 @@ function statusError(status, what, token = '', { subject = 'Hugging Face', hint 
 }
 
 // Every failure of a lookup is one of the documented codes; a stop of the agent is `shutting_down`.
-function lookupError(error, signal, token = '', who = undefined) {
+export function lookupError(error, signal, token = '', who = undefined) {
     if (error instanceof LocalLlmError) return error;
     if (signal?.aborted) return failure('shutting_down', 'The agent is restarting; look the model up again once it is back.');
     if (error instanceof DownloadError) {
@@ -86,9 +86,9 @@ function lookupError(error, signal, token = '', who = undefined) {
         return failure('lookup_failed', error.message, error.details?.reason ? { reason: error.details.reason } : undefined);
     }
     if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
-        return failure('lookup_failed', 'The Hugging Face lookup took too long.', { reason: 'timeout' });
+        return failure('lookup_failed', `The ${who?.subject ?? 'Hugging Face'} lookup took too long.`, { reason: 'timeout' });
     }
-    return failure('lookup_failed', 'The Hugging Face lookup failed.');
+    return failure('lookup_failed', `The ${who?.subject ?? 'Hugging Face'} lookup failed.`);
 }
 
 const encodePath = (value) => value.split('/').map(encodeURIComponent).join('/');
@@ -98,7 +98,7 @@ function gatedOf(info) {
 }
 
 // The licence id from the model card, else from a `license:` tag; plain text only.
-function licenseOf(info) {
+export function licenseOf(info) {
     const card = info.cardData?.license;
     const fromTags = Array.isArray(info.tags)
         ? info.tags.filter((tag) => typeof tag === 'string' && tag.startsWith('license:')).map((tag) => tag.slice('license:'.length))
@@ -153,11 +153,11 @@ export function quantizationOf(file) {
     return match ? match[1].toUpperCase() : null;
 }
 
-const byFile = (left, right) => (left.file < right.file ? -1 : left.file > right.file ? 1 : 0);
+export const byFile = (left, right) => (left.file < right.file ? -1 : left.file > right.file ? 1 : 0);
 
 // The GGUF files the Add model form could add: single files, and split sets whose every shard is present, each
 // listed once under its first shard. Every row is checked by the validator Add uses, so a listed file can be added.
-function ggufRows(found, repo, commit) {
+export function ggufRows(found, repo, commit) {
     const rows = [];
     for (const [file, identity] of found) {
         const split = splitGgufName(file);
@@ -237,7 +237,9 @@ async function listSnapshot(context) {
     return rows.sort(byFile).slice(0, MAX_FILES);
 }
 
-function resolveUrl({ baseUrl, repo, commit }, file) {
+// A context may bring its own file URL (ModelScope's differs from the Hugging Face resolve URL).
+function resolveUrl({ baseUrl, repo, commit, fileUrl }, file) {
+    if (fileUrl) return fileUrl(file);
     return `${baseUrl}/${encodePath(repo)}/resolve/${commit}/${encodePath(file)}`;
 }
 
@@ -269,7 +271,7 @@ async function readGgufKeyValues(context, file) {
     }
 }
 
-async function ggufSizingOf(context, file) {
+export async function ggufSizingOf(context, file) {
     const { kv, readBytes } = await readGgufKeyValues(context, file);
     const sizing = ggufSizing(kv);
     return {
@@ -283,7 +285,7 @@ async function ggufSizingOf(context, file) {
 }
 
 // config.json: read whole (it is small), checked against the digest the tree gave, then parsed.
-async function readConfig(context, row) {
+export async function readConfig(context, row) {
     const { get, token, who } = context;
     const response = await get(resolveUrl(context, row.file), { headers: { 'Accept-Encoding': 'identity', ...authHeaders(token) } });
     if (response.status !== 200) throw statusError(response.status, `the file ${row.file}`, token, who);

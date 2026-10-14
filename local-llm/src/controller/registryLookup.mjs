@@ -1,13 +1,15 @@
 // The model lookup across registries (DS002): the input's one normalizer, and the dispatch that sends a lookup to the
 // code for its registry's kind. `registry` absent means huggingface.co. A Hugging Face-compatible registry (a mirror,
 // with an optional path prefix) is looked up by the Hugging Face flow at its own base URL, with its own credential
-// and a canary request first; the credential of the huggingface.co lookup is the operator's `HF_TOKEN` and no
-// other registry ever receives it. Another kind of registry is refused clearly until its lookup exists.
+// and a canary request first; a ModelScope registry by modelScope.mjs. The credential of the huggingface.co lookup is
+// the operator's `HF_TOKEN` and no other registry ever receives it. An OCI registry is refused clearly until its
+// lookup exists.
 
 import { LocalLlmError } from '../errors.mjs';
 import { splitGgufName } from './catalog.mjs';
 import { DownloadError, assertFile, assertRepo, assertRevision } from './downloader.mjs';
 import { lookupHuggingFaceModel } from './modelLookup.mjs';
+import { lookupModelScope } from './modelScope.mjs';
 import { REGISTRY_ID_RE } from './registries.mjs';
 
 export { REGISTRY_ID_RE };
@@ -74,15 +76,12 @@ export async function lookupInRegistry(args, { registries = null, ...options } =
     if (!registries) throw failure('registry_unknown', `No registry '${id}' is defined.`, { registry: id });
     // Resolved once, here: an edit made while this lookup runs applies to the next one.
     const taken = registries.snapshot(id);
-    if (taken.kind !== 'huggingface') {
+    if (taken.kind !== 'huggingface' && taken.kind !== 'modelscope') {
         throw failure('unsupported_artifact', `Registry '${id}' is a ${taken.kind} registry, which this version cannot look up yet.`, { registry: id });
     }
-    const result = await lookupHuggingFaceModel(rest, {
-        ...options,
-        token: taken.credential?.token ?? '',
-        baseUrl: taken.url,
-        canary: true,
-        subject: taken.label,
-    });
+    const named = { ...options, token: taken.credential?.token ?? '', baseUrl: taken.url, subject: taken.label };
+    const result = taken.kind === 'modelscope'
+        ? await lookupModelScope(rest, named)
+        : await lookupHuggingFaceModel(rest, { ...named, canary: true });
     return { ...result, registry: { id: taken.id, kind: taken.kind, label: taken.label } };
 }

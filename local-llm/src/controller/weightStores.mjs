@@ -20,7 +20,7 @@
 // host's CDN, which never receives the token. A store made without one (a
 // test of the store alone) uses the downloader's own fetch.
 //
-// A source may name a registry (a Hugging Face-compatible mirror). Its files
+// A source may name a registry (a Hugging Face-compatible mirror, or ModelScope). Its files
 // and keys live under `_r/<id>`, derived from the source alone. The registry
 // itself is consulted only by `pin` and `fetch`, through a session resolved
 // once at their start (registrySessions.mjs); `key`, `state`, `plan`,
@@ -41,6 +41,7 @@ import {
     verifyArtifact,
     verifySnapshotFile,
 } from './downloader.mjs';
+import { resolveModelScopeGguf, resolveModelScopeSnapshot } from './modelScope.mjs';
 import { createSessions } from './registrySessions.mjs';
 import { freedBytes, orderCandidates, regularFilesIn, walkShared } from './workspaceReuse.mjs';
 import { splitGgufFiles, splitGgufName } from './catalog.mjs';
@@ -163,6 +164,7 @@ export function createWeightStores({
                     token: session.token,
                     baseUrl: session.baseUrl,
                     ...session.fileFetch(),
+                    ...session.urlFor(file),
                     candidates: candidatesFor(file),
                     onProgress: (progress) => onProgress?.({
                         ...progress,
@@ -191,6 +193,12 @@ export function createWeightStores({
         async pin(source, { signal, registry } = {}) {
             if (huggingface.isPinned(source)) return source;
             const session = sessions.forSource(source, { registry });
+            if (session.kind === 'modelscope') {
+                const { commit, size, sha256, shards } = await resolveModelScopeGguf({
+                    repo: source.repo, file: source.file, revision: source.revision, token: session.token, baseUrl: session.baseUrl, signal, ...session.metadataFetch(),
+                });
+                return shards ? { ...source, commit, size, shards } : { ...source, commit, size, sha256 };
+            }
             const resolve = (file, revision) => resolveHf({
                 repo: source.repo,
                 file,
@@ -379,6 +387,7 @@ export function createWeightStores({
                     token: session.token,
                     baseUrl: session.baseUrl,
                     ...session.fileFetch(),
+                    ...session.urlFor(artifact),
                     candidates: candidatesFor(artifact),
                     signal,
                     onProgress: (progress) => onProgress({
@@ -411,7 +420,7 @@ export function createWeightStores({
         async pin(source, { signal, registry } = {}) {
             if (source.commit && source.files) return source;
             const session = sessions.forSource(source, { registry });
-            const resolved = await resolveSnapshot({
+            const resolved = await (session.kind === 'modelscope' ? resolveModelScopeSnapshot : resolveSnapshot)({
                 repo: source.repo,
                 revision: source.revision || 'main',
                 token: session.token,

@@ -156,12 +156,12 @@ export const PIN_METADATA_MAX_BYTES = 8 * 1024 * 1024;
 
 // `maxBytes`, when given, bounds the body (the lookup's and the pins' metadata reads, through `readCapped` in
 // netGuard.mjs); without it the body is read whole. `signal` (a drain) ends the request as the timeout does.
-export async function fetchJson(url, { token, fetchImpl, timeoutMs = METADATA_TIMEOUT_MS, maxBytes = undefined, signal: stop = undefined }) {
+export async function fetchJson(url, { token, fetchImpl, timeoutMs = METADATA_TIMEOUT_MS, maxBytes = undefined, signal: stop = undefined, headers: extra = {} }) {
     const timeout = AbortSignal.timeout(timeoutMs);
     const signal = stop ? AbortSignal.any([timeout, stop]) : timeout;
     let response;
     try {
-        response = await fetchImpl(url, { headers: { Accept: 'application/json', ...authHeaders(token) }, signal });
+        response = await fetchImpl(url, { headers: { Accept: 'application/json', ...extra, ...authHeaders(token) }, signal });
     } catch (err) {
         // A DownloadError thrown by the fetch (the lookup's guarded fetch refusing a redirect) says why; any other error is reduced to a code.
         if (err instanceof DownloadError) {

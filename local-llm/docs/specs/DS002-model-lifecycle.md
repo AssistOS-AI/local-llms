@@ -148,7 +148,7 @@ An administrator may add up to 32 entries, with these keys only:
 | `enabled` | Boolean, true by default |
 | `authOrigins` | `oci` only: 1–4 `https:` origins whose token realm may receive the credential. The registry's own origin when absent; while it is only that, it follows a change of `url`. |
 
-Formats: `huggingface` and `modelscope` registries offer `gguf`, `hf` and `exl3`; `oci` registries offer `gguf` and `hf`. A source names its registry with `registry`; no `registry` means `huggingface`. A `huggingface` or `hf-snapshot` source may name a registry of kind `huggingface` (a mirror, below), and so may a lookup. The other kinds are defined and edited here, but their sources and lookups are refused with `unsupported_artifact` until this version can read them. `huggingface` and `modelscope` registries serve `huggingface` and `hf-snapshot` sources, and `oci` registries serve `oci` and `oci-snapshot` sources.
+Formats: `huggingface` and `modelscope` registries offer `gguf`, `hf` and `exl3`; `oci` registries offer `gguf` and `hf`. A source names its registry with `registry`; no `registry` means `huggingface`. A `huggingface` or `hf-snapshot` source may name a registry of kind `huggingface` (a mirror, below), and so may a lookup. A `modelscope` registry serves the same two source types (ModelScope, below). An `oci` registry is defined and edited here, but its sources and lookups are refused with `unsupported_artifact` until this version can read them. `huggingface` and `modelscope` registries serve `huggingface` and `hf-snapshot` sources, and `oci` registries serve `oci` and `oci-snapshot` sources.
 
 | Case | Rule |
 | --- | --- |
@@ -173,7 +173,7 @@ A registry of kind `huggingface` other than the built-in one is a mirror: it ser
 | Credential | The mirror's stored credential is sent as a Bearer header to the mirror's origin only, on metadata and on file requests. A hop to another origin (the CDN a resolve URL redirects to) never carries it, and a metadata request redirected off the origin is refused. A credential that is absent, or cannot be read with this agent's key, sends nothing. `HF_TOKEN` is sent to huggingface.co only and never to a mirror. |
 | Listing | A next tree page on the mirror's origin and under its prefix is followed; a root-relative `/api/models/…` link is taken under the prefix. A next page anywhere else is not followed and the listing is incomplete: `lookup_failed` at a lookup and `RESOLVE_FAILED` at a pin, reason `listing-incomplete`, and the other origin receives no request. |
 | Provenance | A downloaded file's provenance names the mirror's resolve URL with its prefix, never a CDN URL or a token. |
-| Other kinds | A registry of kind `modelscope` or `oci` gives `unsupported_artifact` for a lookup or a pin until it is supported; a source naming a missing or disabled registry keeps the `registry_unknown` and `registry_disabled` rules above. |
+| Other kinds | A registry of kind `oci` gives `unsupported_artifact` for a lookup or a pin until it is supported; a source naming a missing or disabled registry keeps the `registry_unknown` and `registry_disabled` rules above. |
 
 A mirror's files and identity keys live apart from huggingface.co's, under `_r/<id>`, and are derived from the source alone:
 
@@ -181,10 +181,26 @@ A mirror's files and identity keys live apart from huggingface.co's, under `_r/<
 | --- | --- | --- |
 | huggingface.co GGUF (unchanged) | `models/gguf/<owner>/<repo>/<commit>/<file>` | `gguf:<repo>@<commit>/<file>[#n]` |
 | huggingface.co snapshot (unchanged) | `models/hf/<owner>/<repo>/<commit>/`, `models/hf/.state/<owner>/<repo>/<commit>/` | `hf:<repo>@<commit>` |
-| Mirror GGUF | `models/gguf/_r/<id>/<owner>/<repo>/<commit>/<file>` | `gguf:_r/<id>/<repo>@<commit>/<file>[#n]` |
-| Mirror snapshot | `models/hf/_r/<id>/<owner>/<repo>/<commit>/`, `models/hf/.state/_r/<id>/<owner>/<repo>/<commit>/` | `hf:_r/<id>/<repo>@<commit>` |
+| Mirror or ModelScope GGUF | `models/gguf/_r/<id>/<owner>/<repo>/<commit>/<file>` | `gguf:_r/<id>/<repo>@<commit>/<file>[#n]` |
+| Mirror or ModelScope snapshot | `models/hf/_r/<id>/<owner>/<repo>/<commit>/`, `models/hf/.state/_r/<id>/<owner>/<repo>/<commit>/` | `hf:_r/<id>/<repo>@<commit>` |
 
 `_r` cannot collide with a Hugging Face owner, which must start with an alphanumeric character. `registry` is part of the identity of a downloaded file's record, and is undefined for huggingface.co, so records written before registries existed are still current, without a request or a new hash. Delete weights of a mirror's model removes only its own files. The registry list is read by a lookup, a pin and a download only: a store's `key`, `state`, `plan`, `recheck`, `remove` and `paths` come from the source alone.
+
+### ModelScope registries
+
+A registry of kind `modelscope` (the built-in `modelscope` at `https://www.modelscope.cn`, or another site such as `https://www.modelscope.ai` added under its own id) serves `huggingface` and `hf-snapshot` sources from its own API (`src/controller/modelScope.mjs`). Commit ids are site-scoped, so a source records the registry id with its commit.
+
+| Rule | Detail |
+| --- | --- |
+| Commit | `GET /api/v1/models/<repo>/commits?Ref=<revision>&PageNumber=1&PageSize=1` must give `Success === true` and a 40-hex `Commit[0].Id`, equal to the input when the input is 40-hex (the endpoint is asked for a commit too). `Commit: null` (or empty) is `not_found`; any other shape is `lookup_failed` with reason `nonconforming-registry`. A lookup without a revision uses `master`, ModelScope's default branch; a source always names its revision. |
+| Listing | `GET /api/v1/models/<repo>/repo/files?Revision=<commit>&Recursive=true`. `Files: null` or empty is `not_found`. Only blobs count; an unsafe path (empty, dot or `..` segment, absolute, backslash, control character), a duplicated path (every copy), a size that is not a positive integer and a `Sha256` that is not 64 hex are skipped. Every file is pinned by size and sha256. |
+| 3000 entries | The API cuts a listing at 3000 entries without a flag, so 3000 or more is `truncated: true` at a lookup (what was listed is still offered) and `RESOLVE_FAILED` with reason `listing-incomplete` at a pin. 2999 entries work. |
+| Pin | GGUF: the file, or every shard of a split set, at the commit; a missing file or shard is `NOT_FOUND`. Snapshot: the top-level files a snapshot allows, with at least one `.safetensors`. |
+| Gating and licence | `GET /openapi/v1/models/<repo>` is advisory: `gated` (`false`, or `manual` for `true`) and the licence are reported and never enforced. An answer that is missing, refused, too large, off-origin or not JSON leaves them `null`; a request that did not complete (a refused address, a network error, a timeout) fails the lookup. |
+| Sizing | A ranged read of the GGUF's start on `/api/v1/models/<repo>/repo?Revision=<commit>&FilePath=<path>` (at most 32 MiB, as for Hugging Face), or `config.json` read whole from the same URL and checked against the listing's `Sha256`. |
+| Download | Each file is read from the `/repo` URL above (the path is one encoded query value, so `/` is `%2F`), which may redirect to a signed CDN URL; it is verified against the pinned size and sha256 like any file. Provenance is the `/repo` URL, never the CDN URL. |
+| Caps | Listing 4 MiB; commits and OpenAPI 1 MiB; a larger answer is `lookup_failed` with reason `too-large`. Requests ask for identity encoding; the guarded transport refuses an encoded answer. |
+| Credential | `Authorization: Bearer <token>` to the registry's origin only, on metadata and on file requests. No cookie is sent, and a hop to another origin (the CDN) or a metadata redirect off the origin never carries it. `HF_TOKEN` is never sent to a ModelScope registry. |
 
 ### Registry credentials
 
