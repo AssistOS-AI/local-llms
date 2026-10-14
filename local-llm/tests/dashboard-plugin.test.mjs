@@ -17,6 +17,12 @@ import {
     statusCardHtml,
     tableRunners,
 } from '../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-view.js';
+import {
+    registriesListHtml,
+    registryFieldLabels,
+    registryFromForm,
+    registryOptionsFor,
+} from '../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-registries.js';
 import { fieldsFromSchema, rememberRunners, runnerOptions, stripBidi } from '../IDE-plugins/local-llm-settings/local-llm-settings-model.js';
 import { RUNNERS } from '../src/runners/index.mjs';
 
@@ -1155,4 +1161,364 @@ test('the optional Ploinky GPU budget card names best-effort per-process scope w
     assert.match(limited, /50% GPU SM, 3,072 MiB per CUDA process \(best-effort\)/);
     assert.match(limited, /1,024 MiB of 6,144 MiB/);
     assert.match(limited, /0.5 CPUs/);
+});
+
+// ------------------------------------------------------------ the Registries tab and the Add form's Registry selector
+
+const TOKEN = 'tok-SECRET-5f3a9c71';
+const DIGEST = `sha256:${'d'.repeat(64)}`;
+const REGISTRIES = {
+    registries: [
+        { id: 'huggingface', kind: 'huggingface', label: 'Hugging Face', url: 'https://huggingface.co', formats: ['gguf', 'hf', 'exl3'], enabled: true, builtIn: true, editable: false, authOrigins: [], credential: 'none', usedBy: [] },
+        { id: 'dockerhub', kind: 'oci', label: 'Docker Hub', url: 'https://registry-1.docker.io', formats: ['gguf', 'hf'], enabled: true, builtIn: true, editable: false, authOrigins: ['https://auth.docker.io'], credential: 'set', usedBy: ['smol'] },
+        { id: 'ghcr', kind: 'oci', label: 'GitHub Container Registry', url: 'https://ghcr.io', formats: ['gguf', 'hf'], enabled: false, builtIn: true, editable: false, authOrigins: ['https://ghcr.io'], credential: 'none', usedBy: [] },
+        { id: 'modelscope', kind: 'modelscope', label: 'ModelScope', url: 'https://www.modelscope.cn', formats: ['gguf', 'hf', 'exl3'], enabled: true, builtIn: true, editable: false, authOrigins: [], credential: 'unreadable', usedBy: [] },
+        { id: 'mirror', kind: 'huggingface', label: '"><img src=x onerror=alert(1)>', url: 'https://hf.example.com/prefix', formats: ['gguf', 'hf', 'exl3'], enabled: true, builtIn: false, editable: true, authOrigins: [], credential: 'none', usedBy: [] },
+    ],
+    credentialStorage: { available: true, reason: '' },
+};
+const UNAVAILABLE = { ...REGISTRIES, credentialStorage: { available: false, reason: 'LOCAL_LLM_CREDENTIALS_KEY is not set' } };
+const registryRow = (html, id) => new RegExp(`<li class="local-llm-runner-item" data-registry-id="${id}">[\\s\\S]*?</li>`).exec(html)[0];
+const actionsOf = (row) => [...row.matchAll(/data-local-action="(\w+) /g)].map((match) => match[1]);
+
+// Every string the object graph holds, to look for a value that must not be kept anywhere.
+function stringsIn(root) {
+    const found = [];
+    const seen = new Set();
+    const walk = (value) => {
+        if (typeof value === 'string') found.push(value);
+        else if (value && typeof value === 'object' && !seen.has(value)) {
+            seen.add(value);
+            for (const key of Reflect.ownKeys(value)) walk(value[key]);
+        }
+    };
+    walk(root);
+    return found;
+}
+
+test('the Registries tab, its forms and the Add form selector are in the page, and the credential input is a plain empty password field', () => {
+    const template = readText(new URL('local-llm-dashboard.html', DASHBOARD));
+    assert.match(template, /data-llm-tab="registries"[\s\S]*?role="tab"/);
+    assert.match(template, /data-llm-panel="registries"[\s\S]*?role="tabpanel"/);
+    const credential = /<form[^>]*data-llm-form="registry-credential"[\s\S]*?<\/form>/.exec(template)[0];
+    const password = /<input[^>]*name="token"[^>]*>/.exec(credential)[0];
+    assert.match(password, /type="password"/);
+    assert.match(password, /autocomplete="new-password"/);
+    assert.doesNotMatch(password, /\bvalue=/, 'never pre-filled');
+    assert.match(credential, /data-llm-credential-submit/);
+    // The Registry selector is a custom-select outside the per-kind fields, and the repository labels can be rewritten per kind.
+    const field = /<label[^>]*data-llm-registry-field>[\s\S]*?<\/label>/.exec(template)[0];
+    assert.match(field, /<custom-select id="localLlmRegistry"/);
+    assert.doesNotMatch(field, /data-source-field/);
+    for (const name of ['repo', 'revision', 'file']) assert.match(template, new RegExp(`data-label-for="${name}"`));
+    assert.doesNotMatch(template, /<select\b/);
+    const source = readText(new URL('local-llm-dashboard-registries.js', DASHBOARD));
+    assert.doesNotMatch(source, /console\./);
+    assert.ok(source.split('\n').length <= 500);
+    for (const action of ['refreshRegistries', 'openAddRegistry', 'editRegistry', 'cancelRegistryForm', 'toggleRegistry', 'removeRegistry', 'openRegistryCredential', 'cancelRegistryCredential', 'clearRegistryCredential']) {
+        assert.equal(typeof dashboardModule.LocalLlmDashboard.prototype[action], 'function', action);
+    }
+});
+
+test('the registry list shows state, never a credential, and offers each registry only the actions it allows', () => {
+    const html = registriesListHtml(REGISTRIES);
+    assert.doesNotMatch(html, /<input|value=|<img/, 'a list holds no field and no markup from a label');
+    assert.deepEqual(actionsOf(registryRow(html, 'huggingface')), [], 'the built-in Hugging Face registry is read-only');
+    assert.deepEqual(actionsOf(registryRow(html, 'dockerhub')), ['toggleRegistry', 'openRegistryCredential', 'clearRegistryCredential']);
+    assert.deepEqual(actionsOf(registryRow(html, 'ghcr')), ['toggleRegistry', 'openRegistryCredential']);
+    assert.deepEqual(actionsOf(registryRow(html, 'modelscope')), ['toggleRegistry', 'openRegistryCredential', 'clearRegistryCredential'], 'unreadable can be cleared');
+    assert.deepEqual(actionsOf(registryRow(html, 'mirror')), ['editRegistry', 'toggleRegistry', 'openRegistryCredential', 'removeRegistry']);
+    assert.match(registryRow(html, 'dockerhub'), /OCI · https:\/\/registry-1\.docker\.io · sign-in from https:\/\/auth\.docker\.io/);
+    assert.match(registryRow(html, 'dockerhub'), /Enabled · credential set · Used by smol/);
+    assert.match(registryRow(html, 'ghcr'), />Enable<\/button>/);
+    assert.match(registryRow(html, 'ghcr'), /Disabled · no credential · Not used by any model/);
+    assert.match(registryRow(html, 'modelscope'), /credential unreadable/);
+    assert.match(registryRow(html, 'mirror'), /&quot;&gt;&lt;img src=x onerror=alert\(1\)&gt;/, 'a label is text');
+    // With credential storage available Set credential is enabled; without it every one is disabled and the reason is shown.
+    assert.doesNotMatch(html, /\bdisabled\b/);
+    assert.doesNotMatch(html, /data-llm-credential-reason/);
+    const unavailable = registriesListHtml(UNAVAILABLE);
+    const buttons = [...unavailable.matchAll(/<button[^>]*data-llm-credential-open[^>]*>/g)].map((match) => match[0]);
+    assert.equal(buttons.length, 4, 'every registry but Hugging Face');
+    assert.ok(buttons.every((button) => / disabled>/.test(button)));
+    assert.match(unavailable, /Credentials cannot be stored: LOCAL_LLM_CREDENTIALS_KEY is not set\./);
+    assert.match(registriesListHtml({}), /No registries\./);
+});
+
+test('the Add form offers the enabled registries that serve the Source kind, and the form saves what an administrator typed', () => {
+    const offered = (format) => registryOptionsFor(REGISTRIES.registries, format).map((option) => option.value);
+    assert.deepEqual(offered('gguf'), ['huggingface', 'dockerhub', 'modelscope', 'mirror'], 'ghcr is disabled');
+    assert.deepEqual(offered('hf'), ['huggingface', 'dockerhub', 'modelscope', 'mirror']);
+    assert.deepEqual(offered('exl3'), ['huggingface', 'modelscope', 'mirror'], 'an OCI registry offers no EXL3');
+    assert.deepEqual(offered('other'), []);
+    assert.deepEqual(registryOptionsFor(null, 'gguf'), []);
+    assert.deepEqual(registryFieldLabels('oci').revision, { label: 'Tag', placeholder: 'latest' });
+    assert.equal(registryFieldLabels('huggingface').revision.label, 'Revision');
+    assert.deepEqual(registryFromForm({ id: ' mirror ', kind: 'oci', url: 'https://r.example.com', label: '', authOrigins: 'https://a.example.com, https://b.example.com' }).registry,
+        { id: 'mirror', kind: 'oci', url: 'https://r.example.com', authOrigins: ['https://a.example.com', 'https://b.example.com'] });
+    assert.deepEqual(registryFromForm({ id: 'm', kind: 'huggingface', url: 'https://h.example.com', label: 'M', authOrigins: 'https://ignored.example.com' }).registry,
+        { id: 'm', kind: 'huggingface', url: 'https://h.example.com', label: 'M' }, 'authOrigins are OCI only');
+    assert.deepEqual(registryFromForm({ id: 'm', kind: 'huggingface', url: 'https://h.example.com' }, { editing: true }).registry,
+        { id: 'm', url: 'https://h.example.com' }, 'the kind is fixed once the registry exists');
+});
+
+// A Registries tab on plain objects: the credential form's two inputs, the list region and the controls the lock disables.
+function registriesHarness(t, callTool) {
+    const h = pollingHarness(t, callTool);
+    const p = h.presenter;
+    const control = (extra = {}) => ({ value: '', disabled: false, hidden: false, matches: () => false, focus() {}, removeAttribute(name) { delete this[name]; }, ...extra });
+    const token = control();
+    const tokenUsername = control();
+    const credentialForm = { hidden: true, elements: { token, tokenUsername }, reset() { token.value = ''; tokenUsername.value = ''; }, reportValidity: () => true };
+    const region = { innerHTML: '' };
+    const note = { textContent: '' };
+    const gated = [control(), control()];
+    const other = control();
+    const map = {
+        '[data-llm-registries]': region, '[data-llm-form="registry-credential"]': credentialForm, '[data-llm-credential-heading]': { textContent: '' },
+        '[data-llm-credential-note]': note, '[data-llm-credential-username]': control(),
+    };
+    p.statusLine = { textContent: '', classList: { toggle() {} } };
+    p.element = {
+        isConnected: true,
+        querySelector: (selector) => map[selector] ?? null,
+        querySelectorAll: (selector) => (selector.includes('data-llm-credential-open') ? gated : selector === 'button, input, textarea' ? [...gated, other] : []),
+    };
+    return { ...h, p, token, tokenUsername, credentialForm, region, note, gated, other };
+}
+
+test('a credential goes only into the credential call, the password field is emptied before it and after it, and nothing shows it', async (t) => {
+    const calls = [];
+    let fieldDuringCall = null;
+    let failNext = false;
+    const h = registriesHarness(t, async (tool, args) => {
+        calls.push([tool, JSON.stringify(args)]);
+        if (tool === 'local_llm_registry_list') return asTool(REGISTRIES);
+        if (tool === 'local_llm_registry_credential_set') {
+            fieldDuringCall = h.token.value;
+            if (failNext) throw new Error('credentials_unavailable: the key is missing');
+            return asTool({ id: args.id, credential: 'set' });
+        }
+        return asTool({});
+    });
+    const { p } = h;
+    assert.equal(await p.registries.load(), true);
+    assert.deepEqual(actionsOf(registryRow(h.region.innerHTML, 'dockerhub')), ['toggleRegistry', 'openRegistryCredential', 'clearRegistryCredential']);
+    assert.equal(h.credentialForm.hidden, true);
+    // Open it for an OCI registry: shown, empty, and its user name field is visible. A read-only registry cannot be opened.
+    p.openRegistryCredential(null, 'huggingface');
+    assert.equal(h.credentialForm.hidden, true);
+    p.openRegistryCredential(null, 'dockerhub');
+    assert.deepEqual([h.credentialForm.hidden, h.token.value], [false, '']);
+    // A failed call leaves the form open, the field empty and the message free of the token.
+    h.token.value = TOKEN;
+    h.tokenUsername.value = 'octocat';
+    failNext = true;
+    await p.registries.submitCredential({ preventDefault() {} });
+    assert.equal(fieldDuringCall, '', 'the field was emptied before the call started');
+    assert.deepEqual([h.token.value, h.tokenUsername.value, h.credentialForm.hidden], ['', '', false]);
+    assert.match(p.statusLine.textContent, /credentials_unavailable/);
+    // A successful call closes the form and reloads the list.
+    failNext = false;
+    h.token.value = TOKEN;
+    await p.registries.submitCredential({ preventDefault() {} });
+    assert.deepEqual([h.token.value, h.credentialForm.hidden, p.statusLine.textContent], ['', true, 'The credential of dockerhub was saved.']);
+    const withToken = calls.filter(([, args]) => args.includes(TOKEN));
+    assert.deepEqual(withToken.map(([tool]) => tool), ['local_llm_registry_credential_set', 'local_llm_registry_credential_set']);
+    assert.deepEqual(JSON.parse(withToken[1][1]), { id: 'dockerhub', token: TOKEN });
+    assert.deepEqual(JSON.parse(withToken[0][1]), { id: 'dockerhub', token: TOKEN, tokenUsername: 'octocat' });
+    assert.equal(calls.at(-1)[0], 'local_llm_registry_list');
+    // The token is in no rendered markup, no status text, and no string held by the presenter or the tab.
+    assert.equal(stringsIn([p, h.region, h.note]).some((value) => value.includes(TOKEN)), false);
+    assert.equal(h.region.innerHTML.includes(TOKEN), false);
+});
+
+test('Set credential stays disabled, with the reason, when credential storage is unavailable, even after the busy lock ends', async (t) => {
+    const calls = [];
+    const h = registriesHarness(t, async (tool, args) => {
+        calls.push([tool, args]);
+        return asTool(tool === 'local_llm_registry_list' ? UNAVAILABLE : {});
+    });
+    const { p } = h;
+    await p.registries.load();
+    assert.match(h.region.innerHTML, /Credentials cannot be stored: LOCAL_LLM_CREDENTIALS_KEY is not set\./);
+    assert.deepEqual(h.gated.map((control) => control.disabled), [true, true]);
+    assert.equal(h.gated[0].title, 'LOCAL_LLM_CREDENTIALS_KEY is not set');
+    assert.equal(h.note.textContent, 'Credentials cannot be stored: LOCAL_LLM_CREDENTIALS_KEY is not set.');
+    // The lock enables every control when it ends; Set credential is disabled again, an ordinary control is not.
+    p.setBusy(true);
+    assert.equal(h.other.disabled, true);
+    p.setBusy(false);
+    assert.deepEqual([h.other.disabled, ...h.gated.map((control) => control.disabled)], [false, true, true]);
+    // Nothing opens, and a submit makes no call.
+    p.openRegistryCredential(null, 'dockerhub');
+    assert.equal(h.credentialForm.hidden, true);
+    p.registries.credentialId = 'dockerhub';
+    h.token.value = TOKEN;
+    await p.registries.submitCredential({ preventDefault() {} });
+    assert.deepEqual(calls.map(([tool]) => tool), ['local_llm_registry_list']);
+    // Storage that comes back enables it again.
+    p.registries.list = REGISTRIES;
+    p.registries.applyCredentialState();
+    assert.equal(h.note.textContent, '');
+    assert.equal('title' in h.gated[0], false);
+});
+
+test('the Registries tab reads the list when it opens, and enabling, saving and removing go through the registry tools', async (t) => {
+    const calls = [];
+    let confirmed = true;
+    t.after(() => { delete globalThis.assistOS; });
+    globalThis.assistOS = { UI: { showModal: async (name, props) => { calls.push([name, props.message]); return confirmed; } } };
+    const h = registriesHarness(t, async (tool, args) => { calls.push([tool, args]); return asTool(tool === 'local_llm_registry_list' ? REGISTRIES : {}); });
+    const { p } = h;
+    p.switchTab(null, 'registries');
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(p.activeTab, 'registries');
+    assert.deepEqual(calls, [['local_llm_registry_list', {}]]);
+    calls.length = 0;
+    await p.toggleRegistry(null, 'ghcr');
+    await p.toggleRegistry(null, 'dockerhub');
+    await p.toggleRegistry(null, 'huggingface');
+    assert.deepEqual(calls.filter(([tool]) => tool === 'local_llm_registry_save'), [
+        ['local_llm_registry_save', { registry: { id: 'ghcr', enabled: true } }],
+        ['local_llm_registry_save', { registry: { id: 'dockerhub', enabled: false } }],
+    ], 'the Hugging Face registry has no toggle');
+    calls.length = 0;
+    await p.removeRegistry(null, 'dockerhub');
+    await p.removeRegistry(null, 'mirror');
+    const modal = calls.find(([name]) => name === 'confirm-action-modal');
+    assert.equal(modal[1].includes('<'), false, 'the confirmation text is attribute-safe');
+    assert.deepEqual(calls.filter(([tool]) => tool === 'local_llm_registry_remove'), [['local_llm_registry_remove', { id: 'mirror' }]], 'a built-in registry has no Remove');
+    calls.length = 0;
+    confirmed = false;
+    await p.removeRegistry(null, 'mirror');
+    assert.deepEqual(calls.map(([tool]) => tool), ['confirm-action-modal']);
+    await p.clearRegistryCredential(null, 'dockerhub');
+    assert.deepEqual(calls.at(-2), ['local_llm_registry_credential_clear', { id: 'dockerhub' }]);
+});
+
+// The Add form with a Registry selector: the Source kind picks the formats, and the selector keeps only registries that serve it.
+function registryFormHarness(t, callTool, { kind = 'huggingface', registry = 'huggingface', list = REGISTRIES, values = {} } = {}) {
+    const h = addFormHarness(t, callTool, { kind, values });
+    const attributes = {};
+    const select = { value: registry, presenterReadyPromise: Promise.resolve(), getAttribute: (name) => attributes[name], setAttribute: (name, value) => { attributes[name] = value; } };
+    h.p.registrySelect = select;
+    h.p.registryField = { hidden: false };
+    h.p.registries.list = list;
+    h.p.registries.loaded = true;
+    return { ...h, select, attributes, optionsOf: () => JSON.parse(decodeURIComponent(attributes['data-options'])).map((option) => option.value) };
+}
+
+test('the Registry selector follows the Source kind and the enabled registries, and falls back to Hugging Face', async (t) => {
+    const h = registryFormHarness(t, async () => asTool({}), { kind: 'huggingface', registry: 'dockerhub' });
+    await h.p.updateRegistrySelect();
+    assert.deepEqual(h.optionsOf(), ['huggingface', 'dockerhub', 'modelscope', 'mirror']);
+    assert.equal(h.select.value, 'dockerhub');
+    h.p.sourceKind = { value: 'exl3' };
+    await h.p.updateRegistrySelect();
+    assert.deepEqual(h.optionsOf(), ['huggingface', 'modelscope', 'mirror']);
+    assert.equal(h.select.value, 'huggingface', 'an OCI registry cannot serve EXL3');
+    // A registry that was disabled since is not offered, and the choice goes back to Hugging Face with the lookup forgotten.
+    h.p.sourceKind = { value: 'hf' };
+    h.select.value = 'mirror';
+    h.p.lookup = { args: {}, result: {} };
+    h.p.registries.list = { ...REGISTRIES, registries: REGISTRIES.registries.map((entry) => (entry.id === 'mirror' ? { ...entry, enabled: false } : entry)) };
+    await h.p.updateRegistrySelect();
+    assert.deepEqual([h.select.value, h.p.lookup, h.optionsOf().includes('mirror')], ['huggingface', null, false]);
+    // An Ollama tag has no registry: the field is hidden and no registry is sent.
+    h.p.sourceKind = { value: 'ollama' };
+    await h.p.updateRegistrySelect();
+    assert.equal(h.p.registryField.hidden, true);
+    assert.equal(h.p.registryId(), '');
+    // Before the list arrives the selector offers Hugging Face alone.
+    h.p.registries.loaded = false;
+    h.p.sourceKind = { value: 'huggingface' };
+    await h.p.updateRegistrySelect();
+    assert.deepEqual(h.optionsOf(), ['huggingface']);
+});
+
+const OCI_LOOKUP = {
+    provider: 'oci', registry: { id: 'dockerhub', kind: 'oci', label: 'Docker Hub' }, repo: 'ai/smollm2', revision: 'latest', commit: null, manifestDigest: DIGEST,
+    layout: 'docker', format: 'gguf', gated: null, license: 'apache-2.0', truncated: false, sizing: null,
+    files: [{ file: 'model.gguf', size: 100_000_000, sha256: SHA, gitOid: null, quantization: 'Q4_K_M', shards: null }],
+};
+
+test('a lookup in an OCI registry sends the registry, and Add carries the manifest digest only while the form still names what was read', async (t) => {
+    const sent = [];
+    const h = registryFormHarness(t, async (tool, args) => {
+        sent.push([tool, args]);
+        if (tool === 'local_llm_model_lookup') return asTool(args.format === 'hf' ? { ...OCI_LOOKUP, format: 'hf', sizing: { ...SIZING, source: 'config.json' }, files: [{ file: 'model.safetensors', size: 9, sha256: SHA, gitOid: null, quantization: null, shards: null }] } : (args.file ? { ...OCI_LOOKUP, sizing: SIZING } : OCI_LOOKUP));
+        return asTool({ model: {} });
+    }, { registry: 'dockerhub', values: { repo: 'ai/smollm2' } });
+    const { p, controls } = h;
+    await p.lookupModel();
+    assert.deepEqual(sent[0], ['local_llm_model_lookup', { repo: 'ai/smollm2', format: 'gguf', registry: 'dockerhub' }]);
+    assert.match(h.region.innerHTML, /ai\/smollm2:latest at manifest dddddddddddd/);
+    assert.doesNotMatch(h.region.innerHTML, /Gated|commit/, 'an OCI artifact has no gated status and no commit');
+    await p.pickLookupFile(null, '0');
+    assert.deepEqual(sent[1], ['local_llm_model_lookup', { repo: 'ai/smollm2', format: 'gguf', registry: 'dockerhub', file: 'model.gguf' }]);
+    const add = async (change = () => {}) => {
+        change();
+        await p.submitAddModel({ preventDefault() {} });
+        return sent.filter(([tool]) => tool === 'local_llm_model_add').at(-1)[1].model;
+    };
+    const kept = await add();
+    assert.deepEqual(kept.sources.gguf, { type: 'oci', registry: 'dockerhub', repository: 'ai/smollm2', tag: 'latest', manifestDigest: DIGEST, file: 'model.gguf', quantization: 'Q4_K_M' });
+    assert.equal(kept.sizingSource, 'gguf-header');
+    // A snapshot in the same registry becomes an oci-snapshot source with the digest.
+    controls.repo.value = 'ai/smollm2';
+    p.sourceKind = { value: 'hf' };
+    p.resetLookup({ forget: true });
+    await p.lookupModel();
+    assert.equal(sent.filter(([tool]) => tool === 'local_llm_model_lookup').at(-1)[1].format, 'hf');
+    const snapshot = await add();
+    assert.deepEqual(snapshot.sources.hf, { type: 'oci-snapshot', registry: 'dockerhub', repository: 'ai/smollm2', tag: 'latest', manifestDigest: DIGEST });
+    assert.equal(snapshot.sizingSource, 'config.json');
+    // Anything that changes what the lookup read drops the digest: the tag, the repository, the file, or the registry.
+    for (const [name, edit, expected] of [
+        ['tag', (form) => { form.controls.revision.value = 'v2'; }, { tag: 'v2' }],
+        ['repository', (form) => { form.controls.repo.value = 'ai/other'; }, { repository: 'ai/other' }],
+        ['file', (form) => { form.controls.file.value = 'other.gguf'; }, { file: 'other.gguf' }],
+        ['registry', (form) => { form.p.registrySelect.value = 'ghcr'; }, { registry: 'ghcr' }],
+    ]) {
+        const again = registryFormHarness(t, async (tool, args) => {
+            sent.push([tool, args]);
+            return asTool(tool === 'local_llm_model_lookup' ? (args.file ? { ...OCI_LOOKUP, sizing: SIZING } : OCI_LOOKUP) : { model: {} });
+        }, { registry: 'dockerhub', values: { repo: 'ai/smollm2' } });
+        await again.p.lookupModel();
+        await again.p.pickLookupFile(null, '0');
+        edit(again);
+        await again.p.submitAddModel({ preventDefault() {} });
+        const source = sent.filter(([tool]) => tool === 'local_llm_model_add').at(-1)[1].model.sources.gguf;
+        assert.equal('manifestDigest' in source, false, name);
+        assert.deepEqual(Object.entries(expected).filter(([key, value]) => source[key] !== value), [], name);
+    }
+});
+
+test('a mirror is named in the lookup and in the source, and Hugging Face is never sent', async (t) => {
+    const sent = [];
+    const lookup = { ...GGUF_LOOKUP, registry: { id: 'mirror', kind: 'huggingface', label: 'Mirror' }, files: [GGUF_LOOKUP.files[0]] };
+    const h = registryFormHarness(t, async (tool, args) => { sent.push([tool, args]); return asTool(tool === 'local_llm_model_lookup' ? lookup : { model: {} }); }, { registry: 'mirror', values: { repo: GGUF_LOOKUP.repo } });
+    await h.p.lookupModel();
+    await h.p.pickLookupFile(null, '0');
+    assert.deepEqual(sent.map(([, args]) => args.registry), ['mirror', 'mirror']);
+    await h.p.submitAddModel({ preventDefault() {} });
+    assert.deepEqual(sent.at(-1)[1].model.sources.gguf, {
+        type: 'huggingface', registry: 'mirror', repo: GGUF_LOOKUP.repo, file: 'qwen2.5-0.5b-instruct-q4_k_m.gguf', revision: GGUF_LOOKUP.commit, quantization: 'Q4_K_M',
+    });
+    // The same form on Hugging Face sends no registry and names none in the source.
+    h.p.registrySelect.value = 'huggingface';
+    h.controls.repo.value = GGUF_LOOKUP.repo;
+    sent.length = 0;
+    await h.p.lookupModel();
+    assert.deepEqual(sent[0], ['local_llm_model_lookup', { repo: GGUF_LOOKUP.repo, format: 'gguf' }]);
+    // The OCI file field is optional; every other kind of registry still requires it.
+    const field = { dataset: { sourceField: 'huggingface' }, hidden: false, querySelector: () => file };
+    const file = { name: 'file', required: false };
+    h.p.element = { querySelector: () => null, querySelectorAll: () => [field] };
+    h.p.updateSourceFields();
+    assert.equal(file.required, true);
+    h.p.registrySelect.value = 'dockerhub';
+    h.p.updateSourceFields();
+    assert.equal(file.required, false);
 });

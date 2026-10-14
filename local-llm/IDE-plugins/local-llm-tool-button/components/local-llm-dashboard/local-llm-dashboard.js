@@ -7,6 +7,7 @@ import {
     formatBytes,
     lookupCommitFor,
     lookupFormatFor,
+    lookupManifestDigestFor,
     mergeLogs,
     modelEntryFromForm,
     newRequestId,
@@ -35,8 +36,11 @@ import {
     splitRunFields,
     statusCardHtml,
 } from './local-llm-dashboard-view.js';
+import { RegistriesTab, applyFieldLabels, registryOptionsFor } from './local-llm-dashboard-registries.js';
 
-const TABS = Object.freeze(['models', 'playground', 'logs', 'runners']);
+const TABS = Object.freeze(['models', 'playground', 'logs', 'runners', 'registries']);
+// The Registry selector before the registry list has arrived: the built-in one every kind of source can use.
+const HUGGING_FACE_ONLY = Object.freeze([{ value: 'huggingface', label: 'Hugging Face' }]);
 const PREVIEW_DELAY_MS = 400;
 // While the dashboard is open and visible, hardware and download states are
 // re-read on this interval, so the GPU card never shows a stale value.
@@ -78,6 +82,7 @@ export class LocalLlmDashboard {
         this.lookupSerial = 0;
         this.lookupPending = false;
         this.rendered = {};
+        this.registries = new RegistriesTab(this, callLocalLlm);
         this.closed = false;
         this.onVisibilityChange = () => {
             if (!globalThis.document?.hidden) this.scheduleOverviewRefresh(0);
@@ -104,6 +109,8 @@ export class LocalLlmDashboard {
         this.lookupButton = find('[data-llm-lookup-button]');
         this.sizingLabel = find('[data-llm-sizing-label]');
         this.sourceKind = find('#localLlmSourceKind');
+        this.registrySelect = find('#localLlmRegistry');
+        this.registryField = find('[data-llm-registry-field]');
         this.runForm = find('[data-llm-form="run"]');
         this.runnerSelect = find('#localLlmRunner');
         this.advanced = find('[data-run-advanced]');
@@ -119,7 +126,10 @@ export class LocalLlmDashboard {
         this.addForm?.addEventListener('submit', (event) => this.submitAddModel(event));
         this.runForm?.addEventListener('submit', (event) => this.submitRun(event));
         this.promptForm?.addEventListener('submit', (event) => this.submitPrompt(event));
-        this.sourceKind?.addEventListener('change', () => { this.resetLookup(); this.updateSourceFields(); });
+        this.sourceKind?.addEventListener('change', () => { this.resetLookup(); this.updateSourceFields(); void this.updateRegistrySelect(); });
+        this.registrySelect?.addEventListener('change', () => { this.resetLookup(); this.updateSourceFields(); });
+        find('[data-llm-form="registry"]')?.addEventListener('submit', (event) => this.registries.submitForm(event));
+        find('[data-llm-form="registry-credential"]')?.addEventListener('submit', (event) => this.registries.submitCredential(event));
         // A results list for another repository or revision would mislead.
         this.addForm?.addEventListener('input', (event) => {
             if (['repo', 'revision'].includes(event.target?.name)) this.resetLookup();
@@ -142,6 +152,7 @@ export class LocalLlmDashboard {
         this.updateSourceFields();
         this.updateDetailMode();
         await this.refresh();
+        void this.registries.load();
         this.scheduleOverviewRefresh();
     }
 
@@ -174,7 +185,10 @@ export class LocalLlmDashboard {
             select.toggleAttribute('disabled', this.busy);
             select.webSkelPresenter?.applyDisabledState?.();
         }
-        if (!this.busy) this.updateDeploymentButtons();
+        if (!this.busy) {
+            this.updateDeploymentButtons();
+            this.registries.applyCredentialState();
+        }
     }
 
     async setSelectOptions(select, options, selectedValue = '') {
@@ -364,6 +378,7 @@ export class LocalLlmDashboard {
         if (!TABS.includes(tab)) return;
         this.activeTab = tab;
         this.updateTabUI();
+        if (tab === 'registries') void this.registries.load();
     }
 
     handleTabKeydown(event) {
@@ -416,6 +431,7 @@ export class LocalLlmDashboard {
         if (this.busy || !this.addForm) return;
         this.detailMode = 'add';
         this.updateDetailMode();
+        void this.registries.load();
         this.addForm.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
         this.addForm.elements?.id?.focus();
     }
@@ -436,8 +452,33 @@ export class LocalLlmDashboard {
             const active = String(field.dataset.sourceField || '').split(/\s+/).includes(kind);
             field.hidden = !active;
             const input = field.querySelector('input');
-            if (input) input.required = active && ['repo', 'file', 'tag'].includes(input.name);
+            // An OCI artifact's file is optional: it is derived when the artifact holds one.
+            if (input) input.required = active && ['repo', 'file', 'tag'].includes(input.name) && !(input.name === 'file' && this.registryKind() === 'oci');
         }
+        applyFieldLabels(this.element, this.addForm, this.registryKind());
+    }
+
+    // The Add form's registry: its id (empty for Hugging Face and for a source with no registry) and its kind.
+    registryId() {
+        const id = String(this.registrySelect?.value || '').trim();
+        return lookupFormatFor(this.sourceKind?.value || 'huggingface') && id !== 'huggingface' ? id : '';
+    }
+
+    registryKind() {
+        return this.registries.kindOf(this.registryId() || 'huggingface');
+    }
+
+    // Offers the enabled registries that serve the Source kind; a registry that no longer qualifies gives way to Hugging Face.
+    async updateRegistrySelect() {
+        const format = lookupFormatFor(this.sourceKind?.value || 'huggingface');
+        if (this.registryField) this.registryField.hidden = !format;
+        if (!this.registrySelect || !format) return;
+        const options = this.registries.loaded ? registryOptionsFor(this.registries.items, format) : HUGGING_FACE_ONLY;
+        const current = String(this.registrySelect.value || '');
+        const selected = options.some((option) => option.value === current) ? current : (options.find((option) => option.value === 'huggingface') || options[0])?.value || '';
+        if (selected !== current) this.resetLookup();
+        await this.setSelectOptions(this.registrySelect, options, selected);
+        this.updateSourceFields();
     }
 
     // ------------------------------------------------------------ lookup
@@ -523,7 +564,8 @@ export class LocalLlmDashboard {
             this.renderLookup({ error: 'Enter a repository such as owner/name first.' });
             return;
         }
-        const result = await this.requestLookup({ repo, format, ...(revision ? { revision } : {}) });
+        const registry = this.registryId();
+        const result = await this.requestLookup({ repo, format, ...(revision ? { revision } : {}), ...(registry ? { registry } : {}) });
         if (!result) return;
         const selected = String(this.addForm.elements?.file?.value || '').trim();
         this.renderLookup(result, { selectedFile: selected });
@@ -576,6 +618,8 @@ export class LocalLlmDashboard {
             source: sizing?.source ?? null,
             repo: result.repo,
             revision: result.revision || 'main',
+            registry: result.registry?.id && result.registry.id !== 'huggingface' ? result.registry.id : '',
+            ...(typeof result.manifestDigest === 'string' ? { manifestDigest: result.manifestDigest } : {}),
             ...(row ? { file: row.file } : {}),
             architecture: architecture === 'moe' ? 'moe' : 'dense',
             ...(typeof result.commit === 'string' ? { commit: result.commit } : {}),
@@ -598,9 +642,12 @@ export class LocalLlmDashboard {
         const raw = this.readAddForm();
         raw.sourceKind = this.sourceKind?.value || 'huggingface';
         raw.architecture = this.element.querySelector('#localLlmArchitecture')?.value || 'dense';
+        raw.registry = this.registryId();
+        raw.registryKind = this.registryKind();
         raw.sizingSource = sizingSourceFor(raw, this.lookupSizing);
-        // Add pins the commit whose files the lookup read, even if the branch has moved since.
+        // Add pins the commit whose files the lookup read, even if the branch has moved since; an OCI artifact, its manifest digest.
         raw.commit = lookupCommitFor(raw, this.lookupSizing);
+        raw.manifestDigest = lookupManifestDigestFor(raw, this.lookupSizing);
         const entry = modelEntryFromForm(raw);
         const added = await this.withBusy(`Adding ${entry.id} and pinning its source…`, async () => {
             await callLocalLlm('local_llm_model_add', { model: entry });
@@ -611,9 +658,22 @@ export class LocalLlmDashboard {
         this.addForm.reset();
         this.resetLookup({ forget: true });
         this.updateSourceFields();
+        void this.updateRegistrySelect();
         this.setStatus(`${entry.id} was added. Nothing was downloaded.`, 'success');
         await this.selectModel(null, entry.id);
     }
+
+    // ------------------------------------------------------------ registries tab
+
+    refreshRegistries() { return this.registries.load(); }
+    openAddRegistry() { this.registries.openForm(); }
+    editRegistry(_target, id) { this.registries.openForm(id); }
+    cancelRegistryForm() { this.registries.closeForm(); }
+    toggleRegistry(_target, id) { return this.registries.toggle(id); }
+    removeRegistry(_target, id) { return this.registries.remove(id); }
+    openRegistryCredential(_target, id) { this.registries.openCredential(id); }
+    cancelRegistryCredential() { this.registries.closeCredential(); }
+    clearRegistryCredential(_target, id) { return this.registries.clearCredential(id); }
 
     async removeModel(_target, modelId) {
         const model = this.findModel(modelId);

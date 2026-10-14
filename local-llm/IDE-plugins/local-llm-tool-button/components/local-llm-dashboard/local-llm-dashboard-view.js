@@ -544,12 +544,17 @@ export function lookupResultsHtml(result = {}, { selectedFile = '' } = {}) {
     if (result?.message) return `<div class="settings-card-meta">${escapeHtml(result.message)}</div>`;
     const files = Array.isArray(result?.files) ? result.files : [];
     const gated = result?.gated === 'auto' || result?.gated === 'manual' || (typeof result?.gated === 'string' && result.gated !== '');
+    // An OCI artifact has a tag and a manifest digest instead of a commit, and no gated status.
+    const oci = typeof result?.manifestDigest === 'string';
     const badges = [
-        `<span class="status-badge">${escapeHtml(gatedLabel(result?.gated))}</span>`,
+        oci ? '' : `<span class="status-badge">${escapeHtml(gatedLabel(result?.gated))}</span>`,
         result?.license ? `<span class="status-badge">Licence ${escapeHtml(stripBidi(result.license))}</span>` : '',
     ].filter(Boolean).join('');
+    const origin = oci
+        ? `${result?.repo ?? ''}:${result?.revision ?? ''} at manifest ${String(result.manifestDigest).replace(/^sha256:/, '').slice(0, 12)}`
+        : `${result?.repo ?? ''} at commit ${String(result?.commit ?? '').slice(0, 12)}`;
     const head = `
-        <div class="settings-card-meta">${escapeHtml(result?.repo ?? '')} at commit ${escapeHtml(String(result?.commit ?? '').slice(0, 12))}</div>
+        <div class="settings-card-meta">${escapeHtml(origin)}</div>
         <div class="local-llm-lookup-badges">${badges}</div>
         ${gated ? '<div class="settings-card-meta">Downloading a gated model needs a token: run `ploinky var HF_TOKEN &lt;token&gt;` on the host, then restart local-llm.</div>' : ''}`;
     const cut = result?.truncated

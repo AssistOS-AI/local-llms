@@ -50,6 +50,15 @@
                 aria-controls="localLlmPanelRunners"
                 aria-selected="false"
                 tabindex="-1">Runners</button>
+        <button type="button"
+                class="settings-tab"
+                id="localLlmTabRegistries"
+                data-llm-tab="registries"
+                data-local-action="switchTab registries"
+                role="tab"
+                aria-controls="localLlmPanelRegistries"
+                aria-selected="false"
+                tabindex="-1">Registries</button>
     </div>
 
     <section class="local-llm-panel local-llm-models-layout"
@@ -136,12 +145,21 @@
                                    data-selected="huggingface"
                                    data-options="%5B%7B%22value%22%3A%22huggingface%22%2C%22label%22%3A%22Hugging%20Face%20GGUF%20file%22%7D%2C%7B%22value%22%3A%22hf%22%2C%22label%22%3A%22Hugging%20Face%20safetensors%20%28vLLM%29%22%7D%2C%7B%22value%22%3A%22exl3%22%2C%22label%22%3A%22Hugging%20Face%20EXL3%20%28TabbyAPI%29%22%7D%2C%7B%22value%22%3A%22ollama%22%2C%22label%22%3A%22Ollama%20library%20tag%22%7D%5D"></custom-select>
                 </label>
+                <label class="local-llm-field" data-llm-registry-field>
+                    <span class="form-label">Registry</span>
+                    <custom-select id="localLlmRegistry"
+                                   data-presenter="custom-select"
+                                   aria-label="Registry"
+                                   data-name="registry"
+                                   data-selected="huggingface"
+                                   data-options="%5B%7B%22value%22%3A%22huggingface%22%2C%22label%22%3A%22Hugging%20Face%22%7D%5D"></custom-select>
+                </label>
                 <label class="local-llm-field" data-source-field="huggingface hf exl3">
-                    <span class="form-label">Repository</span>
+                    <span class="form-label" data-label-for="repo">Repository</span>
                     <input class="form-input" name="repo" placeholder="unsloth/Qwen3.6-35B-A3B-GGUF">
                 </label>
                 <label class="local-llm-field" data-source-field="huggingface hf exl3">
-                    <span class="form-label">Revision</span>
+                    <span class="form-label" data-label-for="revision">Revision</span>
                     <input class="form-input" name="revision" placeholder="main">
                 </label>
                 <div class="local-llm-field" data-source-field="huggingface hf exl3">
@@ -149,7 +167,7 @@
                     <div class="local-llm-lookup" data-llm-lookup aria-live="polite"></div>
                 </div>
                 <label class="local-llm-field" data-source-field="huggingface">
-                    <span class="form-label">GGUF file</span>
+                    <span class="form-label" data-label-for="file">GGUF file</span>
                     <input class="form-input" name="file" placeholder="Qwen3.6-35B-A3B-UD-Q3_K_M.gguf">
                 </label>
                 <label class="local-llm-field" data-source-field="huggingface">
@@ -247,5 +265,70 @@
             </div>
         </div>
         <div class="settings-busy-region" data-llm-runners aria-busy="false"></div>
+    </section>
+
+    <section class="local-llm-panel"
+             id="localLlmPanelRegistries"
+             data-llm-panel="registries"
+             role="tabpanel"
+             aria-labelledby="localLlmTabRegistries"
+             hidden>
+        <div class="local-llm-section-heading">
+            <div>
+                <h3 class="settings-section-title">Registries</h3>
+                <p class="settings-section-description">Where model repositories and artifacts are read from: Hugging Face, Hugging Face-compatible mirrors, ModelScope and OCI registries. A credential is stored encrypted on the agent and is never shown again.</p>
+            </div>
+            <div class="settings-card-actions" aria-label="Registry actions">
+                <button type="button" class="general-button secondary" data-local-action="refreshRegistries">Refresh</button>
+                <button type="button" class="general-button secondary" data-local-action="openAddRegistry">Add registry</button>
+            </div>
+        </div>
+        <div class="settings-busy-region" data-llm-registries aria-busy="false"></div>
+
+        <form class="settings-card settings-card-static local-llm-add-form" data-llm-form="registry" hidden>
+            <h3 class="settings-section-title" data-llm-registry-heading>Add registry</h3>
+            <label class="local-llm-field">
+                <span class="form-label">Id</span>
+                <input class="form-input" name="id" required pattern="[a-z0-9][a-z0-9\-]{1,31}" placeholder="my-mirror">
+            </label>
+            <label class="local-llm-field">
+                <span class="form-label">Kind</span>
+                <input class="form-input" name="kind" list="localLlmRegistryKinds" required pattern="huggingface|oci|modelscope" placeholder="huggingface, oci or modelscope">
+                <datalist id="localLlmRegistryKinds"><option value="huggingface"></option><option value="oci"></option><option value="modelscope"></option></datalist>
+            </label>
+            <label class="local-llm-field">
+                <span class="form-label">URL</span>
+                <input class="form-input" name="url" required placeholder="https://registry.example.com">
+            </label>
+            <label class="local-llm-field">
+                <span class="form-label">Label</span>
+                <input class="form-input" name="label" maxlength="60" placeholder="Company mirror">
+            </label>
+            <label class="local-llm-field">
+                <span class="form-label">Sign-in origins (OCI only, separated by spaces)</span>
+                <input class="form-input" name="authOrigins" placeholder="https://auth.example.com">
+            </label>
+            <div class="modal-actions local-llm-form-actions">
+                <button type="button" class="gray-button" data-local-action="cancelRegistryForm">Cancel</button>
+                <button type="submit" class="general-button">Save registry</button>
+            </div>
+        </form>
+
+        <form class="settings-card settings-card-static local-llm-add-form" data-llm-form="registry-credential" autocomplete="off" hidden>
+            <h3 class="settings-section-title" data-llm-credential-heading>Credential</h3>
+            <div class="settings-card-meta" data-llm-credential-note></div>
+            <label class="local-llm-field">
+                <span class="form-label">Token</span>
+                <input class="form-input" name="token" type="password" autocomplete="new-password" required maxlength="4096">
+            </label>
+            <label class="local-llm-field" data-llm-credential-username>
+                <span class="form-label">User name (OCI registries that need one)</span>
+                <input class="form-input" name="tokenUsername" type="text" autocomplete="off" maxlength="256">
+            </label>
+            <div class="modal-actions local-llm-form-actions">
+                <button type="button" class="gray-button" data-local-action="cancelRegistryCredential">Cancel</button>
+                <button type="submit" class="general-button" data-llm-credential-submit>Set credential</button>
+            </div>
+        </form>
     </section>
 </div>

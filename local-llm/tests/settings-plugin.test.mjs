@@ -8,6 +8,7 @@ import {
     fieldsFromSchema,
     lookupCommitFor,
     lookupFormatFor,
+    lookupManifestDigestFor,
     mergeLogs,
     modelEntryFromForm,
     newRequestId,
@@ -363,4 +364,75 @@ test('confirmation text cannot break out of the modal attribute', () => {
     const confirms = presenter.match(/showModal\('confirm-action-modal', \{\s*message: ([a-zA-Z]+)\(/g) || [];
     assert.equal(confirms.length, 5);
     assert.ok(confirms.every((call) => call.endsWith('confirmMessage(')));
+    // The Registries tab's own confirmation is built the same way.
+    const registries = fs.readFileSync(new URL('IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-registries.js', ROOT), 'utf8');
+    const own = registries.match(/showModal\('confirm-action-modal', \{\s*message: [a-zA-Z]+\(/g) || [];
+    assert.equal(own.length, 1);
+    assert.ok(own[0].endsWith('confirmMessage('));
+});
+
+const DIGEST = `sha256:${'d'.repeat(64)}`;
+
+test('the Add model form builds registry, oci and oci-snapshot sources, and Hugging Face never names a registry', () => {
+    const base = { id: 'M-Model', repo: 'owner/repo', revision: '', architecture: 'dense' };
+    // Hugging Face, named or not, is the source as before.
+    for (const registry of [undefined, '', 'huggingface']) {
+        const entry = modelEntryFromForm({ ...base, sourceKind: 'huggingface', file: 'm.gguf', registry, registryKind: 'huggingface' });
+        assert.deepEqual(entry.sources, { gguf: { type: 'huggingface', repo: 'owner/repo', file: 'm.gguf', revision: 'main' } }, String(registry));
+    }
+    // A mirror or ModelScope names its registry in the same source types.
+    const mirror = modelEntryFromForm({ ...base, sourceKind: 'huggingface', file: 'm.gguf', quantization: 'Q4', registry: 'mirror', registryKind: 'huggingface', revision: 'dev' });
+    assert.deepEqual(mirror.sources.gguf, { type: 'huggingface', registry: 'mirror', repo: 'owner/repo', file: 'm.gguf', revision: 'dev', quantization: 'Q4' });
+    const scope = modelEntryFromForm({ ...base, sourceKind: 'exl3', registry: 'modelscope', registryKind: 'modelscope', commit: 'c'.repeat(40) });
+    assert.deepEqual(scope.sources.exl3, { type: 'hf-snapshot', registry: 'modelscope', repo: 'owner/repo', revision: 'c'.repeat(40) });
+    // An OCI registry gives `oci` (GGUF) and `oci-snapshot` sources: the repository, the tag, and the digest only when it is one.
+    const oci = { ...base, repo: 'ai/smollm2', registry: 'dockerhub', registryKind: 'oci' };
+    assert.deepEqual(modelEntryFromForm({ ...oci, sourceKind: 'huggingface', file: 'smollm2.gguf', quantization: 'Q4_K_M', manifestDigest: DIGEST, revision: '135m', commit: 'c'.repeat(40) }).sources, {
+        gguf: { type: 'oci', registry: 'dockerhub', repository: 'ai/smollm2', tag: '135m', manifestDigest: DIGEST, file: 'smollm2.gguf', quantization: 'Q4_K_M' },
+    });
+    assert.deepEqual(modelEntryFromForm({ ...oci, sourceKind: 'huggingface' }).sources, {
+        gguf: { type: 'oci', registry: 'dockerhub', repository: 'ai/smollm2', tag: 'latest' },
+    }, 'the tag defaults to latest, the file is optional, a missing digest is left out');
+    assert.deepEqual(modelEntryFromForm({ ...oci, sourceKind: 'hf', revision: '135m-safetensors', manifestDigest: DIGEST, file: 'ignored.gguf' }).sources, {
+        hf: { type: 'oci-snapshot', registry: 'dockerhub', repository: 'ai/smollm2', tag: '135m-safetensors', manifestDigest: DIGEST },
+    });
+    for (const junk of ['latest', 'sha256:abc', `sha256:${'D'.repeat(64)}`, 7, null]) {
+        assert.equal('manifestDigest' in modelEntryFromForm({ ...oci, sourceKind: 'hf', manifestDigest: junk }).sources.hf, false, String(junk));
+    }
+    // A manifest digest is an OCI pin: other registries ignore it.
+    assert.equal('manifestDigest' in modelEntryFromForm({ ...base, sourceKind: 'hf', registry: 'mirror', registryKind: 'huggingface', manifestDigest: DIGEST }).sources.hf, false);
+    // The agent accepts every one of them, and sizing fits the sources the entry has.
+    for (const entry of [mirror, scope, modelEntryFromForm({ ...oci, sourceKind: 'huggingface', manifestDigest: DIGEST }), modelEntryFromForm({ ...oci, sourceKind: 'hf', manifestDigest: DIGEST })]) {
+        assert.doesNotThrow(() => validateModel(entry), JSON.stringify(entry.sources));
+    }
+    const sized = { layers: '24', contextLength: '2048' };
+    assert.equal(modelEntryFromForm({ ...oci, ...sized, sourceKind: 'huggingface', sizingSource: 'gguf-header' }).sizingSource, 'gguf-header');
+    assert.equal(modelEntryFromForm({ ...oci, ...sized, sourceKind: 'hf', sizingSource: 'config.json' }).sizingSource, 'config.json');
+    assert.equal(modelEntryFromForm({ ...oci, ...sized, sourceKind: 'hf', sizingSource: 'gguf-header' }).sizingSource, undefined);
+});
+
+test('the manifest digest and the sizing source follow the lookup only while the form still names what it read', () => {
+    const lookup = { source: 'gguf-header', registry: 'dockerhub', repo: 'ai/smollm2', revision: 'latest', file: 'm.gguf', architecture: 'dense', manifestDigest: DIGEST, values: { layers: '24' } };
+    const form = { registryKind: 'oci', registry: 'dockerhub', repo: 'ai/smollm2', revision: '', file: 'm.gguf', layers: '24' };
+    assert.equal(lookupManifestDigestFor(form, lookup), DIGEST);
+    assert.equal(lookupManifestDigestFor({ ...form, revision: 'latest' }, lookup), DIGEST);
+    assert.equal(lookupManifestDigestFor({ ...form, layers: '99', architecture: 'moe' }, lookup), DIGEST, 'edited sizing does not change the artifact');
+    for (const change of [{ repo: 'ai/other' }, { revision: 'v2' }, { file: 'other.gguf' }, { registry: 'ghcr' }, { registry: '' }, { registryKind: 'huggingface' }]) {
+        assert.equal(lookupManifestDigestFor({ ...form, ...change }, lookup), undefined, JSON.stringify(change));
+    }
+    assert.equal(lookupManifestDigestFor(form, null), undefined);
+    assert.equal(lookupManifestDigestFor(form, { ...lookup, manifestDigest: undefined }), undefined);
+    assert.equal(lookupManifestDigestFor(form, { ...lookup, manifestDigest: 'latest' }), undefined);
+    // A snapshot's lookup names no file, so any file in the form is beside the point.
+    assert.equal(lookupManifestDigestFor({ ...form, file: 'whatever.gguf' }, { ...lookup, file: undefined }), DIGEST);
+    // The registry is part of what was read for the commit and the sizing source too.
+    const hf = { source: 'gguf-header', repo: 'owner/repo', revision: 'main', registry: '', architecture: 'dense', commit: 'c'.repeat(40), values: { layers: '24' } };
+    const hfForm = { repo: 'owner/repo', revision: '', layers: '24' };
+    assert.equal(lookupCommitFor(hfForm, hf), 'c'.repeat(40));
+    assert.equal(lookupCommitFor({ ...hfForm, registry: 'mirror' }, hf), undefined);
+    assert.equal(lookupCommitFor({ ...hfForm, registry: 'huggingface' }, hf), 'c'.repeat(40));
+    assert.equal(sizingSourceFor(hfForm, hf), 'gguf-header');
+    assert.equal(sizingSourceFor({ ...hfForm, registry: 'mirror' }, hf), 'manual');
+    assert.equal(sizingSourceFor(form, lookup), 'gguf-header');
+    assert.equal(sizingSourceFor({ ...form, revision: 'v2' }, lookup), 'manual');
 });

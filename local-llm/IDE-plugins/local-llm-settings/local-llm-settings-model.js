@@ -252,6 +252,16 @@ const LOOKUP_FORMATS = Object.freeze({ huggingface: 'gguf', hf: 'hf', exl3: 'exl
 const SIZING_FIELDS = Object.freeze(['contextLength', 'layers', 'kvBytesPerToken']);
 
 const COMMIT_RE = /^[a-f0-9]{40}$/;
+const MANIFEST_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
+
+// The registry a form names: its id, empty for Hugging Face (an absent `registry` means huggingface.co).
+function registryOf(raw) {
+    const id = String(raw.registry || '').trim();
+    return id === 'huggingface' ? '' : id;
+}
+
+// What an empty revision field means for the form's registry: an OCI tag defaults to `latest`, every other kind to `main`.
+const defaultRevision = (raw) => (raw.registryKind === 'oci' ? 'latest' : 'main');
 
 /**
  * Text from Hugging Face or a model file, for display: without the bidirectional controls (U+202A to U+202E and
@@ -270,7 +280,7 @@ export function lookupFormatFor(kind) {
 // sizing the form showed even if the branch moved since; otherwise the revision as typed, main when empty.
 function revision(raw) {
     if (typeof raw.commit === 'string' && COMMIT_RE.test(raw.commit)) return raw.commit;
-    return String(raw.revision || '').trim() || 'main';
+    return String(raw.revision || '').trim() || defaultRevision(raw);
 }
 
 /**
@@ -283,6 +293,10 @@ function revision(raw) {
  * lookup filled it (gguf-header, config.json), or manual when it was changed
  * by hand afterwards. `commit`, when a lookup filled the form, replaces the
  * revision. `mtp` says whether the weights have a multi-token-prediction head.
+ * `registry` is the id of the registry the repository is read from and `registryKind` its kind: Hugging Face (or no
+ * registry) gives today's sources, a Hugging Face mirror or ModelScope the same sources naming the `registry`, and an
+ * `oci` registry gives an `oci` (GGUF) or `oci-snapshot` source whose `tag` is the revision field and whose
+ * `manifestDigest` is `raw.manifestDigest` when it is one.
  */
 export function modelEntryFromForm(raw = {}) {
     const id = String(raw.id || '').trim().toLowerCase();
@@ -292,23 +306,42 @@ export function modelEntryFromForm(raw = {}) {
     if (displayName) entry.displayName = displayName;
     const license = String(raw.license || '').trim();
     if (license) entry.license = license;
+    const registry = registryOf(raw);
+    const named = registry ? { registry } : {};
+    const oci = raw.registryKind === 'oci' && (kind === 'huggingface' || kind === 'hf');
+    const quantization = String(raw.quantization || '').trim();
     if (kind === 'ollama') {
         entry.sources.ollama = { type: 'ollama', tag: String(raw.tag || '').trim() };
+    } else if (oci) {
+        // The pin is the manifest digest the lookup read, so Add keeps exactly the artifact whose sizing the form showed.
+        const pin = {
+            ...named,
+            repository: String(raw.repo || '').trim(),
+            tag: String(raw.revision || '').trim() || 'latest',
+            ...(MANIFEST_DIGEST_RE.test(raw.manifestDigest) ? { manifestDigest: raw.manifestDigest } : {}),
+        };
+        if (kind === 'hf') {
+            entry.sources.hf = { type: 'oci-snapshot', ...pin };
+        } else {
+            const file = String(raw.file || '').trim();
+            entry.sources.gguf = { type: 'oci', ...pin, ...(file ? { file } : {}), ...(quantization ? { quantization } : {}) };
+        }
     } else if (kind === 'hf' || kind === 'exl3') {
         // A snapshot is every top-level model file of the repository at one commit; the agent pins them when the entry is added.
         entry.sources[kind] = {
             type: 'hf-snapshot',
+            ...named,
             repo: String(raw.repo || '').trim(),
             revision: revision(raw),
         };
     } else {
         const source = {
             type: 'huggingface',
+            ...named,
             repo: String(raw.repo || '').trim(),
             file: String(raw.file || '').trim(),
             revision: revision(raw),
         };
-        const quantization = String(raw.quantization || '').trim();
         if (quantization) source.quantization = quantization;
         entry.sources.gguf = source;
     }
@@ -328,10 +361,12 @@ export function modelEntryFromForm(raw = {}) {
     return entry;
 }
 
-// Whether the form still names what the lookup read: the same repository, revision and (for a GGUF lookup) file.
+// Whether the form still names what the lookup read: the same registry, repository, revision (an OCI tag) and (for a GGUF
+// lookup) file.
 function sameLookupSource(raw, lookup) {
     const text = (value) => String(value ?? '').trim();
-    return text(raw.repo) === lookup.repo && (text(raw.revision) || 'main') === lookup.revision
+    return text(raw.repo) === lookup.repo && (text(raw.revision) || defaultRevision(raw)) === lookup.revision
+        && registryOf(raw) === (lookup.registry || '')
         && (lookup.file === undefined || text(raw.file) === lookup.file);
 }
 
@@ -361,6 +396,15 @@ export function sizingSourceFor(raw = {}, lookup = null) {
 export function lookupCommitFor(raw = {}, lookup = null) {
     if (!lookup || typeof lookup.commit !== 'string' || !COMMIT_RE.test(lookup.commit)) return undefined;
     return sameLookupSource(raw, lookup) ? lookup.commit : undefined;
+}
+
+/**
+ * The OCI manifest digest to add: the one the lookup read, while the form still names the registry, repository, tag and
+ * file it read. Undefined otherwise (another artifact, a registry that is not OCI, or no lookup), and Add then pins the tag.
+ */
+export function lookupManifestDigestFor(raw = {}, lookup = null) {
+    if (raw.registryKind !== 'oci' || !lookup || !MANIFEST_DIGEST_RE.test(lookup.manifestDigest)) return undefined;
+    return sameLookupSource(raw, lookup) ? lookup.manifestDigest : undefined;
 }
 
 /** A model id (2-64 lowercase letters, digits, dot, dash, underscore) suggested from a repository and a quantization. */

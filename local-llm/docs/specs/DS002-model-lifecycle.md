@@ -247,6 +247,19 @@ Rollback: an agent older than OCI support hides `oci` and `oci-snapshot` entries
 | Use | A credential is decrypted for a snapshot (a lookup, a pin or a download job), held in that snapshot as a property that is not serialized, and decrypted and discarded at once when `local_llm_registry_list` and the start-up check tell `set` from `unreadable`. It is never cached across operations, and never written to state, provenance, the log, an error or a tool result. Error messages name a field, never its value. The token is 1–4096 characters with no control characters; `tokenUsername` is 1–256 printable characters with no colon, because the OCI Basic credential is `tokenUsername:token`. |
 | Threat model | The encryption protects a copy of `<workspace>/.data/local-llm` made without `.ploinky/master-key`. It does not protect against the host user, who holds both. |
 
+### Registries in the dashboard
+
+The dashboard (DS001) has a Registries tab and a Registry selector in the Add model form, both built on the five registry tools. The tab and the module that holds its logic and markup helpers are `local-llm-dashboard-registries.js`, beside the dashboard; the Add form's lookup and entry building use the settings model (`local-llm-settings-model.js`).
+
+| Element | Behaviour |
+| --- | --- |
+| Registries tab | Lists `local_llm_registry_list`: label, kind, URL, enabled, credential state (`set`, none or `unreadable`) and the models that use it. An administrator adds a registry and edits one they added (`id`, `kind`, `url`, `label`, `authOrigins`; the id and kind are fixed once it exists), enables or disables any registry but `huggingface`, and removes one they added. `huggingface` has no actions. A built-in other than `huggingface` can be enabled, disabled and given a credential only. |
+| Credential form | Set credential uses a password input that is empty each time the form opens, is never filled by the page, and is emptied before the credential call starts, so a slow or failed call leaves nothing in the page. The token goes only into the `local_llm_registry_credential_set` call: it is not kept on the dashboard, not shown and not repeated in a message. The user name field is offered for `oci` registries only. When `credentialStorage.available` is `false`, Set credential is disabled with the reason, and stays disabled after the dashboard's busy lock ends. Clear credential calls `local_llm_registry_credential_clear`. |
+| Registry selector | Offers the enabled registries whose `formats` contain the Source kind's format (`gguf` for a GGUF file, `hf`, `exl3`); an Ollama tag has none. A registry that stops qualifying (disabled, or an OCI registry after the kind changes to EXL3) gives way to Hugging Face and the lookup is forgotten. Before the list has arrived only Hugging Face is offered. |
+| Field labels | For an `oci` registry the Revision field is the Tag (default `latest`), the repository is an OCI repository such as `ai/smollm2`, and the GGUF file is optional. Other kinds keep Revision and the required file. |
+| Lookup and entry | The lookup sends `registry` unless it is `huggingface`. `modelEntryFromForm` names the `registry` in a `huggingface` or `hf-snapshot` source for a mirror or ModelScope, and builds `oci` (GGUF) and `oci-snapshot` sources for an `oci` registry, with `repository` and `tag`. Sizing keeps its source: `gguf-header` fits `oci`, `config.json` fits `oci-snapshot`. |
+| Carry rule | The commit a lookup read, or the `manifestDigest` of an OCI lookup, goes into the entry only while the form still names what the lookup read: the registry, the repository, the revision or tag and, for a GGUF lookup, the file. Any change sends the typed revision or tag, which the agent pins at Add. |
+
 ### Deployment state machine
 
 ```
