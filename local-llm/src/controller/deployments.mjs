@@ -41,9 +41,9 @@ import {
     unreapedQueries as hardwareUnreaped,
     untilStopped,
 } from './hardware.mjs';
-import { lookupHuggingFaceModel } from './modelLookup.mjs';
 import { createGuardedTransport } from './netGuard.mjs';
 import { createRegistryService } from './registries.mjs';
+import { lookupInRegistry } from './registryLookup.mjs';
 import { BUDGET_UNREADABLE, MPS_VARIABLES, cpuQuotaOf, gpuBudgetOf, knownByte, memoryBudgetOf, mpsRunnerEnvironment, overviewBudget } from './ploinkyBudget.mjs';
 import {
     APU,
@@ -172,7 +172,7 @@ export function createController({
     inspect = inspectArtifact,
     remove = removeArtifact,
     resolveHf = resolveHuggingFaceArtifact,
-    lookup = lookupHuggingFaceModel,
+    lookup = lookupInRegistry,
     startRunner = startRunnerProcess,
     fetchImpl = globalThis.fetch,
     ports = defaultPorts(runners),
@@ -388,6 +388,7 @@ export function createController({
         state.cpuProfileMigration = CPU_MIGRATION;
     }
 
+    const registries = registryService ?? createRegistryService({ dataDir, credentialsKey, hfBaseUrl });
     const stores = createWeightStores({
         dataDir,
         env,
@@ -407,8 +408,8 @@ export function createController({
         verifySnapshot,
         sharedModelsRoot,
         registryTransport,
+        registries,
     });
-    const registries = registryService ?? createRegistryService({ dataDir, credentialsKey, hfBaseUrl });
     const registryOperations = registries.operations({ queue, log: (message) => log.append('controller', message), hfToken: Boolean(env.HF_TOKEN),
         references: () => ({ entries: state.registry, active: job !== null ? state.deployment : null }) });
 
@@ -1903,14 +1904,14 @@ export function createController({
     // tag, on the committed cpu profile alone) take the signal; the others read Hugging Face as they always did.
     const pinning = new Set();
 
-    async function pinSources(entry) {
+    async function pinSources(entry, pinnedFrom = []) {
         if (draining) throw new LocalLlmError('shutting_down', 'The agent is restarting; add the model again once it is back.');
         const stop = new AbortController();
         pinning.add(stop);
         try {
             const sources = { ...entry.sources };
             for (const [format, source] of Object.entries(sources)) {
-                sources[format] = await storeFor(source).pin(source, { profile, signal: stop.signal });
+                sources[format] = await storeFor(source).pin(source, { profile, signal: stop.signal, registry: pinnedFrom.find((taken) => taken.format === format)?.registry });
             }
             return { ...entry, sources };
         } catch (error) {
@@ -1953,7 +1954,7 @@ export function createController({
         const draft = validateModel(entry, { seed: false });
         assertNewModelId(draft.id);
         const pinnedFrom = registries.snapshotSources(draft.sources);
-        const pinned = validateModel(await pinSources(draft), { seed: false });
+        const pinned = validateModel(await pinSources(draft, pinnedFrom), { seed: false });
         return queue.run(async () => {
             assertNewModelId(pinned.id);
             registries.recheck(pinnedFrom);
@@ -1975,7 +1976,7 @@ export function createController({
         lookups.add(stop);
         const finishAcquisition = enterAcquisition('modelLookupsStarted', 'activeModelLookups');
         try {
-            return await lookup(args, { token: env.HF_TOKEN || '', fetchImpl: registryTransport, baseUrl: hfBaseUrl, signal: stop.signal });
+            return await lookup(args, { token: env.HF_TOKEN || '', fetchImpl: registryTransport, baseUrl: hfBaseUrl, signal: stop.signal, registries });
         } finally {
             finishAcquisition();
             lookups.delete(stop);
@@ -1996,7 +1997,7 @@ export function createController({
         const candidate = validateModel(entry);
         const existing = validateModel(state.registry[userModelIndex(candidate.id)]);
         const pinnedFrom = registries.snapshotSources(candidate.sources);
-        const pinned = validateModel(await pinSources(carryPins(candidate, existing)), { seed: false });
+        const pinned = validateModel(await pinSources(carryPins(candidate, existing), pinnedFrom), { seed: false });
         return queue.run(async () => {
             const index = userModelIndex(pinned.id);
             registries.recheck(pinnedFrom);

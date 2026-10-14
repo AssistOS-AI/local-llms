@@ -38,6 +38,8 @@ local-llms/
     src/controller/netGuard.mjs                   the network guard every model request goes through (DS002)
     src/controller/registries.mjs                 the model registries, their admin operations and snapshots (DS002)
     src/controller/registryCredentials.mjs        registry credentials, encrypted at rest (DS002)
+    src/controller/registryLookup.mjs             the lookup input and its dispatch by registry kind (DS002)
+    src/controller/registrySessions.mjs           the base URL, credential and fetch a pin or a download uses (DS002)
     src/runners/                                  one adapter per runner
     tools/                                        MCP tool entry points and the CI install check
     IDE-plugins/                                  the Local LLMs dashboard and Settings

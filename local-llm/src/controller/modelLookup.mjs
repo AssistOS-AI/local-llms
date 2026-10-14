@@ -13,6 +13,11 @@
 // `listing-incomplete` instead. Nothing here relies on the fetch
 // implementation's own redirect handling. The controller passes its guarded
 // transport (netGuard.mjs) as `fetchImpl`, so every address is checked.
+//
+// The same flow reads a Hugging Face-compatible mirror (registryLookup.mjs):
+// `baseUrl` is then the mirror's URL with its path prefix, `token` its own
+// credential, and a canary request (`canary`) first checks that it answers a
+// revision that cannot exist with 404.
 
 import crypto from 'node:crypto';
 
@@ -24,8 +29,6 @@ import {
     METADATA_TIMEOUT_MS,
     TREE_PAGE_REJECTED,
     assertFile,
-    assertRepo,
-    assertRevision,
     authHeaders,
     fetchJson,
     lfsIdentity,
@@ -34,12 +37,12 @@ import {
 } from './downloader.mjs';
 import { GGUF_LIMITS, createGgufHeaderReader, ggufSizing } from './ggufHeader.mjs';
 import { originGuardedFetch } from './netGuard.mjs';
+import { normalizeLookupInput } from './registryLookup.mjs';
 
-// The redirect-following fetch moved to the network guard; it is re-exported for its earlier importers.
-export { originGuardedFetch };
+// The redirect-following fetch moved to the network guard, and the input normalizer to the registry lookup; both are
+// re-exported for their earlier importers.
+export { normalizeLookupInput, originGuardedFetch };
 
-const FORMATS = Object.freeze(['gguf', 'hf', 'exl3']);
-const INPUT_KEYS = Object.freeze(['provider', 'repo', 'revision', 'format', 'file']);
 const MAX_DIRECTORIES = 32;
 const MAX_FILES = 500;
 // Tree entries held while listing, whatever their kind, so a huge directory cannot grow memory.
@@ -52,6 +55,7 @@ export const LOOKUP_METADATA_MAX_BYTES = 8 * 1024 * 1024;
 const CONFIG_MAX_BYTES = 1024 * 1024;
 const SHA1_RE = /^[a-f0-9]{40}$/;
 const TOKEN_HINT = 'set a token with `ploinky var HF_TOKEN <token>` and restart local-llm';
+const REGISTRY_TOKEN_HINT = 'set a credential for this registry with local_llm_registry_credential_set';
 
 function failure(code, message, details = undefined) {
     return new LocalLlmError(code, message, details);
@@ -59,18 +63,18 @@ function failure(code, message, details = undefined) {
 
 // Hugging Face answers 401 for a repository that does not exist when no token is sent, so without a token a refusal
 // says that the repository may be missing, not only that access was refused.
-function statusError(status, what, token = '') {
+function statusError(status, what, token = '', { subject = 'Hugging Face', hint = TOKEN_HINT } = {}) {
     if (status === 401 || status === 403) {
         return failure('access_denied', token
-            ? `Hugging Face refused access to ${what} (HTTP ${status}). For a gated or private repository, ${TOKEN_HINT}.`
-            : `Hugging Face did not find ${what}, or it needs access (HTTP ${status}). For a gated or private repository, ${TOKEN_HINT}.`);
+            ? `${subject} refused access to ${what} (HTTP ${status}). For a gated or private repository, ${hint}.`
+            : `${subject} did not find ${what}, or it needs access (HTTP ${status}). For a gated or private repository, ${hint}.`);
     }
-    if (status === 404) return failure('not_found', `Hugging Face has no ${what}.`);
-    return failure('lookup_failed', `Hugging Face answered HTTP ${status} for ${what}.`, { status });
+    if (status === 404) return failure('not_found', `${subject} has no ${what}.`);
+    return failure('lookup_failed', `${subject} answered HTTP ${status} for ${what}.`, { status });
 }
 
 // Every failure of a lookup is one of the documented codes; a stop of the agent is `shutting_down`.
-function lookupError(error, signal, token = '') {
+function lookupError(error, signal, token = '', who = undefined) {
     if (error instanceof LocalLlmError) return error;
     if (signal?.aborted) return failure('shutting_down', 'The agent is restarting; look the model up again once it is back.');
     if (error instanceof DownloadError) {
@@ -78,42 +82,13 @@ function lookupError(error, signal, token = '') {
         if (error.code === 'NOT_FOUND') return failure('not_found', error.message);
         if (error.code === 'ADDRESS_REFUSED') return failure('address_refused', error.message, error.details);
         const status = error.details?.status;
-        if (Number.isInteger(status)) return statusError(status, 'this repository, revision or file', token);
+        if (Number.isInteger(status) && status >= 400) return statusError(status, 'this repository, revision or file', token, who);
         return failure('lookup_failed', error.message, error.details?.reason ? { reason: error.details.reason } : undefined);
     }
     if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
         return failure('lookup_failed', 'The Hugging Face lookup took too long.', { reason: 'timeout' });
     }
     return failure('lookup_failed', 'The Hugging Face lookup failed.');
-}
-
-/** The lookup's input, checked before any request; a bad value is `invalid_request`. */
-export function normalizeLookupInput(args) {
-    if (args === null || typeof args !== 'object' || Array.isArray(args)) throw failure('invalid_request', 'The lookup needs a repo.');
-    for (const key of Object.keys(args)) {
-        if (!INPUT_KEYS.includes(key)) throw failure('invalid_request', `The lookup has no '${key}' field.`);
-    }
-    const format = args.format ?? 'gguf';
-    if (!FORMATS.includes(format)) throw failure('invalid_request', `format must be one of ${FORMATS.join(', ')}.`);
-    if (args.provider !== undefined && args.provider !== 'huggingface') throw failure('invalid_request', 'provider must be huggingface.');
-    const revision = args.revision ?? 'main';
-    const file = args.file;
-    try {
-        assertRepo(args.repo);
-        assertRevision(revision);
-        if (file !== undefined) {
-            if (format !== 'gguf') throw failure('invalid_request', 'file applies to a GGUF lookup only.');
-            if (typeof file !== 'string' || file.length > 512) throw failure('invalid_request', 'file must be a path of at most 512 characters.');
-            assertFile(file);
-            const split = splitGgufName(file);
-            if (split && split.index !== 1) {
-                throw failure('invalid_request', `file names shard ${split.index} of ${split.count}; name the first shard of a split GGUF.`);
-            }
-        }
-    } catch (error) {
-        throw error instanceof DownloadError ? failure('invalid_request', error.message) : error;
-    }
-    return { repo: args.repo, revision, format, ...(file === undefined ? {} : { file }) };
 }
 
 const encodePath = (value) => value.split('/').map(encodeURIComponent).join('/');
@@ -271,7 +246,7 @@ function resolveUrl({ baseUrl, repo, commit }, file) {
  * parsed (the request is aborted, so the rest of the file is never sent).
  */
 async function readGgufKeyValues(context, file) {
-    const { get, token } = context;
+    const { get, token, who } = context;
     const stop = new AbortController();
     try {
         const response = await get(resolveUrl(context, file), {
@@ -279,7 +254,7 @@ async function readGgufKeyValues(context, file) {
             signal: stop.signal,
         });
         if (response.status === 416) throw failure('invalid_gguf', 'The file is empty.');
-        if (response.status !== 200 && response.status !== 206) throw statusError(response.status, `the file ${file}`, token);
+        if (response.status !== 200 && response.status !== 206) throw statusError(response.status, `the file ${file}`, token, who);
         if (!response.body) throw failure('lookup_failed', 'Hugging Face sent no content for the file.');
         const reader = createGgufHeaderReader();
         let readBytes = 0;
@@ -309,9 +284,9 @@ async function ggufSizingOf(context, file) {
 
 // config.json: read whole (it is small), checked against the digest the tree gave, then parsed.
 async function readConfig(context, row) {
-    const { get, token } = context;
+    const { get, token, who } = context;
     const response = await get(resolveUrl(context, row.file), { headers: { 'Accept-Encoding': 'identity', ...authHeaders(token) } });
-    if (response.status !== 200) throw statusError(response.status, `the file ${row.file}`, token);
+    if (response.status !== 200) throw statusError(response.status, `the file ${row.file}`, token, who);
     if (!response.body) throw failure('lookup_failed', 'Hugging Face sent no content for config.json.');
     const parts = [];
     let total = 0;
@@ -393,8 +368,12 @@ export async function lookupHuggingFaceModel(args, {
     totalMs = LOOKUP_TIMEOUT_MS,
     metadataMaxBytes = LOOKUP_METADATA_MAX_BYTES,
     signal = undefined,
+    // A mirror: the canary request first, and its name and credential hint in the messages.
+    canary = false,
+    subject = undefined,
 } = {}) {
     const input = normalizeLookupInput(args);
+    const who = subject === undefined ? undefined : { subject, hint: REGISTRY_TOKEN_HINT };
     const deadline = AbortSignal.any([AbortSignal.timeout(totalMs), ...(signal ? [signal] : [])]);
     try {
         const get = originGuardedFetch({ fetchImpl, baseUrl, deadline });
@@ -403,8 +382,8 @@ export async function lookupHuggingFaceModel(args, {
         const { json: info } = await fetchJson(`${baseUrl}/api/models/${encodePath(repo)}`,
             { token, fetchImpl: getMetadata, timeoutMs, maxBytes: metadataMaxBytes });
         if (info === null || typeof info !== 'object' || Array.isArray(info)) throw failure('lookup_failed', 'The Hugging Face model response is not an object.');
-        const commit = await resolveCommit({ repo, revision, token, fetchImpl: getMetadata, baseUrl, timeoutMs, maxBytes: metadataMaxBytes });
-        const context = { get, getMetadata, baseUrl, repo, commit, token, timeoutMs, metadataMaxBytes, budget: { pages: 0, truncated: false } };
+        const commit = await resolveCommit({ repo, revision, token, fetchImpl: getMetadata, baseUrl, timeoutMs, maxBytes: metadataMaxBytes, canary });
+        const context = { get, getMetadata, baseUrl, repo, commit, token, who, timeoutMs, metadataMaxBytes, budget: { pages: 0, truncated: false } };
         const files = format === 'gguf' ? await listGguf(context) : await listSnapshot(context);
         let sizing = null;
         if (format === 'gguf' && input.file !== undefined) {
@@ -432,6 +411,6 @@ export async function lookupHuggingFaceModel(args, {
             sizing,
         };
     } catch (error) {
-        throw lookupError(error, signal, token);
+        throw lookupError(error, signal, token, who);
     }
 }

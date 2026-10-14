@@ -356,11 +356,11 @@ test('A28: a stored entry naming a missing registry still loads in the overview 
     const entry = userEntry('orphaned', { gguf: pinnedGguf({ registry: 'gone', commit: COMMIT, size: 1000, sha256: 'b'.repeat(64) }) });
     const h = registryHarness(t, { initialState: { version: 1, deployment: null, params: {}, requests: {}, registry: [entry] } });
     const overview = await h.controller.overview();
-    assert.ok(overview.unsupportedModels.some((model) => model.id === 'orphaned'), 'listed, raw, while this catalog cannot read it');
+    // A source may name a registry, so the entry is an ordinary one: listed with its weights, whether or not its registry exists.
+    assert.ok(overview.models.some((model) => model.id === 'orphaned'), 'listed in the overview');
+    assert.equal(overview.unsupportedModels.some((model) => model.id === 'orphaned'), false);
     assert.deepEqual((await h.controller.listRegistries()).registries.find((registry) => registry.id === 'huggingface').usedBy, []);
-    assert.deepEqual(await h.controller.removeModel({ modelId: 'orphaned' }), {
-        removed: 'orphaned', note: 'The entry was not supported by this catalog; downloaded weights, if any, stay on disk.',
-    });
+    assert.deepEqual(await h.controller.removeModel({ modelId: 'orphaned' }), { removed: 'orphaned' });
 });
 
 test('N5: the Add and Update queue blocks re-check the snapshot taken before the pin, and a failed re-check saves nothing', async (t) => {

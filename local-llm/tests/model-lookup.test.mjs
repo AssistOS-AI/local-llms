@@ -18,6 +18,7 @@ import { createController } from '../src/controller/deployments.mjs';
 import { DownloadError, fetchJson } from '../src/controller/downloader.mjs';
 import { LOOKUP_METADATA_MAX_BYTES, lookupHuggingFaceModel, normalizeLookupInput, quantizationOf, sizingFromConfig } from '../src/controller/modelLookup.mjs';
 import { admitCpuLlamaServer, admitUnifiedLlamaServer, admitUnifiedVllm } from '../src/controller/profiles.mjs';
+import { LOOKUP_REPO_RE, REGISTRY_ID_RE, lookupInRegistry } from '../src/controller/registryLookup.mjs';
 import { createStateStore } from '../src/controller/stateStore.mjs';
 import { DRAIN_QUEUE_WAIT_MS } from '../src/drainBudget.mjs';
 import { modelEntryFromForm } from '../IDE-plugins/local-llm-settings/local-llm-settings-model.js';
@@ -569,9 +570,11 @@ test('lookup refuses bad repository, revision and file input before any request'
     const config = JSON.parse(fs.readFileSync(new URL('../mcp-config.json', import.meta.url), 'utf8'));
     const tool = config.tools.find((entry) => entry.name === 'local_llm_model_lookup');
     const properties = tool.inputSchema.properties;
-    assert.deepEqual(Object.keys(properties).sort(), ['file', 'format', 'provider', 'repo', 'revision']);
-    assert.equal(properties.repo.pattern, HF_REPO_RE.source);
-    assert.equal(properties.repo.maxLength, 193);
+    assert.deepEqual(Object.keys(properties).sort(), ['file', 'format', 'provider', 'registry', 'repo', 'revision']);
+    assert.equal(properties.repo.pattern, LOOKUP_REPO_RE.source);
+    assert.equal(properties.repo.maxLength, 255);
+    assert.equal(properties.registry.pattern, REGISTRY_ID_RE.source);
+    assert.equal(properties.registry.maxLength, 32);
     assert.equal(properties.revision.pattern, HF_REVISION_RE.source);
     assert.equal(properties.revision.maxLength, 128);
     assert.deepEqual(properties.format.enum, ['gguf', 'hf', 'exl3']);
@@ -585,6 +588,19 @@ test('lookup refuses bad repository, revision and file input before any request'
     assert.equal(tool.inputSchema.additionalProperties, false);
     assert.equal(tool.timeoutMs, 60000);
     assert.ok(HF_FILE_SEGMENT_RE.test('M-Q4_K_M.gguf'));
+    // The schema's pattern admits the longest form of any kind (an OCI repository); the code keeps owner/name for Hugging Face
+    // and ModelScope, so a/b/c is refused for the huggingface registry and for a modelscope registry alike, before any request.
+    assert.ok(LOOKUP_REPO_RE.test('a/b/c') && HF_REPO_RE.test(REPO) && !HF_REPO_RE.test('a/b/c'));
+    for (const registry of [undefined, 'huggingface', 'modelscope']) {
+        assert.throws(() => normalizeLookupInput({ repo: 'a/b/c', ...(registry ? { registry } : {}) }), codeOf('invalid_request'), String(registry));
+        await assert.rejects(() => lookupInRegistry({ repo: 'a/b/c', ...(registry ? { registry } : {}) }, { fetchImpl }), codeOf('invalid_request'), String(registry));
+    }
+    // A registry id outside the id form, and a provider next to a named registry, are refused too.
+    for (const args of [{ repo: REPO, registry: 'Hub' }, { repo: REPO, registry: 'x' }, { repo: REPO, registry: 7 }, { repo: REPO, registry: 'mirror', provider: 'huggingface' }]) {
+        assert.throws(() => normalizeLookupInput(args), codeOf('invalid_request'), JSON.stringify(args));
+    }
+    assert.deepEqual(normalizeLookupInput({ repo: REPO, registry: 'huggingface', provider: 'huggingface' }), { repo: REPO, revision: 'main', format: 'gguf' });
+    assert.equal(requests, 0, 'no request was made');
 });
 
 test('the quantization is read from the file name', () => {

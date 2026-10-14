@@ -19,6 +19,12 @@
 // the registry origin only, and downloads may follow a redirect to the file
 // host's CDN, which never receives the token. A store made without one (a
 // test of the store alone) uses the downloader's own fetch.
+//
+// A source may name a registry (a Hugging Face-compatible mirror). Its files
+// and keys live under `_r/<id>`, derived from the source alone. The registry
+// itself is consulted only by `pin` and `fetch`, through a session resolved
+// once at their start (registrySessions.mjs); `key`, `state`, `plan`,
+// `recheck`, `remove` and `paths` never read the registry list.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -35,7 +41,7 @@ import {
     verifyArtifact,
     verifySnapshotFile,
 } from './downloader.mjs';
-import { followRedirects } from './netGuard.mjs';
+import { createSessions } from './registrySessions.mjs';
 import { freedBytes, orderCandidates, regularFilesIn, walkShared } from './workspaceReuse.mjs';
 import { splitGgufFiles, splitGgufName } from './catalog.mjs';
 import {
@@ -72,13 +78,12 @@ export function createWeightStores({
     sharedModelsRoot = null,
     fsApi = fs,
     registryTransport = null,
+    // The registry service (registries.mjs), consulted by `pin` and `fetch` only.
+    registries = null,
 }) {
-    // Metadata (pins) is taken from the registry origin only; file reads may be redirected to a CDN.
-    const viaTransport = (options) => (registryTransport
-        ? { fetchImpl: followRedirects(registryTransport, { homeOrigin: hfBaseUrl, ...options }) }
-        : {});
-    const metadataFetch = () => viaTransport({ sameOriginOnly: true });
-    const fileFetch = () => viaTransport({});
+    const sessions = createSessions({ env, hfBaseUrl, registryTransport, registries });
+    // The id prefix of a mirror's keys; huggingface.co's keys carry none.
+    const scopeOf = (source) => (source.registry ? `_r/${source.registry}/` : '');
     const adoptFrom = sharedModelsRoot ? [sharedModelsRoot] : [];
     // One walk of /shared per artifact (or per overview), for every size it needs.
     const sharedIndex = async (sizes, signal) => (adoptFrom.length ? walkShared(fsApi, adoptFrom, sizes, signal) : new Map());
@@ -104,7 +109,7 @@ export function createWeightStores({
         type: 'huggingface',
         fetchedBy: 'controller',
         // A split GGUF is one artifact: its commit, first shard and shard count.
-        key: (source) => `gguf:${source.repo}@${source.commit}/${source.file}${source.shards ? `#${source.shards.length}` : ''}`,
+        key: (source) => `gguf:${scopeOf(source)}${source.repo}@${source.commit}/${source.file}${source.shards ? `#${source.shards.length}` : ''}`,
         isPinned: (source) => Boolean(source.commit) && (!splitGgufName(source.file) || Array.isArray(source.shards)),
         async state(source) {
             if (!huggingface.isPinned(source)) return { state: 'unpinned', bytes: 0, total: null };
@@ -140,6 +145,8 @@ export function createWeightStores({
             return { notes };
         },
         async fetch({ artifact, signal, onProgress }) {
+            // The registry is resolved once: a credential or setting changed during the job does not change its requests.
+            const session = sessions.forSource(artifact);
             // Shard by shard into one directory; progress counts the whole set.
             let done = 0;
             let transferred = 0;
@@ -153,9 +160,9 @@ export function createWeightStores({
                 const result = await download({
                     artifact: file,
                     root: ggufRoot,
-                    token: env.HF_TOKEN || '',
-                    baseUrl: hfBaseUrl,
-                    ...fileFetch(),
+                    token: session.token,
+                    baseUrl: session.baseUrl,
+                    ...session.fileFetch(),
                     candidates: candidatesFor(file),
                     onProgress: (progress) => onProgress?.({
                         ...progress,
@@ -181,16 +188,18 @@ export function createWeightStores({
             return freed;
         },
         // Pinning reads Hugging Face metadata only; no weights are downloaded.
-        async pin(source, { signal } = {}) {
+        async pin(source, { signal, registry } = {}) {
             if (huggingface.isPinned(source)) return source;
+            const session = sessions.forSource(source, { registry });
             const resolve = (file, revision) => resolveHf({
                 repo: source.repo,
                 file,
                 revision,
-                token: env.HF_TOKEN || '',
-                baseUrl: hfBaseUrl,
+                token: session.token,
+                baseUrl: session.baseUrl,
                 signal,
-                ...metadataFetch(),
+                ...session.metadataFetch(),
+                ...(session.registry ? { canary: true } : {}),
             });
             const resolved = await resolve(source.file, source.revision || 'main');
             const files = splitGgufFiles(source.file);
@@ -207,7 +216,8 @@ export function createWeightStores({
         // revision are unchanged; it never silently re-resolves a branch.
         carryPin(next, previous) {
             if (next.commit || previous?.type !== 'huggingface' || !previous.commit) return next;
-            if (next.repo !== previous.repo || next.file !== previous.file || next.revision !== previous.revision) return next;
+            if (next.registry !== previous.registry || next.repo !== previous.repo || next.file !== previous.file
+                || next.revision !== previous.revision) return next;
             return previous.shards
                 ? { ...next, commit: previous.commit, size: previous.size, shards: previous.shards }
                 : { ...next, commit: previous.commit, size: previous.size, sha256: previous.sha256 };
@@ -311,6 +321,7 @@ export function createWeightStores({
     });
 
     const snapshotFile = (source, file) => ({
+        ...(source.registry ? { registry: source.registry } : {}),
         repo: source.repo, commit: source.commit, file: file.path, size: file.size,
         ...(file.sha256 !== undefined ? { sha256: file.sha256 } : { gitOid: file.gitOid }),
     });
@@ -318,7 +329,7 @@ export function createWeightStores({
     const hfSnapshot = Object.freeze({
         type: 'hf-snapshot',
         fetchedBy: 'controller',
-        key: (source) => `hf:${source.repo}@${source.commit}`,
+        key: (source) => `hf:${scopeOf(source)}${source.repo}@${source.commit}`,
         isPinned: (source) => Boolean(source.commit && source.files?.length),
         // Complete only when every file has verified; a partial snapshot is never ready.
         async state(source) {
@@ -354,6 +365,7 @@ export function createWeightStores({
             return { notes };
         },
         async fetch({ artifact: source, signal, onProgress = () => {} }) {
+            const session = sessions.forSource(source);
             let done = 0;
             let transferred = 0;
             const provenance = [];
@@ -364,9 +376,9 @@ export function createWeightStores({
                 const result = await downloadSnapshot({
                     root: hfRoot,
                     artifact,
-                    token: env.HF_TOKEN || '',
-                    baseUrl: hfBaseUrl,
-                    ...fileFetch(),
+                    token: session.token,
+                    baseUrl: session.baseUrl,
+                    ...session.fileFetch(),
                     candidates: candidatesFor(artifact),
                     signal,
                     onProgress: (progress) => onProgress({
@@ -382,29 +394,31 @@ export function createWeightStores({
                 notes.push(...(result.notes || []));
                 onProgress({ bytes: done, total: source.size, transferred, rate: 0, etaSeconds: null });
             }
-            const { dir } = snapshotPaths({ root: hfRoot, repo: source.repo, commit: source.commit });
+            const { dir } = snapshotPaths({ root: hfRoot, repo: source.repo, commit: source.commit, registry: source.registry });
             return { path: dir, bytes: source.size, bytesTransferred: transferred, provenance, notes };
         },
         // Delete weights removes the whole snapshot and its bookkeeping; the
         // freed bytes count each inode whose last link goes with it (R8).
         async remove(source) {
             if (!source.commit) return 0;
-            const { dir, stateDir } = snapshotPaths({ root: hfRoot, repo: source.repo, commit: source.commit });
+            const { dir, stateDir } = snapshotPaths({ root: hfRoot, repo: source.repo, commit: source.commit, registry: source.registry });
             const freed = freedBytes([...await regularFilesIn(fsApi, dir), ...await regularFilesIn(fsApi, stateDir)]);
             await fs.promises.rm(dir, { recursive: true, force: true });
             await fs.promises.rm(stateDir, { recursive: true, force: true });
             return freed;
         },
         // Pinning reads Hugging Face metadata only; no weights are downloaded.
-        async pin(source, { signal } = {}) {
+        async pin(source, { signal, registry } = {}) {
             if (source.commit && source.files) return source;
+            const session = sessions.forSource(source, { registry });
             const resolved = await resolveSnapshot({
                 repo: source.repo,
                 revision: source.revision || 'main',
-                token: env.HF_TOKEN || '',
-                baseUrl: hfBaseUrl,
+                token: session.token,
+                baseUrl: session.baseUrl,
                 signal,
-                ...metadataFetch(),
+                ...session.metadataFetch(),
+                ...(session.registry ? { canary: true } : {}),
             });
             const files = resolved.files.map((file) => ({ ...file }));
             return { ...source, commit: resolved.commit, files, size: files.reduce((sum, file) => sum + file.size, 0) };
@@ -412,7 +426,7 @@ export function createWeightStores({
         // An update keeps the pin while repository and revision are unchanged.
         carryPin(next, previous) {
             if (next.commit || previous?.type !== 'hf-snapshot' || !previous.commit) return next;
-            if (next.repo !== previous.repo || next.revision !== previous.revision) return next;
+            if (next.registry !== previous.registry || next.repo !== previous.repo || next.revision !== previous.revision) return next;
             return { ...next, commit: previous.commit, files: previous.files, size: previous.size };
         },
     });

@@ -19,6 +19,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { isSnapshotFile } from './catalog.mjs';
 import { DownloadError, abortedError, throwIfAborted } from './downloadError.mjs';
 import { readCapped } from './netGuard.mjs';
+import { REGISTRY_ID_RE } from './registries.mjs';
 import {
     CHUNK_BYTES,
     MAX_CANDIDATES_PER_FILE,
@@ -55,12 +56,13 @@ const MAX_FILE_SEGMENTS = 4;
 export const MAX_TREE_PAGES = 50;
 const SPACE_MARGIN = 1.05;
 const RATE_WINDOW_MS = 5000;
-const IDENTITY_KEYS = Object.freeze(['repo', 'file', 'commit', 'size', 'sha256']);
+// `registry` is undefined for huggingface.co, so its records are what they were; a mirror's carry the id.
+const IDENTITY_KEYS = Object.freeze(['registry', 'repo', 'file', 'commit', 'size', 'sha256']);
 // A file named by a fixed URL (a runner's lock entry) is identified by that URL.
 const FILE_IDENTITY_KEYS = Object.freeze(['url', 'size', 'sha256']);
 // A file of a Hugging Face snapshot: an LFS file by sha256, a small file kept
 // in git by its git blob oid.
-const SNAPSHOT_IDENTITY_KEYS = Object.freeze(['repo', 'commit', 'file', 'size', 'sha256', 'gitOid']);
+const SNAPSHOT_IDENTITY_KEYS = Object.freeze(['registry', 'repo', 'commit', 'file', 'size', 'sha256', 'gitOid']);
 
 // Marks a local filesystem failure so the transfer loop never mistakes it for
 // a network error and retries into a full or broken disk.
@@ -100,10 +102,18 @@ export function assertRevision(revision) {
     }
 }
 
+// A registry id names a directory of the store, so only the validated id form is ever joined into a path.
+function assertRegistry(registry) {
+    if (registry !== undefined && (typeof registry !== 'string' || !REGISTRY_ID_RE.test(registry))) {
+        throw invalidSource('Invalid registry id');
+    }
+}
+
 function assertArtifact(artifact) {
     if (!artifact || typeof artifact !== 'object') {
         throw invalidSource('Missing artifact');
     }
+    assertRegistry(artifact.registry);
     assertRepo(artifact.repo);
     assertFile(artifact.file);
     if (typeof artifact.commit !== 'string' || !COMMIT_RE.test(artifact.commit)) {
@@ -198,9 +208,43 @@ function networkReason(err) {
     return err?.name === 'TypeError' ? 'fetch-failed' : 'unknown';
 }
 
-export async function resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs, maxBytes = undefined, signal = undefined }) {
+// A mirror that answers a revision it cannot know with anything but 404 (a catch-all page, a proxy that echoes a commit)
+// would hand out a "commit" that means nothing, so before a branch or tag is resolved a revision that cannot exist is
+// asked for. The request carries the credential the real one will, so a refusal reads as the refusal it is.
+async function assertConformingRegistry({ repo, token, fetchImpl, baseUrl, timeoutMs, signal }) {
+    const probe = `local-llm-canary-${crypto.randomBytes(8).toString('hex')}`;
+    const url = `${baseUrl}/api/models/${encodeSegments(repo)}/revision/${probe}`;
+    const timeout = AbortSignal.timeout(timeoutMs);
+    let response;
+    try {
+        response = await fetchImpl(url, { headers: { Accept: 'application/json', ...authHeaders(token) }, signal: signal ? AbortSignal.any([timeout, signal]) : timeout });
+    } catch (err) {
+        if (err instanceof DownloadError) {
+            throw err;
+        }
+        throw new DownloadError('RESOLVE_FAILED', 'Hugging Face metadata request failed', { retryable: true, details: { reason: networkReason(err) } });
+    }
+    await discardBody(response);
+    if (response.status === 404) {
+        return;
+    }
+    if (response.status === 401 || response.status === 403 || response.status === 429 || response.status >= 500) {
+        throw new DownloadError('RESOLVE_FAILED', `Hugging Face metadata request returned HTTP ${response.status}`, {
+            retryable: isRetryableStatus(response.status),
+            details: { status: response.status },
+        });
+    }
+    throw new DownloadError('RESOLVE_FAILED', 'The registry does not behave like Hugging Face: it answered a revision that cannot exist', {
+        details: { reason: 'nonconforming-registry' },
+    });
+}
+
+export async function resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs, maxBytes = undefined, signal = undefined, canary = false }) {
     if (COMMIT_RE.test(revision)) {
         return revision;
+    }
+    if (canary) {
+        await assertConformingRegistry({ repo, token, fetchImpl, baseUrl, timeoutMs, signal });
     }
     const url = `${baseUrl}/api/models/${encodeSegments(repo)}/revision/${encodeURIComponent(revision)}`;
     const { json } = await fetchJson(url, { token, fetchImpl, timeoutMs, maxBytes, signal });
@@ -295,11 +339,12 @@ export async function resolveHuggingFaceArtifact({
     timeoutMs = METADATA_TIMEOUT_MS,
     maxBytes = PIN_METADATA_MAX_BYTES,
     signal = undefined,
+    canary = false,
 }) {
     assertRepo(repo);
     assertFile(file);
     assertRevision(revision);
-    const commit = await resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs, maxBytes, signal });
+    const commit = await resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs, maxBytes, signal, canary });
     const entry = await findTreeEntry({ repo, file, commit, token, fetchImpl, baseUrl, timeoutMs, maxBytes, signal });
     const identity = entry ? lfsIdentity(entry) : null;
     if (!identity) {
@@ -317,13 +362,16 @@ function assertInside(root, candidate) {
     }
 }
 
+// A mirror's files live under `_r/<id>`; no Hugging Face owner starts with an underscore, so the two never meet.
+const registryDirs = (registry) => (registry ? ['_r', registry] : []);
+
 export function artifactPaths({ root, artifact }) {
     if (typeof root !== 'string' || !root) {
         throw invalidSource('Missing weights root');
     }
     assertArtifact(artifact);
     const base = path.resolve(root);
-    const dir = path.join(base, ...artifact.repo.split('/'), artifact.commit);
+    const dir = path.join(base, ...registryDirs(artifact.registry), ...artifact.repo.split('/'), artifact.commit);
     // The whole relative path, not its basename: two files with the same name
     // in different folders of one commit must not share a location.
     const file = path.join(dir, ...artifact.file.split('/'));
@@ -1128,17 +1176,18 @@ export async function removeArtifact({ root, artifact, fsApi = fs }) {
  * files a runner loads; `stateDir` holds the partial files and identity
  * records, so a runner never sees them.
  */
-export function snapshotPaths({ root, repo, commit }) {
+export function snapshotPaths({ root, repo, commit, registry = undefined }) {
     if (typeof root !== 'string' || !root) {
         throw invalidSource('Missing weights root');
     }
+    assertRegistry(registry);
     assertRepo(repo);
     if (typeof commit !== 'string' || !COMMIT_RE.test(commit)) {
         throw invalidSource('Invalid snapshot commit');
     }
     const base = path.resolve(root);
-    const dir = path.join(base, ...repo.split('/'), commit);
-    const stateDir = path.join(base, '.state', ...repo.split('/'), commit);
+    const dir = path.join(base, ...registryDirs(registry), ...repo.split('/'), commit);
+    const stateDir = path.join(base, '.state', ...registryDirs(registry), ...repo.split('/'), commit);
     assertInside(base, dir);
     assertInside(base, stateDir);
     return { dir, stateDir };
@@ -1162,7 +1211,7 @@ function assertSnapshotArtifact(artifact) {
 
 function snapshotFilePaths({ root, artifact }) {
     assertSnapshotArtifact(artifact);
-    const { dir, stateDir } = snapshotPaths({ root, repo: artifact.repo, commit: artifact.commit });
+    const { dir, stateDir } = snapshotPaths({ root, repo: artifact.repo, commit: artifact.commit, registry: artifact.registry });
     const file = path.join(dir, artifact.file);
     const partial = path.join(stateDir, `${artifact.file}.partial`);
     assertInside(dir, file);
@@ -1205,10 +1254,11 @@ export async function resolveHuggingFaceSnapshot({
     timeoutMs = METADATA_TIMEOUT_MS,
     maxBytes = PIN_METADATA_MAX_BYTES,
     signal = undefined,
+    canary = false,
 }) {
     assertRepo(repo);
     assertRevision(revision);
-    const commit = await resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs, maxBytes, signal });
+    const commit = await resolveCommit({ repo, revision, token, fetchImpl, baseUrl, timeoutMs, maxBytes, signal, canary });
     let url = `${baseUrl}/api/models/${encodeSegments(repo)}/tree/${commit}`;
     const files = [];
     for (let page = 0; url && page < MAX_TREE_PAGES; page += 1) {

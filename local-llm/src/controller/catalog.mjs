@@ -21,6 +21,7 @@ import path from 'node:path';
 
 import { LocalLlmError } from '../errors.mjs';
 import { PROFILES, UNIFIED_LOAD_MODES } from './profiles.mjs';
+import { REGISTRY_ID_RE } from './registries.mjs';
 import { CATALOG_V3, CATALOG_V4, METADATA_PROFILES, validateVenusParams, validateVenusMeasurements } from './venusMetadata.mjs';
 
 export const CATALOG_SCHEMA = CATALOG_V4;
@@ -120,10 +121,23 @@ function validateShards(value, field) {
     return { shards: Object.freeze(shards), size };
 }
 
+// The registry a Hugging Face-compatible source names (DS002). Absent, or `huggingface`, is huggingface.co and is
+// normalized away, so those entries stay what they were; any other id needs an explicit revision, because a
+// mirror's default branch is not assumed.
+function registryScope(value, field) {
+    if (value.registry === undefined || value.registry === 'huggingface') return {};
+    if (typeof value.registry !== 'string' || !REGISTRY_ID_RE.test(value.registry)) {
+        throw invalid(`${field}.registry must be a registry id (2-32 lowercase letters, digits or dashes)`, `${field}.registry`);
+    }
+    if (typeof value.revision !== 'string') throw invalid(`${field}.revision is required when registry is set`, `${field}.revision`);
+    return { registry: value.registry };
+}
+
 export function validateHuggingFaceSource(value, field, { requirePin = false } = {}) {
     if (!plainObject(value)) throw invalid(`${field} must be an object`, field);
     if (value.type !== 'huggingface') throw invalid(`${field}.type must be huggingface`, `${field}.type`);
-    onlyKeys(value, ['type', 'repo', 'file', 'revision', 'commit', 'size', 'sha256', 'shards', 'quantization'], field);
+    onlyKeys(value, ['type', 'registry', 'repo', 'file', 'revision', 'commit', 'size', 'sha256', 'shards', 'quantization'], field);
+    const scope = registryScope(value, field);
     if (typeof value.repo !== 'string' || !HF_REPO_RE.test(value.repo)) {
         throw invalid(`${field}.repo must be a Hugging Face repository id (owner/name)`, `${field}.repo`);
     }
@@ -148,10 +162,10 @@ export function validateHuggingFaceSource(value, field, { requirePin = false } =
         // model resolves it): the first shard's name only.
         const pinnedSplit = value.commit !== undefined || value.shards !== undefined || value.size !== undefined;
         if (value.sha256 !== undefined) throw invalid(`${field}.sha256 is per shard for a split GGUF`, `${field}.sha256`);
-        if (!requirePin && !pinnedSplit) return Object.freeze({ type: 'huggingface', repo: value.repo, file: value.file, revision, ...quantization });
+        if (!requirePin && !pinnedSplit) return Object.freeze({ type: 'huggingface', ...scope, repo: value.repo, file: value.file, revision, ...quantization });
         if (!COMMIT_RE.test(String(value.commit || ''))) throw invalid(`${field}.commit must be a 40-hex commit`, `${field}.commit`);
         const { shards, size } = validateShards(value, field);
-        return Object.freeze({ type: 'huggingface', repo: value.repo, file: value.file, revision, commit: value.commit, size, shards, ...quantization });
+        return Object.freeze({ type: 'huggingface', ...scope, repo: value.repo, file: value.file, revision, commit: value.commit, size, shards, ...quantization });
     }
     if (value.shards !== undefined) throw invalid(`${field}.shards is only for a split GGUF (…-00001-of-0000N.gguf)`, `${field}.shards`);
     const pinned = value.commit !== undefined || value.size !== undefined || value.sha256 !== undefined;
@@ -162,6 +176,7 @@ export function validateHuggingFaceSource(value, field, { requirePin = false } =
     }
     return Object.freeze({
         type: 'huggingface',
+        ...scope,
         repo: value.repo,
         file: value.file,
         revision,
@@ -189,7 +204,8 @@ export function isSnapshotFile(name) {
 export function validateHfSnapshotSource(value, field, { requirePin = false } = {}) {
     if (!plainObject(value)) throw invalid(`${field} must be an object`, field);
     if (value.type !== 'hf-snapshot') throw invalid(`${field}.type must be hf-snapshot`, `${field}.type`);
-    onlyKeys(value, ['type', 'repo', 'revision', 'commit', 'files', 'size', 'quantization'], field);
+    onlyKeys(value, ['type', 'registry', 'repo', 'revision', 'commit', 'files', 'size', 'quantization'], field);
+    const scope = registryScope(value, field);
     if (typeof value.repo !== 'string' || !HF_REPO_RE.test(value.repo)) {
         throw invalid(`${field}.repo must be a Hugging Face repository id (owner/name)`, `${field}.repo`);
     }
@@ -200,6 +216,7 @@ export function validateHfSnapshotSource(value, field, { requirePin = false } = 
     const pinned = value.commit !== undefined || value.files !== undefined;
     const base = {
         type: 'hf-snapshot',
+        ...scope,
         repo: value.repo,
         revision,
         ...(value.quantization ? { quantization: optionalText(value.quantization, `${field}.quantization`, 64) } : {}),

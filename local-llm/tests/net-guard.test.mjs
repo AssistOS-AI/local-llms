@@ -421,50 +421,78 @@ function runSeeds() {
             shards: [{ file: SHARD_1, size: half, sha256: 'a'.repeat(64) }, { file: SHARD_2, size: gguf.sources.gguf.size - half, sha256: 'b'.repeat(64) }],
         } },
     }, { seed: true });
-    return [gguf, split, snapshot];
+    // The same three on the admin registry `mirror`.
+    const onMirror = (model, id, format) => validateModel({
+        ...model, id, sources: { ...model.sources, [format]: { ...model.sources[format], registry: 'mirror' } },
+    }, { seed: true });
+    return [gguf, split, snapshot, onMirror(gguf, 'a5m-gguf', 'gguf'), onMirror(split, 'a5m-split', 'gguf'), onMirror(snapshot, 'a5m-snapshot', 'hf')];
 }
 
 // Earlier requests of a flow answered in process, so the row's own request is the one that reaches the transport.
+// A key starting with "~" is a pattern for a path that is not fixed (the canary's random revision).
 const answered = (answers) => {
     const served = new Map();
     return (url) => {
-        for (const [pathname, { body, times = Infinity }] of Object.entries(answers)) {
-            if (url.pathname !== pathname) continue;
-            const count = served.get(pathname) ?? 0;
+        for (const [key, { body, times = Infinity, status = 200 }] of Object.entries(answers)) {
+            if (key.startsWith('~') ? !new RegExp(key.slice(1)).test(url.pathname) : url.pathname !== key) continue;
+            const count = served.get(key) ?? 0;
             if (count >= times) return null;
-            served.set(pathname, count + 1);
-            return cannedResponse(200, body, { 'content-type': 'application/json' });
+            served.set(key, count + 1);
+            return cannedResponse(status, body, { 'content-type': 'application/json' });
         }
         return null;
     };
 };
-const INFO = { [`/api/models/${REPO}`]: { body: { id: REPO, gated: false } } };
-const REVISION = { [`/api/models/${REPO}/revision/main`]: { body: { sha: COMMIT } } };
-const treeOf = (entries, times) => ({ [`/api/models/${REPO}/tree/${COMMIT}`]: { body: entries, times } });
+const matchesTarget = (target, actual) => (target instanceof RegExp ? target.test(actual) : actual === target);
+const includesTarget = (target, actual) => (target instanceof RegExp ? target.test(actual) : actual.includes(target));
 const GGUF_TREE = [lfsEntry('m-Q4_K_M.gguf', 4 * MIB, 'a'), lfsEntry(SHARD_1, 2 * MIB, 'b'), lfsEntry(SHARD_2, 2 * MIB, 'c')];
 const SNAPSHOT_TREE = [{ type: 'file', path: 'config.json', size: CONFIG.length, oid: gitOid(CONFIG) }, lfsEntry('model.safetensors', MIB, 'd')];
-const ggufEntry = (file) => ({ id: 'a5-added', sources: { gguf: { type: 'huggingface', repo: REPO, file, revision: 'main' } } });
+const ggufEntry = (file, registry) => ({ id: 'a5-added', sources: { gguf: { type: 'huggingface', ...(registry ? { registry } : {}), repo: REPO, file, revision: 'main' } } });
 
-// One row per model path; later slices add their registries' rows. `answers` (null: none) are the earlier
-// requests of the flow, and `target` is the request the row sends to the transport.
-const A5_ROWS = [
-    { name: 'lookup: model info', kind: 'lookup', answers: null, target: `/api/models/${REPO}`, act: (c) => c.lookupModel({ repo: REPO }) },
-    { name: 'lookup: revision', kind: 'lookup', answers: { ...INFO }, target: `/api/models/${REPO}/revision/main`, act: (c) => c.lookupModel({ repo: REPO }) },
-    { name: 'lookup: tree', kind: 'lookup', answers: { ...INFO, ...REVISION }, target: `/api/models/${REPO}/tree/${COMMIT}`, act: (c) => c.lookupModel({ repo: REPO }) },
-    { name: 'lookup: GGUF header', kind: 'lookup', answers: { ...INFO, ...REVISION, ...treeOf(GGUF_TREE) }, target: `/${REPO}/resolve/${COMMIT}/m-Q4_K_M.gguf`,
-        act: (c) => c.lookupModel({ repo: REPO, file: 'm-Q4_K_M.gguf' }) },
-    { name: 'lookup: config.json', kind: 'lookup', answers: { ...INFO, ...REVISION, ...treeOf(SNAPSHOT_TREE) }, target: `/${REPO}/resolve/${COMMIT}/config.json`,
-        act: (c) => c.lookupModel({ repo: REPO, format: 'hf' }) },
-    { name: 'GGUF pin: revision', kind: 'pin', answers: null, target: `/api/models/${REPO}/revision/main`, act: (c) => c.addModel(ggufEntry('m-Q4_K_M.gguf')) },
-    { name: 'GGUF pin: tree', kind: 'pin', answers: { ...REVISION }, target: `/api/models/${REPO}/tree/${COMMIT}`, act: (c) => c.addModel(ggufEntry('m-Q4_K_M.gguf')) },
-    { name: 'split pin: second shard', kind: 'pin', answers: { ...REVISION, ...treeOf(GGUF_TREE, 1) }, target: `/api/models/${REPO}/tree/${COMMIT}`,
-        act: (c) => c.addModel(ggufEntry(SHARD_1)) },
-    { name: 'snapshot pin: tree', kind: 'pin', answers: { ...REVISION }, target: `/api/models/${REPO}/tree/${COMMIT}`,
-        act: (c) => c.addModel({ id: 'a5-snapshot', sources: { hf: { type: 'hf-snapshot', repo: REPO, revision: 'main' } } }) },
-    { name: 'GGUF Run', kind: 'run', answers: null, target: '/resolve/', act: (c) => c.run({ modelId: 'qwen2.5-0.5b-instruct-q4_k_m', runnerId: 'llama.cpp', requestId: 'a5-run-gguf-01' }) },
-    { name: 'split Run', kind: 'run', answers: null, target: `/${REPO}/resolve/${COMMIT}/${SHARD_1}`, act: (c) => c.run({ modelId: 'a5-split', runnerId: 'llama.cpp', requestId: 'a5-run-split-1' }) },
-    { name: 'snapshot Run', kind: 'run', answers: null, target: '/resolve/', act: (c) => c.run({ modelId: 'qwen3-4b-awq', runnerId: 'vllm', requestId: 'a5-run-snap-01' }) },
-];
+// One set of rows per registry: huggingface.co (a literal-address base URL), and the admin mirror `mirror`, whose URL
+// `https://localhost:<port>/p` is a name the production transport resolves to loopback. `answers` (null: none) are the
+// earlier requests of the flow, and `target` (a path, or a pattern for the canary) is the request the row sends to the
+// transport. A mirror's flow asks a canary before it resolves a branch.
+function a5Rows({ prefix = '', registry = null } = {}) {
+    const api = `${prefix}/api/models/${REPO}`;
+    const info = { [api]: { body: { id: REPO, gated: false } } };
+    const canaryPath = new RegExp(`^${api}/revision/local-llm-canary-[0-9a-f]{16}$`);
+    const canary = registry ? { [`~${canaryPath.source}`]: { body: { error: 'Revision Not Found' }, status: 404 } } : {};
+    const revision = { [`${api}/revision/main`]: { body: { sha: COMMIT } } };
+    const revisionTarget = registry ? canaryPath : `${api}/revision/main`;
+    const treeOf = (entries, times) => ({ [`${api}/tree/${COMMIT}`]: { body: entries, times } });
+    const resolve = (file) => `${prefix}/${REPO}/resolve/${COMMIT}/${file}`;
+    const named = (name) => (registry ? `${registry}: ${name}` : name);
+    const as = registry ? { registry } : {};
+    const seedId = (id) => (registry ? id.replace('a5-', 'a5m-') : id);
+    return [
+        { name: 'lookup: model info', kind: 'lookup', answers: null, target: api, act: (c) => c.lookupModel({ ...as, repo: REPO }) },
+        { name: 'lookup: revision', kind: 'lookup', answers: { ...info }, target: revisionTarget, act: (c) => c.lookupModel({ ...as, repo: REPO }) },
+        { name: 'lookup: tree', kind: 'lookup', answers: { ...info, ...canary, ...revision }, target: `${api}/tree/${COMMIT}`, act: (c) => c.lookupModel({ ...as, repo: REPO }) },
+        { name: 'lookup: GGUF header', kind: 'lookup', answers: { ...info, ...canary, ...revision, ...treeOf(GGUF_TREE) }, target: resolve('m-Q4_K_M.gguf'),
+            act: (c) => c.lookupModel({ ...as, repo: REPO, file: 'm-Q4_K_M.gguf' }) },
+        { name: 'lookup: config.json', kind: 'lookup', answers: { ...info, ...canary, ...revision, ...treeOf(SNAPSHOT_TREE) }, target: resolve('config.json'),
+            act: (c) => c.lookupModel({ ...as, repo: REPO, format: 'hf' }) },
+        { name: 'GGUF pin: revision', kind: 'pin', answers: null, target: revisionTarget, act: (c) => c.addModel(ggufEntry('m-Q4_K_M.gguf', registry)) },
+        { name: 'GGUF pin: tree', kind: 'pin', answers: { ...canary, ...revision }, target: `${api}/tree/${COMMIT}`, act: (c) => c.addModel(ggufEntry('m-Q4_K_M.gguf', registry)) },
+        { name: 'split pin: second shard', kind: 'pin', answers: { ...canary, ...revision, ...treeOf(GGUF_TREE, 1) }, target: `${api}/tree/${COMMIT}`,
+            act: (c) => c.addModel(ggufEntry(SHARD_1, registry)) },
+        { name: 'snapshot pin: tree', kind: 'pin', answers: { ...canary, ...revision }, target: `${api}/tree/${COMMIT}`,
+            act: (c) => c.addModel({ id: 'a5-snapshot', sources: { hf: { type: 'hf-snapshot', ...as, repo: REPO, revision: 'main' } } }) },
+        { name: 'GGUF Run', kind: 'run', answers: null, target: '/resolve/', act: (c) => c.run({ modelId: registry ? 'a5m-gguf' : 'qwen2.5-0.5b-instruct-q4_k_m', runnerId: 'llama.cpp', requestId: 'a5-run-gguf-01' }) },
+        { name: 'split Run', kind: 'run', answers: null, target: resolve(SHARD_1), act: (c) => c.run({ modelId: seedId('a5-split'), runnerId: 'llama.cpp', requestId: 'a5-run-split-1' }) },
+        { name: 'snapshot Run', kind: 'run', answers: null, target: '/resolve/', act: (c) => c.run({ modelId: registry ? 'a5m-snapshot' : 'qwen3-4b-awq', runnerId: 'vllm', requestId: 'a5-run-snap-01' }) },
+    ].map((row) => ({ ...row, name: named(row.name), registry }));
+}
+const A5_ROWS = [...a5Rows(), ...a5Rows({ prefix: '/p', registry: 'mirror' })];
+
+// The admin registry list a mirror row's controller starts with: `mirror` at a name that resolves to loopback.
+function writeMirrorRegistry(dataDir, port) {
+    fs.mkdirSync(path.join(dataDir, 'state'), { recursive: true });
+    fs.writeFileSync(path.join(dataDir, 'state', 'registries.json'), JSON.stringify({
+        version: 1, registries: [{ id: 'mirror', kind: 'huggingface', url: `https://localhost:${port}/p` }], builtins: {},
+    }));
+}
 
 // A controller with every model path at its default; the hardware, the runners and their probe are injected.
 function a5Controller(dataDir, hfBaseUrl, extra = {}) {
@@ -530,18 +558,26 @@ test('every model path goes through the production transport (with its twin)', {
             // production transport with those answers in front of it.
             const inner = createGuardedTransport();
             const scripted = row.answers ? scriptedTransport(inner, answered(row.answers)) : null;
-            const controller = a5Controller(dataDir(), hfBaseUrl, scripted ? { registryTransport: scripted } : {});
+            const dir = dataDir();
+            if (row.registry) writeMirrorRegistry(dir, listener.port);
+            const controller = a5Controller(dir, hfBaseUrl, scripted ? { registryTransport: scripted } : {});
+            // huggingface.co's base URL is a loopback literal; a mirror's is `localhost`, which resolves to IPv4 and IPv6 loopback.
+            const host = row.registry ? 'localhost' : '127.0.0.1';
+            const refusal = row.registry ? /^(loopback|non-global-ipv6)$/ : /^loopback$/;
             try {
                 if (row.kind === 'run') {
                     await row.act(controller);
                     const deployment = await settled(controller);
                     assert.equal(deployment.phase, 'error', row.name);
-                    assert.match(deployment.error, /^127\.0\.0\.1 resolves to a loopback address, which local-llm does not contact$/, row.name);
+                    assert.match(deployment.error, new RegExp(`^${host} resolves to a (loopback|non-global-ipv6) address, which local-llm does not contact$`), row.name);
                 } else {
                     const code = row.kind === 'lookup' ? 'address_refused' : 'ADDRESS_REFUSED';
-                    await assert.rejects(row.act(controller), (error) => error.code === code && error.details?.reason === 'loopback', row.name);
+                    await assert.rejects(row.act(controller), (error) => error.code === code && refusal.test(error.details?.reason), row.name);
                 }
-                if (scripted) assert.deepEqual(scripted.delegated, [row.target], `${row.name}: the transport saw the row's request`);
+                if (scripted) {
+                    assert.equal(scripted.delegated.length, 1, `${row.name}: one request reached the transport`);
+                    assert.ok(matchesTarget(row.target, scripted.delegated[0]), `${row.name}: the transport saw the row's request, not ${scripted.delegated[0]}`);
+                }
                 assert.equal(listener.stats.connections, 0, `${row.name}: no connection`);
             } finally {
                 await controller.drain();
@@ -555,7 +591,9 @@ test('every model path goes through the production transport (with its twin)', {
             const inner = createTestTransport({ allowHttp: false });
             const scripted = scriptedTransport(inner, row.answers ? answered(row.answers) : () => null);
             const before = listener.stats.connections;
-            const controller = a5Controller(dataDir(), hfBaseUrl, {
+            const dir = dataDir();
+            if (row.registry) writeMirrorRegistry(dir, listener.port);
+            const controller = a5Controller(dir, hfBaseUrl, {
                 registryTransport: scripted,
                 // One attempt, so the dropped connection ends the Run at once (the store still hands over its fetch).
                 download: (options) => downloadArtifact({ ...options, maxAttempts: 1, sleep: async () => {} }),
@@ -571,7 +609,7 @@ test('every model path goes through the production transport (with its twin)', {
                     await assert.rejects(row.act(controller), (error) => !['address_refused', 'ADDRESS_REFUSED'].includes(error.code), row.name);
                 }
                 assert.equal(scripted.delegated.length, 1, `${row.name}: one request reached the transport`);
-                assert.ok(scripted.delegated[0].includes(row.target), `${row.name}: ${scripted.delegated[0]}`);
+                assert.ok(includesTarget(row.target, scripted.delegated[0]), `${row.name}: ${scripted.delegated[0]}`);
                 assert.ok(listener.stats.connections >= before + 1, `${row.name}: the listener saw a connection`);
             } finally {
                 await controller.drain();
