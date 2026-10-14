@@ -56,7 +56,9 @@ function sendJson(res, status, body, headers = {}) {
 }
 
 // A controller on the cpu profile with its hardware and runners injected; only the Hugging Face side is real.
-function controllerFor(dir, { hfBaseUrl, registryTransport }) {
+// `probeStub: false` leaves the controller's own fetch in place: at 7fdbff5 the lookup uses it, so a stub there
+// would answer the lookup instead of the fake Hugging Face.
+function controllerFor(dir, { hfBaseUrl, registryTransport, probeStub = true }) {
     return createController({
         dataDir: dir,
         env: { PATH: '/usr/bin' },
@@ -72,7 +74,7 @@ function controllerFor(dir, { hfBaseUrl, registryTransport }) {
         download: async () => assert.fail('nothing is downloaded here'),
         inspect: async () => ({ state: 'absent', bytes: 0 }),
         remove: async () => 0,
-        fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }),
+        ...(probeStub ? { fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }) } : {}),
         detectRunner: (runner) => ({ installed: runner.supported, version: runner.pinnedVersion, reason: null }),
         imageContract: ARM64_CONTRACT,
         fileExists: (candidate) => candidate === '/opt/llama.cpp/llama-server',
@@ -184,12 +186,12 @@ test('R3 a host resolving to loopback is contacted', { timeout: 60_000 }, async 
         const fixture = await netFixture();
         const hfBaseUrl = `http://localhost:${hf.port}`;
         // Production classification; plain http is allowed only so the fake can answer.
-        strict = controllerFor(dir, { hfBaseUrl, registryTransport: fixture?.createTestTransport?.({ allowHttp: true, extraAllowed: null }) });
+        strict = controllerFor(dir, { hfBaseUrl, registryTransport: fixture?.createTestTransport?.({ allowHttp: true, extraAllowed: null }), probeStub: false });
         const outcome = await outcomeOf(strict.lookupModel({ repo: REPO }));
-        assert.equal(outcome?.code, 'address_refused', 'R3: the lookup is refused with address_refused');
+        assert.equal(outcome?.code, 'address_refused', `R3: the lookup is refused with address_refused (the server saw ${hf.requests.length} requests)`);
         assert.equal(hf.requests.length, 0, 'R3: the server saw 0 requests');
         // Positive control: the same lookup with loopback allowed reaches the server.
-        allowed = controllerFor(dir, { hfBaseUrl, registryTransport: fixture?.createTestTransport?.({ allowHttp: true, extraAllowed: fixture?.LOOPBACK }) });
+        allowed = controllerFor(dir, { hfBaseUrl, registryTransport: fixture?.createTestTransport?.({ allowHttp: true, extraAllowed: fixture?.LOOPBACK }), probeStub: false });
         const looked = await allowed.lookupModel({ repo: REPO });
         assert.equal(looked.commit, COMMIT, 'R3: with loopback allowed the lookup reads the commit');
         assert.ok(hf.requests.length >= 1, 'R3: with loopback allowed the server is reached');

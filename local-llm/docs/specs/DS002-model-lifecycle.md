@@ -124,7 +124,7 @@ Every request a model path makes (the lookup, the pins and the controller's down
 | Encoding | Requests send `Accept-Encoding: identity`; an answer with another `Content-Encoding` is refused (`HTTP_ERROR`, reason `encoding`). |
 | Timeouts | Response headers within 300 s; a body idle for 300 s ends the attempt. Metadata keeps its 15 s limit per request and the lookup its 55 s. |
 | Connections | The transport owns its own HTTP and HTTPS agents (keep-alive), never the process-wide ones, so a pooled socket was always opened under this one policy. |
-| Refusal | `ADDRESS_REFUSED` (Add, Update, and a Run, which fails with its message) or `address_refused` (lookup), not retried. The message names the host and the class (`<host> resolves to a <class> address, which local-llm does not contact`), never an address, a token or a query. |
+| Refusal | `ADDRESS_REFUSED` (Add, Update, and a Run, which fails with its message) or `address_refused` (lookup), not retried. The message names the host and the class (`<host> resolves to a <class> address, which local-llm does not contact`), never a resolved address, a token or a query. |
 
 ### Model registries
 
