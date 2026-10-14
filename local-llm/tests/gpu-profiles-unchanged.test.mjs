@@ -3,7 +3,10 @@
 // even with the agent's real locks loaded; and on a dedicated host, adding an Ollama tag and running it (or
 // being refused) are what they were before tags were pinned, with no registry read. Phase 3 lists no change
 // for either profile, so nothing is allowed to differ. The golden file was made from that commit (see
-// overview-scenarios.mjs).
+// overview-scenarios.mjs). One deliberate, named migration since: the GB10 hardware-limits change (DS005) added
+// reserveAppliesTo and budgetCoversGpuAllocations to the unified limits, physicalPoolBytes to the unified llama.cpp
+// estimates and a new text to the unified vLLM gpuMemoryUtilization description; the golden's `_meta.deliberateChanges`
+// records it, and the dedicated scenarios are untouched.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';

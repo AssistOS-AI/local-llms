@@ -604,18 +604,31 @@ test('with the switch, experimental vLLM is sized from a fresh snapshot and laun
     assert.equal(estimate.measured, false);
     assert.equal(estimate.envelope, null);
     assert.match(preview.admission.warnings[0], /^Experimental: vLLM has not been measured on unified memory/);
-    // The share is computed from this snapshot: the floor and the runner's RAM stay free, at most 0.9.
-    const expected = Math.min(0.9, Math.floor(((TOTAL - UNIFIED.hostReserveBytes - VLLM_RUNNER_RAM_BYTES) / TOTAL) * 100) / 100,
-        Math.floor(((available - UNIFIED.floorBytes - VLLM_RUNNER_RAM_BYTES) / TOTAL) * 100) / 100);
+    // The share is sized to the model (D16): weights, a KV cache for maxModelLen x maxNumSeqs tokens and
+    // vLLM's overhead, at least 0.1, and never above what is free now with the floor and the runner's RAM kept,
+    // or the host reserve's cap (at most 0.9).
+    const shareOf = (bytes) => Math.floor((bytes / TOTAL) * 100) / 100;
+    const sized = estimate.weightsBytes + estimate.kvBytes + VLLM_OVERHEAD_BYTES;
+    assert.equal(estimate.sizedBytes, sized, 'one sequence by default');
+    const modelShare = Math.max(0.1, Math.ceil((sized / TOTAL) * 100) / 100);
+    const freeShareAt = (free) => Math.min(0.9, shareOf(TOTAL - UNIFIED.hostReserveBytes - VLLM_RUNNER_RAM_BYTES),
+        shareOf(free - UNIFIED.floorBytes - VLLM_RUNNER_RAM_BYTES));
+    const expected = Math.min(modelShare, freeShareAt(available));
     assert.equal(estimate.gpuMemoryUtilization, expected);
+    assert.ok(expected < freeShareAt(available), 'the model-sized share binds, not what is free');
     assert.equal(estimate.unifiedBytes, Math.round(expected * TOTAL) + VLLM_RUNNER_RAM_BYTES);
     // The Run is re-admitted from a fresh snapshot before launch: less memory by then gives a smaller share.
-    await h.controller.run({ requestId: 'request-vllm-on', modelId: HF_MODEL.id, runnerId: 'vllm' });
-    available = 60 * GIB;
+    // Eight sequences at 32768 tokens make the model-sized share larger than what the busier pool leaves free.
+    const sizing = { maxModelLen: 32768, maxNumSeqs: 8 };
+    const wide = (await previewOf(h, { modelId: HF_MODEL.id, runnerId: 'vllm', params: sizing })).admission.estimate;
+    assert.equal(wide.gpuMemoryUtilization, Math.min(Math.ceil((wide.sizedBytes / TOTAL) * 100) / 100, freeShareAt(100 * GIB)));
+    await h.controller.run({ requestId: 'request-vllm-on', modelId: HF_MODEL.id, runnerId: 'vllm', params: sizing });
+    available = 31 * GIB;
     await until(() => h.controller.state.deployment?.phase === 'ready' || h.controller.state.deployment?.phase === 'error', 'settled');
     assert.equal(h.controller.state.deployment.phase, 'ready', h.controller.state.deployment.error);
     const share = h.controller.state.deployment.admission.estimate.gpuMemoryUtilization;
-    assert.equal(share, Math.floor(((60 * GIB - UNIFIED.floorBytes - VLLM_RUNNER_RAM_BYTES) / TOTAL) * 100) / 100);
+    assert.equal(share, freeShareAt(31 * GIB));
+    assert.ok(share < wide.gpuMemoryUtilization, 'the fresh snapshot gave a smaller share than the first admission');
     const [launched] = h.started;
     assert.equal(valueOf(launched.args, '--gpu-memory-utilization'), String(share));
     assert.ok(!launched.args.includes('--cpu-offload-gb'));
@@ -683,18 +696,29 @@ test('vLLM\'s share must hold the weights, the KV cache and its 768 MiB overhead
     assert.equal(vllmAt({ gpuMemoryUtilization: withoutOverhead + step }).status, 'incompatible');
 });
 
-test('vLLM\'s automatic share keeps the host reserve and never exceeds 0.9', () => {
-    // A small pool with ample free memory: the reserve (with the runner's RAM) binds.
+test('vLLM\'s automatic share keeps the host reserve and never exceeds 0.9, and is the smaller of the model-sized share and what the pool leaves', () => {
+    const ceilShareOf = (bytes, total) => Math.ceil((bytes / total) * 100) / 100;
+    const shareOf = (bytes, total) => Math.floor((bytes / total) * 100) / 100;
+    // A small pool with ample free memory. The default model-sized share (one sequence) is below the reserve's cap...
     const small = vllmAt({}, unifiedSnap(39 * GIB, 40 * GIB));
-    const reserveShare = Math.floor(((40 * GIB - UNIFIED.hostReserveBytes - VLLM_RUNNER_RAM_BYTES) / (40 * GIB)) * 100) / 100;
-    const freeShare = Math.floor(((39 * GIB - UNIFIED.floorBytes - VLLM_RUNNER_RAM_BYTES) / (40 * GIB)) * 100) / 100;
+    const reserveShare = shareOf(40 * GIB - UNIFIED.hostReserveBytes - VLLM_RUNNER_RAM_BYTES, 40 * GIB);
+    const freeShare = shareOf(39 * GIB - UNIFIED.floorBytes - VLLM_RUNNER_RAM_BYTES, 40 * GIB);
     assert.ok(reserveShare < freeShare && reserveShare < 0.9);
     assert.equal(small.status, 'ok', small.reason);
-    assert.equal(small.estimate.gpuMemoryUtilization, reserveShare);
-    assert.ok(small.estimate.unifiedBytes <= 40 * GIB - UNIFIED.hostReserveBytes);
-    // A large pool, nearly all free: the 0.9 cap binds.
-    const large = vllmAt({}, unifiedSnap(990 * GIB, 1000 * GIB));
+    const modelShare = Math.max(0.1, ceilShareOf(small.estimate.sizedBytes, 40 * GIB));
+    assert.equal(small.estimate.gpuMemoryUtilization, Math.min(modelShare, reserveShare));
+    assert.ok(modelShare < reserveShare, 'the model-sized share binds here');
+    // ...and a model-sized share that wants more than the pool leaves is held to the reserve (with the runner's RAM).
+    const wanting = vllmAt({ maxModelLen: 32768, maxNumSeqs: 64 }, unifiedSnap(39 * GIB, 40 * GIB));
+    assert.equal(wanting.status, 'ok', wanting.reason);
+    assert.ok(ceilShareOf(wanting.estimate.sizedBytes, 40 * GIB) > reserveShare);
+    assert.equal(wanting.estimate.gpuMemoryUtilization, reserveShare);
+    assert.ok(wanting.estimate.unifiedBytes <= 40 * GIB - UNIFIED.hostReserveBytes);
+    // A large pool, nearly all free, and a model-sized share above 0.9 (256 sequences of 131072 tokens): the 0.9 cap binds.
+    const large = vllmAt({ maxModelLen: 131072, maxNumSeqs: 256 }, unifiedSnap(299 * GIB, 300 * GIB));
     assert.equal(large.status, 'ok', large.reason);
+    assert.ok(ceilShareOf(large.estimate.sizedBytes, 300 * GIB) > 0.9);
+    assert.ok(shareOf(300 * GIB - UNIFIED.hostReserveBytes - VLLM_RUNNER_RAM_BYTES, 300 * GIB) >= 0.9, 'the reserve does not bind');
     assert.equal(large.estimate.gpuMemoryUtilization, 0.9);
 });
 
@@ -737,13 +761,22 @@ test('the vLLM switch fails closed for a caller that names no profile', () => {
     assert.equal(vllmRunner.enabled({ [VLLM_UNIFIED_SWITCH]: 'experimental' }).enabled, true);
 });
 
-test('the vLLM user-sizing warning says what an understated value does there: a looser fit check, not a smaller need', () => {
+test('the vLLM user-sizing warning says what an understated value does there: a looser fit check, and with an empty share a smaller default share', () => {
     const model = validateModel({ ...structuredClone(ADDED), id: 'user-hf-sized', sources: { hf: { ...HF_MODEL.sources.hf } } }, { seed: false });
-    const result = vllmAt({}, unifiedSnap(), model);
-    assert.ok(result.warnings.some((warning) => warning === 'Sized with memory.kvBytesPerToken from the model entry added at run time. '
+    // An admin share: the need is the share plus the runner's RAM, whatever the entry says.
+    const admin = vllmAt({ gpuMemoryUtilization: 0.3 }, unifiedSnap(), model);
+    assert.ok(admin.warnings.some((warning) => warning === 'Sized with memory.kvBytesPerToken from the model entry added at run time. '
         + 'Nothing checks these against the weights: an understated value only loosens the check that the weights and KV cache fit '
         + 'vLLM\'s share, so vLLM may fail to start; its memory need (the share plus its runner RAM) does not depend on it.'),
-    result.warnings.join(' | '));
+    admin.warnings.join(' | '));
+    // An empty share: the default share is sized from the entry's KV figure, so the need follows it.
+    const automatic = vllmAt({}, unifiedSnap(), model);
+    assert.ok(automatic.warnings.some((warning) => warning === 'Sized with memory.kvBytesPerToken from the model entry added at run time. '
+        + 'Nothing checks these against the weights: an understated value can make the default share, which is sized from the weights, this KV '
+        + 'cache and vLLM\'s overhead, too small and loosens the check that they fit it, so vLLM may fail to start; its memory need '
+        + '(the share plus its runner RAM) follows that default share.'),
+    automatic.warnings.join(' | '));
+    assert.ok(!automatic.warnings.some((warning) => /does not depend on it/.test(warning)));
 });
 
 test('the llama-server estimate\'s basis names every defaulted input', () => {

@@ -102,8 +102,9 @@ const unifiedParamSchema = deepFreeze({
         ...unifiedProperties,
         gpuMemoryUtilization: {
             ...paramSchema.properties.gpuMemoryUtilization,
-            description: 'Share of the shared memory pool vLLM may use for weights and KV cache; empty takes what is free now, '
-                + 'keeping the host reserve and the floor (at most 0.9).',
+            description: 'Share of the shared memory pool vLLM may use for weights and KV cache; empty sizes it to the model (weights, '
+                + 'a KV cache for maxModelLen × maxNumSeqs tokens and vLLM\'s overhead, at least 0.1), never above what is free now '
+                + 'with the host reserve and the floor kept, or what this agent\'s Ploinky RAM budget leaves (at most 0.9).',
         },
     },
 });

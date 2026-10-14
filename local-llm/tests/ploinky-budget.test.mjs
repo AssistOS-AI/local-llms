@@ -337,12 +337,17 @@ test('LL.unified-physical-denominator', () => {
     assert.equal(result.status, 'ok', result.reason);
     // The share is of the physical pool (vLLM's denominator), not of the 64 GiB budget...
     assert.equal(result.estimate.budgetBytes, Math.round(0.3 * physical));
-    // ...while the absolute need is bounded by the effective RAM: a share whose
-    // bytes exceed the budget less the host reserve is incompatible.
-    const tooBig = admit({ runner, model, source: model.sources.hf, params: runner.normalizeParams({ gpuMemoryUtilization: 0.4 }, { model, profile: 'unified' }),
+    // ...while the absolute need is bounded by the budget itself, with no host reserve taken out of it (the
+    // reserve belongs to the physical pool, DS005): 0.4 of the physical pool plus the runner's RAM fits a
+    // 64 GiB budget, and 0.5 does not. The base refused 0.4 by taking the 16 GiB reserve out of the budget too.
+    const fits = admit({ runner, model, source: model.sources.hf, params: runner.normalizeParams({ gpuMemoryUtilization: 0.4 }, { model, profile: 'unified' }),
+        snapshot: snap, profile: 'unified' });
+    assert.equal(fits.status, 'ok', fits.reason);
+    const tooBig = admit({ runner, model, source: model.sources.hf, params: runner.normalizeParams({ gpuMemoryUtilization: 0.5 }, { model, profile: 'unified' }),
         snapshot: snap, profile: 'unified' });
     assert.equal(tooBig.status, 'incompatible');
-    assert.match(tooBig.reason, /of the 64\.0 GiB shared memory pool/);
+    assert.equal(tooBig.reasonCode, 'budget_exceeded');
+    assert.match(tooBig.reason, /this agent's Ploinky RAM budget is 64\.0 GiB/);
     // Without a limit, the denominator is today's MemTotal (unchanged).
     const plain = admit({ runner, model, source: model.sources.hf, params, profile: 'unified',
         snapshot: { gpu: structuredClone(UNIFIED_GPU), memory: { totalBytes: physical, availableBytes: 120 * GIB }, disk: { freeBytes: 1024 * GIB } } });

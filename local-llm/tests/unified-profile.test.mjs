@@ -11,6 +11,7 @@ import test from 'node:test';
 import { admit } from '../src/controller/admission.mjs';
 import { loadSeedCatalog, validateModel } from '../src/controller/catalog.mjs';
 import { createController, dropPageCache, readImageContract } from '../src/controller/deployments.mjs';
+import { attachMemoryBudget } from '../src/controller/ploinkyBudget.mjs';
 import { UNIFIED, envelopeFor, profileOf } from '../src/controller/profiles.mjs';
 import { createLogBuffer, startRunnerProcess } from '../src/controller/runnerProcess.mjs';
 import { createStateStore } from '../src/controller/stateStore.mjs';
@@ -169,7 +170,7 @@ function deferred() {
 }
 
 function harness(t, { snap = unifiedSnapshot(), seed = [...SEED, MEASURED], imageContract = null, fileExists = () => true,
-    readMemory, readPressure = () => 0, unifiedGuardMs = 5, downloads = true, dropCache } = {}) {
+    readMemory, readPressure = () => 0, readBudget, unifiedGuardMs = 5, downloads = true, dropCache } = {}) {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-unified-'));
     t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
     const started = [];
@@ -206,6 +207,7 @@ function harness(t, { snap = unifiedSnapshot(), seed = [...SEED, MEASURED], imag
         fileExists,
         readMemory: readMemory || (() => ({ totalBytes: TOTAL, availableBytes: 100 * GIB })),
         readPressure,
+        readBudget,
         unifiedGuardMs,
         dropCache: dropCache || ((file) => { calls.dropped.push(file); return true; }),
     });
@@ -356,6 +358,72 @@ test('the unified guard samples in every phase and kills the process group below
     await until(() => h.controller.state.deployment?.phase === 'error');
     assert.equal(h.started[0].stopped, 'SIGKILL');
     assert.match(h.controller.state.deployment.error, /stopped: host memory below the floor \(7\.0 GiB available, 8\.0 GiB required\)/);
+});
+
+// The Ploinky RAM budget of the guard tests (DS005): admission sees an ample budget so the run launches, then the
+// guard's samples are constrained. The budget is latched finite when the guard starts, so it is finite from the first sample.
+const SMALL_ID = 'qwen2.5-0.5b-instruct-q4_k_m';
+const observed = (finiteMemoryBytes, headroomBytes) => ({ memoryReadState: 'known', finiteMemoryBytes, headroomBytes, reasonCode: null });
+function budgetedHarness(t, { available = () => 100 * GIB, headroom, readPressure } = {}) {
+    const admitted = observed(64 * GIB, 60 * GIB);
+    return harness(t, {
+        snap: () => attachMemoryBudget(unifiedSnapshot(), admitted),
+        readMemory: () => ({ totalBytes: TOTAL, availableBytes: available() }),
+        readBudget: () => headroom(),
+        readPressure,
+    });
+}
+const startSmall = async (h, requestId) => {
+    await h.controller.run({ modelId: SMALL_ID, runnerId: 'llama.cpp', requestId });
+    await until(() => h.controller.state.deployment?.phase === 'ready');
+};
+const sampled = async (h, count) => {
+    const before = (await h.controller.status()).memoryGuard.samples;
+    // A stop ends the wait too, so a runner the guard killed fails the caller's phase check with the guard's own reason.
+    await until(async () => h.controller.state.deployment?.phase !== 'ready' || (await h.controller.status()).memoryGuard.samples >= before + count);
+};
+
+test('LL.guard-no-budget-floor: a budget\'s headroom below the floor does not stop a unified runner while the host has memory', async (t) => {
+    let headroom = observed(12 * GIB, 12 * GIB);
+    const h = budgetedHarness(t, { headroom: () => headroom });
+    await startSmall(h, 'request-guard-budget');
+    // The admissible run is up; now the container has 6 GiB of its 12 GiB budget left and the host 100 GiB free.
+    headroom = observed(12 * GIB, 6 * GIB);
+    await sampled(h, 4);
+    assert.equal(h.controller.state.deployment.phase, 'ready', h.controller.state.deployment.error);
+    assert.equal(h.started[0].stopped, undefined, 'not stopped');
+    const { memoryGuard } = await h.controller.status();
+    assert.equal(memoryGuard.minAvailableBytes, 100 * GIB, 'the floor is compared with the physical MemAvailable');
+    await h.controller.stop();
+});
+
+test('LL.guard-physical-floor: below the floor on the physical pool stops a budgeted unified runner', async (t) => {
+    let available = 100 * GIB;
+    const h = budgetedHarness(t, { available: () => available, headroom: () => observed(64 * GIB, 60 * GIB) });
+    await startSmall(h, 'request-guard-physical');
+    available = 7 * GIB;
+    await until(() => h.controller.state.deployment?.phase === 'error');
+    assert.equal(h.started[0].stopped, 'SIGKILL');
+    assert.match(h.controller.state.deployment.error, /stopped: host memory below the floor \(7\.0 GiB available, 8\.0 GiB required\)/);
+});
+
+test('the unified guard keeps its pressure rule on the physical pool and its unreadable-budget rule under a budget', async (t) => {
+    // Heavy pressure with a small budget headroom (below twice the floor) but a free host: no stop.
+    let headroom = observed(40 * GIB, 40 * GIB);
+    const calm = budgetedHarness(t, { headroom: () => headroom, readPressure: () => 80 });
+    await startSmall(calm, 'request-guard-psi');
+    headroom = observed(40 * GIB, 6 * GIB);
+    await sampled(calm, 4);
+    assert.equal(calm.controller.state.deployment.phase, 'ready', calm.controller.state.deployment.error);
+    await calm.controller.stop();
+    // Two unreadable budget samples in a row still stop the runner (budget_unreadable).
+    let reading = observed(40 * GIB, 40 * GIB);
+    const blind = budgetedHarness(t, { headroom: () => reading });
+    await startSmall(blind, 'request-guard-unreadable');
+    reading = { memoryReadState: 'unknown', finiteMemoryBytes: 40 * GIB, headroomBytes: null, reasonCode: 'budget_unreadable' };
+    await until(() => blind.controller.state.deployment?.phase === 'error');
+    assert.equal(blind.started[0].stopped, 'SIGKILL');
+    assert.match(blind.controller.state.deployment.error, /^stopped: budget_unreadable/);
 });
 
 test('the unified guard kills when /proc/meminfo cannot be read, and on pressure only with memory already low', async (t) => {

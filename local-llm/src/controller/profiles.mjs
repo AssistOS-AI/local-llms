@@ -114,16 +114,54 @@ function describeEnvelope(model, runnerId) {
 
 const METADATA_HINT = 'add them to the model entry (Settings, or the local_llm_model_update tool) for a closer estimate';
 
-// The pool checks every unified policy ends with: the host reserve decides
-// whether it can ever fit, the floor whether it fits now, then the disk.
-function poolVerdict({ needBytes, memory, disk, remainingDownloadBytes, result, estimate, warnings, tooLarge }) {
-    if (needBytes > memory.totalBytes - UNIFIED.hostReserveBytes) {
-        return result('incompatible', `Needs about ${gib(needBytes)} of the ${gib(memory.totalBytes)} shared memory pool, `
+// The pool a unified policy checks against. The host reserve and the floor
+// belong to the physical pool, so they are read from the physical figures; a
+// Ploinky RAM budget (the capped view of ploinkyBudget.mjs) is checked on its
+// own, never as a smaller pool that would take the reserve and the floor a
+// second time. Without a budget the physical figures are the plain ones.
+function unifiedPool(memory) {
+    const total = Number.isFinite(memory.physicalTotalBytes) && memory.physicalTotalBytes > 0 ? memory.physicalTotalBytes : memory.totalBytes;
+    const available = Number.isFinite(memory.physicalAvailableBytes) ? memory.physicalAvailableBytes : memory.availableBytes;
+    const budgetBytes = Number.isSafeInteger(memory.budgetBytes) ? memory.budgetBytes : null;
+    const headroomBytes = budgetBytes === null ? null
+        : Number.isSafeInteger(memory.budgetHeadroomBytes) ? memory.budgetHeadroomBytes : memory.availableBytes;
+    return { total, available, budgetBytes, headroomBytes };
+}
+
+// The physical pool for an estimate: a reading, or null.
+const physicalPoolOf = (memory) => {
+    const { total } = unifiedPool(memory);
+    return Number.isFinite(total) ? total : null;
+};
+
+// The checks every unified policy ends with, in this order (DS005): U1 the host
+// reserve decides whether the physical pool can ever hold it; U2 the Ploinky
+// RAM budget, when there is one, whether the budget can ever hold it; U3 the
+// floor whether the physical pool holds it now; U4 the budget's headroom
+// whether the budget holds it now; U5 the disk. The budget is advisory for GPU
+// bytes: GPU allocations are not charged to it, so this estimate is what keeps
+// the run inside it. `fixedBytes` is the part of the need no parameter lowers
+// (llama.cpp's prompt cache and runtime), named in U2 as the smallest budget's floor.
+function unifiedVerdict({ needBytes, memory, disk, remainingDownloadBytes, result, estimate, warnings, tooLarge, fixedBytes = null }) {
+    const pool = unifiedPool(memory);
+    if (needBytes > pool.total - UNIFIED.hostReserveBytes) {
+        return result('incompatible', `Needs about ${gib(needBytes)} of the ${gib(pool.total)} shared memory pool, `
             + `which must keep ${gib(UNIFIED.hostReserveBytes)} for the host. ${tooLarge}`, estimate, warnings);
     }
-    if (needBytes > memory.availableBytes - UNIFIED.floorBytes) {
+    if (pool.budgetBytes !== null && needBytes > pool.budgetBytes) {
+        return result('incompatible', `Needs about ${gib(needBytes)} of shared memory; this agent's Ploinky RAM budget is ${gib(pool.budgetBytes)}. `
+            + 'On unified memory GPU allocations are not charged to that budget, so local-llm keeps the run inside it by this estimate. '
+            + `The smallest budget this run fits is about ${gib(needBytes)}`
+            + (fixedBytes === null ? '.' : `, of which ${gib(fixedBytes)} is llama.cpp's fixed prompt cache and runtime.`),
+        estimate, warnings, 'budget_exceeded');
+    }
+    if (needBytes > pool.available - UNIFIED.floorBytes) {
         return result('insufficient-now', `Needs about ${gib(needBytes)} of shared memory and ${gib(UNIFIED.floorBytes)} kept free; `
-            + `${gib(memory.availableBytes)} is available now. Other processes on this machine hold the rest.`, estimate, warnings);
+            + `${gib(pool.available)} is available now. Other processes on this machine hold the rest.`, estimate, warnings);
+    }
+    if (pool.budgetBytes !== null && needBytes > pool.headroomBytes) {
+        return result('insufficient-now', `Needs about ${gib(needBytes)} of shared memory; ${gib(pool.headroomBytes)} of this agent's `
+            + `${gib(pool.budgetBytes)} budget is free now.`, estimate, warnings, 'budget_insufficient_now');
     }
     if (Number.isFinite(disk?.freeBytes) && remainingDownloadBytes * 1.05 > disk.freeBytes) {
         return result('insufficient-now', `The weights need ${gib(remainingDownloadBytes * 1.05)} of free disk (download or copy, with a 5 % reserve); `
@@ -158,11 +196,17 @@ function userSizing(model, fields) {
 // copy the controller admits with) the values are the file's own, unless the
 // file's architecture could not be used (`sizingUnchecked`); a snapshot's
 // config.json was checked against its digest at lookup.
-function userSizingWarning(fields, runner = 'llama-server', model = {}) {
+function userSizingWarning(fields, runner = 'llama-server', model = {}, { automaticShare = false } = {}) {
     const vllm = runner === 'vllm';
+    // vLLM's need is its share plus its runner RAM. An admin's share does not depend on the entry's sizing; an empty
+    // share is sized to the model (D16), so there the KV figure sizes the default share and the need follows it.
+    const vllmTail = automaticShare
+        ? `an understated value can make the default share, which is sized from the weights, this KV cache and vLLM's overhead, too small `
+            + 'and loosens the check that they fit it, so vLLM may fail to start; its memory need (the share plus its runner RAM) follows that default share.'
+        : `an understated value only loosens the check that the weights and KV cache fit vLLM's share, so vLLM may fail `
+            + 'to start; its memory need (the share plus its runner RAM) does not depend on it.';
     const tail = vllm
-        ? `an understated value only loosens the check that the weights and KV cache fit vLLM's share, so vLLM may fail `
-            + 'to start; its memory need (the share plus its runner RAM) does not depend on it.'
+        ? vllmTail
         : 'an understated value makes the estimate too small, and then only the memory guard stands behind the run.';
     if (model.sizingSource === 'gguf-header' && typeof model.sizingUnchecked === 'string' && !vllm) {
         return `Sized with ${fields.join(', ')} from the GGUF header read when the model was added; the downloaded file's header could not `
@@ -233,6 +277,7 @@ export function estimateUnifiedLlamaServer({ model, source, params, memory: host
         cacheRamBytes,
         unifiedBytes: needBytes,
         poolBytes: host.totalBytes ?? null,
+        physicalPoolBytes: physicalPoolOf(host),
         floorBytes: UNIFIED.floorBytes,
         hostReserveBytes: UNIFIED.hostReserveBytes,
         envelope: null,
@@ -271,6 +316,7 @@ export function admitUnifiedLlamaServer({ runnerId, model, source, params, memor
             cacheRamBytes,
             unifiedBytes: rectangle.bufferBytes + rectangle.transientBytes + UNIFIED.runtimeBytes + cacheRamBytes,
             poolBytes: memory.totalBytes ?? null,
+            physicalPoolBytes: physicalPoolOf(memory),
             floorBytes: UNIFIED.floorBytes,
             envelope: { loadMode: rectangle.loadMode, maxCtx: rectangle.maxCtx, maxParallel: rectangle.maxParallel, mtp: rectangle.mtp },
             measured: false,
@@ -296,9 +342,10 @@ export function admitUnifiedLlamaServer({ runnerId, model, source, params, memor
         if (estimate.userSizing.length) warnings.push(userSizingWarning(estimate.userSizing, 'llama-server', model));
     }
     if (unreadable(memory)) return result('incompatible', MEMORY_UNREADABLE, estimate, warnings);
-    return poolVerdict({
+    return unifiedVerdict({
         needBytes: estimate.unifiedBytes, memory, disk, remainingDownloadBytes, result, estimate, warnings,
         tooLarge: 'Reduce the context or the parallel slots, or pick a smaller model.',
+        fixedBytes: estimate.cacheRamBytes + UNIFIED.runtimeBytes,
     });
 }
 
@@ -307,11 +354,14 @@ export function admitUnifiedLlamaServer({ runnerId, model, source, params, memor
  * (the vLLM runner's switch, DS004/DS005). Nothing here is measured. vLLM's
  * --gpu-memory-utilization is a share of the device's total, which on an
  * integrated GPU is the whole pool (MemTotal), so its budget is that share of
- * MemTotal; the API server and engine hold RAM beyond it (the dedicated
- * measurement, unvalidated here). An empty share is computed from this
- * snapshot: at most VLLM_MAX_UTILIZATION, within the host reserve, and
- * leaving the floor free. The run must still fit the reserve and the floor,
- * its weights and KV cache must fit the budget, and the memory guard watches it.
+ * the physical MemTotal; the API server and engine hold RAM beyond it (the
+ * dedicated measurement, unvalidated here). An empty share is sized to the
+ * model (D16): weights, a KV cache for maxModelLen x maxNumSeqs tokens and
+ * vLLM's overhead, at least 0.1, and never above what is free now with the host
+ * reserve and the floor kept, or what this agent's Ploinky RAM budget leaves
+ * (at most VLLM_MAX_UTILIZATION). The run must still fit the reserve, the
+ * floor and the budget (unifiedVerdict), its single-sequence weights and KV
+ * cache must fit the share, and the memory guard watches it.
  */
 export function admitUnifiedVllm({ model, source, params, memory, disk, remainingDownloadBytes = 0 }, result) {
     const weightsBytes = source.size || 0;
@@ -325,11 +375,12 @@ export function admitUnifiedVllm({ model, source, params, memory, disk, remainin
     const warnings = ['Experimental: vLLM has not been measured on unified memory. Its share and its RAM beyond it are estimates, '
         + `and the memory guard stops it at once if available memory falls below ${gib(UNIFIED.floorBytes)}.`];
     if (defaulted.length) warnings.push(defaultedWarning(defaulted));
-    if (sizing.length) warnings.push(userSizingWarning(sizing, 'vllm', model));
+    const automaticShare = params.gpuMemoryUtilization === null || params.gpuMemoryUtilization === undefined;
+    if (sizing.length) warnings.push(userSizingWarning(sizing, 'vllm', model, { automaticShare }));
     const base = {
         weightsBytes, kvBytes, overheadBytes: VLLM_OVERHEAD_BYTES, runnerRamBytes: VLLM_RUNNER_RAM_BYTES, floorBytes: UNIFIED.floorBytes,
-        hostReserveBytes: UNIFIED.hostReserveBytes, poolBytes: memory.totalBytes ?? null, envelope: null, measured: false,
-        experimental: true, defaulted, userSizing: sizing,
+        hostReserveBytes: UNIFIED.hostReserveBytes, poolBytes: memory.totalBytes ?? null, physicalPoolBytes: physicalPoolOf(memory),
+        envelope: null, measured: false, experimental: true, defaulted, userSizing: sizing,
         basis: 'experimental estimate, not measured: vLLM\'s share of the shared pool plus its runner RAM (measured on a dedicated GPU); '
             + `the share must hold the snapshot, a KV cache for maxModelLen at ${kvPerToken} bytes per token `
             + `(${defaulted.includes('memory.kvBytesPerToken') ? 'a default: the entry has no memory.kvBytesPerToken' : 'from the model entry'}) `
@@ -341,36 +392,65 @@ export function admitUnifiedVllm({ model, source, params, memory, disk, remainin
         return result('incompatible', `${model.displayName}'s weight size is unknown, so it cannot be sized on unified memory.`, base, warnings);
     }
     // vLLM reads its share against the device's total, which here is the
-    // physical pool: a container budget bounds the bytes (memory.totalBytes and
-    // availableBytes are the capped view) but never changes that denominator.
-    const denominator = Number.isFinite(memory.physicalTotalBytes) && memory.physicalTotalBytes > 0
-        ? memory.physicalTotalBytes : memory.totalBytes;
+    // physical pool: a container budget bounds the bytes but never changes that
+    // denominator, and the host reserve and floor are taken from the physical
+    // pool only (unifiedVerdict). The budget bounds the share on its own.
+    const pool = unifiedPool(memory);
+    const denominator = pool.total;
     const shareOf = (bytes) => Math.floor((bytes / denominator) * 100) / 100;
-    const maxShare = Math.min(VLLM_MAX_UTILIZATION, shareOf(memory.totalBytes - UNIFIED.hostReserveBytes - VLLM_RUNNER_RAM_BYTES));
+    const ceilShareOf = (bytes) => Math.ceil((bytes / denominator) * 100) / 100;
+    const ramBudget = pool.budgetBytes;
+    const reserveShare = shareOf(pool.total - UNIFIED.hostReserveBytes - VLLM_RUNNER_RAM_BYTES);
+    const budgetShare = ramBudget === null ? Infinity : shareOf(ramBudget - VLLM_RUNNER_RAM_BYTES);
+    const maxShare = Math.min(VLLM_MAX_UTILIZATION, reserveShare, budgetShare);
+    const hostFreeShare = shareOf(pool.available - UNIFIED.floorBytes - VLLM_RUNNER_RAM_BYTES);
+    const headroomShare = pool.headroomBytes === null ? Infinity : shareOf(pool.headroomBytes - VLLM_RUNNER_RAM_BYTES);
+    const freeShare = Math.min(maxShare, hostFreeShare, headroomShare);
+    // The model-sized default: what the model needs with a KV cache for every
+    // concurrent sequence, at least the schema minimum. A direct caller that
+    // omits maxNumSeqs, or passes an unusable value, sizes for one sequence.
+    const sequences = Number.isFinite(params.maxNumSeqs) && params.maxNumSeqs > 0 ? params.maxNumSeqs : 1;
+    const sizedBytes = Math.round(weightsBytes + kvBytes * sequences + VLLM_OVERHEAD_BYTES);
+    const modelShare = Math.max(0.1, ceilShareOf(sizedBytes));
     const adminSet = params.gpuMemoryUtilization !== null && params.gpuMemoryUtilization !== undefined;
-    const share = adminSet
-        ? params.gpuMemoryUtilization
-        : Math.min(maxShare, shareOf(memory.availableBytes - UNIFIED.floorBytes - VLLM_RUNNER_RAM_BYTES));
+    const share = adminSet ? params.gpuMemoryUtilization : Math.min(modelShare, freeShare);
     const budgetBytes = Math.round(Math.max(0, share) * denominator);
-    const estimate = { ...base, gpuMemoryUtilization: share, budgetBytes, unifiedBytes: budgetBytes + VLLM_RUNNER_RAM_BYTES };
-    // Whether it can ever fit: in the admin's share, or in the largest share the reserve allows.
+    const estimate = { ...base, sizedBytes, gpuMemoryUtilization: share, budgetBytes,
+        unifiedBytes: budgetBytes + VLLM_RUNNER_RAM_BYTES };
+    // A Ploinky RAM budget that cannot hold the smallest share (0.1) with the runner's RAM
+    // refuses for good, before the fit checks, whatever else is small.
+    if (!adminSet && maxShare < 0.1 && ramBudget !== null && shareOf(ramBudget - VLLM_RUNNER_RAM_BYTES) < 0.1) {
+        return result('incompatible', `vLLM needs at least a 0.1 share of the pool (${gib(0.1 * denominator)}) plus ${gib(VLLM_RUNNER_RAM_BYTES)} `
+            + `for its runner; this agent's Ploinky RAM budget is ${gib(ramBudget)}.`, estimate, warnings, 'budget_exceeded');
+    }
+    // Whether it can ever fit: in the admin's share, or in the largest share the reserve and the budget allow.
     const ceilingBytes = adminSet ? budgetBytes : Math.max(0, maxShare) * denominator;
     if (modelBytes > ceilingBytes) {
+        // The budget names itself only when it, and not the reserve or the 0.9 cap, holds the largest share down.
+        const budgetBinds = !adminSet && ramBudget !== null && budgetShare < Math.min(reserveShare, VLLM_MAX_UTILIZATION);
         return result('incompatible', `Its weights, a KV cache for ${params.maxModelLen} tokens and vLLM's overhead need about ${gib(modelBytes)}; `
             + (adminSet
                 ? `gpuMemoryUtilization ${share} gives vLLM about ${gib(budgetBytes)}. Raise it, or leave it empty.`
-                : `vLLM can have at most about ${gib(ceilingBytes)} of this pool. Reduce maxModelLen or pick a smaller model.`),
-        estimate, warnings);
+                : budgetBinds
+                    ? `this agent's Ploinky RAM budget is ${gib(ramBudget)}, which leaves vLLM at most about ${gib(ceilingBytes)} of this pool. `
+                        + 'Reduce maxModelLen or pick a smaller model, or raise the budget.'
+                    : `vLLM can have at most about ${gib(ceilingBytes)} of this pool. Reduce maxModelLen or pick a smaller model.`),
+        estimate, warnings, budgetBinds ? 'budget_exceeded' : null);
     }
     if (!adminSet && share < 0.1) {
+        // The budget's headroom names itself when it, not the host's free memory, is the smaller term.
+        if (headroomShare < hostFreeShare) {
+            return result('insufficient-now', `vLLM needs at least a 0.1 share of the pool (${gib(0.1 * denominator)}) plus ${gib(VLLM_RUNNER_RAM_BYTES)} `
+                + `for its runner; ${gib(pool.headroomBytes)} of this agent's ${gib(ramBudget)} budget is free now.`, estimate, warnings, 'budget_insufficient_now');
+        }
         return result('insufficient-now', `vLLM needs at least a 0.1 share of the pool with ${gib(UNIFIED.floorBytes)} kept free; `
-            + `${gib(memory.availableBytes)} is available now.`, estimate, warnings);
+            + `${gib(pool.available)} is available now.`, estimate, warnings);
     }
     if (modelBytes > budgetBytes) {
         return result('insufficient-now', `Its weights, KV cache and vLLM's overhead need about ${gib(modelBytes)}; the ${share} share that is free now `
             + `gives about ${gib(budgetBytes)}.`, estimate, warnings);
     }
-    return poolVerdict({
+    return unifiedVerdict({
         needBytes: estimate.unifiedBytes, memory, disk, remainingDownloadBytes, result, estimate, warnings,
         tooLarge: 'Lower gpuMemoryUtilization or leave it empty.',
     });

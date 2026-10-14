@@ -600,9 +600,14 @@ test('the user-sizing warning names where the values came from, and keeps its te
     const GIB = 1024 * MIB;
     const typedLlama = 'Sized with memory.kvBytesPerToken from the model entry added at run time. Nothing checks these against the weights: '
         + 'an understated value makes the estimate too small, and then only the memory guard stands behind the run.';
-    const typedVllm = 'Sized with memory.kvBytesPerToken from the model entry added at run time. Nothing checks these against the weights: '
+    // With an admin share the need is the share plus the runner's RAM, whatever the entry says; with an empty share the
+    // KV figure sizes the default share (D16), so the need follows it.
+    const typedVllmAdmin = 'Sized with memory.kvBytesPerToken from the model entry added at run time. Nothing checks these against the weights: '
         + 'an understated value only loosens the check that the weights and KV cache fit vLLM\'s share, so vLLM may fail to start; '
         + 'its memory need (the share plus its runner RAM) does not depend on it.';
+    const typedVllm = 'Sized with memory.kvBytesPerToken from the model entry added at run time. Nothing checks these against the weights: '
+        + 'an understated value can make the default share, which is sized from the weights, this KV cache and vLLM\'s overhead, too small '
+        + 'and loosens the check that they fit it, so vLLM may fail to start; its memory need (the share plus its runner RAM) follows that default share.';
     const entry = (extra) => ({ id: 'u', displayName: 'u', seed: false, architecture: 'dense', contextLength: 32768, memory: { kvBytesPerToken: 12288 }, ...extra });
     const source = { type: 'huggingface', size: 400 * MIB };
     const disk = { freeBytes: 100_000 * MIB };
@@ -619,6 +624,10 @@ test('the user-sizing warning names where the values came from, and keeps its te
             model, source, params: { maxModelLen: 4096, kvCacheDtype: 'auto', gpuMemoryUtilization: null },
             memory: { totalBytes: 128 * GIB, availableBytes: 100 * GIB }, disk,
         }, admissionResult).warnings,
+        vllmAdmin: (model) => admitUnifiedVllm({
+            model, source, params: { maxModelLen: 4096, kvCacheDtype: 'auto', gpuMemoryUtilization: 0.3 },
+            memory: { totalBytes: 128 * GIB, availableBytes: 100 * GIB }, disk,
+        }, admissionResult).warnings,
     };
     const sizedWith = (runner, extra) => warningsOf[runner](entry(extra)).find((warning) => warning.startsWith('Sized with'));
     // Typed by hand, or marked manual: the text that was always there, word for word.
@@ -626,6 +635,7 @@ test('the user-sizing warning names where the values came from, and keeps its te
         assert.equal(sizedWith('cpu', extra), typedLlama, JSON.stringify(extra));
         assert.equal(sizedWith('unified', extra), typedLlama, JSON.stringify(extra));
         assert.equal(sizedWith('vllm', extra), typedVllm, JSON.stringify(extra));
+        assert.equal(sizedWith('vllmAdmin', extra), typedVllmAdmin, JSON.stringify(extra));
     }
     // A GGUF header read at lookup: says it will be read again, and what happens until then.
     for (const runner of ['cpu', 'unified']) {
@@ -641,7 +651,8 @@ test('the user-sizing warning names where the values came from, and keeps its te
             /^Sized with memory\.kvBytesPerToken from the config\.json of the model's pinned snapshot, checked against its digest when the model was looked up\. Nothing checks these against the weights: an understated value makes the estimate too small/, runner);
     }
     // vLLM loads a snapshot, not the GGUF file, so nothing reads that header again for its run.
-    assert.match(sizedWith('vllm', { sizingSource: 'gguf-header' }), /^Sized with memory\.kvBytesPerToken from the GGUF header read when the model was added; vLLM loads the snapshot, not that file, so nothing reads it again: an understated value only loosens/);
+    assert.match(sizedWith('vllmAdmin', { sizingSource: 'gguf-header' }), /^Sized with memory\.kvBytesPerToken from the GGUF header read when the model was added; vLLM loads the snapshot, not that file, so nothing reads it again: an understated value only loosens/);
+    assert.match(sizedWith('vllm', { sizingSource: 'gguf-header' }), /^Sized with memory\.kvBytesPerToken from the GGUF header read when the model was added; vLLM loads the snapshot, not that file, so nothing reads it again: an understated value can make the default share/);
     assert.match(sizedWith('vllm', { sizingSource: 'gguf-header', sizingVerified: true }), /nothing reads it again/);
     assert.match(sizedWith('vllm', { sizingSource: 'config.json' }), /^Sized with memory\.kvBytesPerToken from the config\.json of the model's pinned snapshot/);
     // A catalog entry carries no user-sizing warning whatever it says, and an entry with no user sizing has none.

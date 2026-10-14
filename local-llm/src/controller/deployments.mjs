@@ -473,7 +473,11 @@ export function createController({
         // limit), only when there is one: unlimited overviews are unchanged.
         const budget = overviewBudget({ observation: memoryBudgetOf(snap), cpuQuota: cpuQuotaOf(snap), gpuShare: gpuBudgetOf(snap, env).gpuShare });
         const withBudget = (limits) => (budget ? { ...(limits || {}), budget } : limits);
-        if (profile === 'unified') return withBudget({ floorBytes: UNIFIED.floorBytes, hostReserveBytes: UNIFIED.hostReserveBytes });
+        // The reserve and floor apply to the physical pool only, and a Ploinky RAM budget does not cover GPU allocations (DS005).
+        if (profile === 'unified') {
+            return withBudget({ floorBytes: UNIFIED.floorBytes, hostReserveBytes: UNIFIED.hostReserveBytes,
+                reserveAppliesTo: 'physical', budgetCoversGpuAllocations: false });
+        }
         if (profile !== 'cpu' && profile !== 'venus' && profile !== 'apu') return withBudget(null);
         const pool = cpuPool(snap?.memory, snap?.cgroupMemory);
         if (!Number.isFinite(pool.totalBytes)) return withBudget(null);
@@ -1221,11 +1225,15 @@ export function createController({
                 breach('stopped: host memory cannot be read (/proc/meminfo), so the runner cannot be watched');
                 return;
             }
+            const physicalAvailable = available;
             available = withinBudget(available, memory);
             if (available === undefined) {
                 budgetUnreadable();
                 return;
             }
+            // The floor is the host's: the unified profile compares it with the physical MemAvailable
+            // only. A budget's headroom is not a second pool that takes the floor again (DS005).
+            if (unified) available = physicalAvailable;
             if (pooled) {
                 const stats = guardStats;
                 const pressure = readPressure();

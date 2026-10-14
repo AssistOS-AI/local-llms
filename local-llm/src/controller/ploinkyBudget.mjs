@@ -131,7 +131,10 @@ export function memoryBudgetOf(snapshot) {
  * The RAM a dedicated or unified policy sizes against, capped once by a known
  * finite budget: total = min(raw total, limit), available = min(raw available,
  * effective total, headroom). The raw figures are kept beside it
- * (`physicalTotalBytes` for utilization denominators). Without a finite budget
+ * (`physicalTotalBytes` for utilization denominators, `physicalAvailableBytes`,
+ * `budgetBytes` and `budgetHeadroomBytes` for the unified policy, which checks
+ * the host reserve and floor against the physical pool and the budget on its
+ * own, DS005). Without a finite budget
  * the original object is returned unchanged.
  */
 export function effectiveMemory(memory, observation) {
@@ -151,6 +154,9 @@ export function effectiveMemory(memory, observation) {
         physicalTotalBytes: raw.totalBytes ?? null,
         physicalAvailableBytes: raw.availableBytes ?? null,
         budgetBytes: observation.finiteMemoryBytes,
+        // What the budget leaves now (limit less current use), kept apart from the
+        // capped availableBytes so the unified policy can check it on its own.
+        budgetHeadroomBytes: observation.headroomBytes,
     };
 }
 

@@ -51,6 +51,9 @@ const UNIFIED_GPU = Object.freeze({
 const NO_GPU = Object.freeze({ available: false, state: 'absent', reason: 'No NVIDIA GPU is attached to this agent.' });
 
 const reserveOf = {
+    // The unified policy keeps its host reserve and floor out of the budget (DS005): the budget's
+    // headroom must hold the need itself, so nothing is added to it.
+    none: () => 0,
     margin: () => RAM_MARGIN_BYTES,
     offloadFloor: (estimate) => estimate.ramFloorBytes,
     poolFloor: (estimate) => estimate.floorBytes,
@@ -70,8 +73,8 @@ export const PATHS = Object.freeze({
     'cpu-llama': { gpu: NO_GPU, runnerId: 'llama.cpp', modelId: 'qwen2.5-0.5b-instruct-q4_k_m', need: 'ramBytes', reserve: 'poolFloor' },
     'cpu-llama-build': { gpu: NO_GPU, runnerId: 'llama.cpp-cpu', modelId: 'qwen2.5-0.5b-instruct-q4_k_m', need: 'ramBytes', reserve: 'poolFloor' },
     'cpu-ollama': { gpu: NO_GPU, runnerId: 'ollama', modelId: 'gpt-oss-20b', need: 'ramBytes', reserve: 'poolFloor' },
-    'unified-llama': { gpu: UNIFIED_GPU, runnerId: 'llama.cpp', modelId: 'qwen2.5-0.5b-instruct-q4_k_m', need: 'unifiedBytes', reserve: 'poolFloor' },
-    'unified-vllm': { gpu: UNIFIED_GPU, runnerId: 'vllm', modelId: 'qwen3-4b-awq-unified', params: { gpuMemoryUtilization: 0.3 }, need: 'unifiedBytes', reserve: 'poolFloor' },
+    'unified-llama': { gpu: UNIFIED_GPU, runnerId: 'llama.cpp', modelId: 'qwen2.5-0.5b-instruct-q4_k_m', need: 'unifiedBytes', reserve: 'none' },
+    'unified-vllm': { gpu: UNIFIED_GPU, runnerId: 'vllm', modelId: 'qwen3-4b-awq-unified', params: { gpuMemoryUtilization: 0.3 }, need: 'unifiedBytes', reserve: 'none' },
 });
 
 // A file value of {error: CODE} exists but cannot be read; undefined is absent.
@@ -210,12 +213,15 @@ async function requirement(t, name) {
     const need = estimate[spec.need];
     const reserve = reserveOf[spec.reserve](estimate);
     assert.ok(Number.isSafeInteger(need) && need > 0, `${name}: R is a positive byte count`);
-    assert.ok(Number.isSafeInteger(reserve) && reserve > 0, `${name}: F is a positive byte count`);
+    assert.ok(Number.isSafeInteger(reserve) && (reserve > 0 || spec.reserve === 'none'), `${name}: F is a positive byte count, or none for the unified policy`);
     assert.ok(need + reserve + 1 < DERIVE_HEADROOM, `${name}: R+F fits the derivation headroom`);
     const value = { need, reserve };
     derived.set(name, value);
     return value;
 }
+
+// The budget shortage of the unified paths carries its own reason code; every other path has none.
+const shortageCode = (name) => (name.startsWith('unified-') ? 'budget_insufficient_now' : undefined);
 
 async function assertRefusedNow(h, requestId, { reasonCode = undefined } = {}) {
     await assert.rejects(() => h.run(requestId), (error) => {
@@ -240,7 +246,7 @@ async function assertAccepted(h, requestId) {
 async function releaseRetry(t, name) {
     const { need, reserve } = await requirement(t, name);
     const h = harness(t, PATHS[name], withHeadroom(0));
-    await assertRefusedNow(h, 'request-held');
+    await assertRefusedNow(h, 'request-held', { reasonCode: shortageCode(name) });
     // The limit is unchanged; only current use falls (memory released).
     h.setCgroup(withHeadroom(need + reserve));
     const accepted = await h.run('request-released');
@@ -254,13 +260,13 @@ async function releaseRetry(t, name) {
 }
 
 const VECTORS = Object.freeze({
-    zero: async (t, name) => assertRefusedNow(harness(t, PATHS[name], withHeadroom(0)), 'request-zero'),
+    zero: async (t, name) => assertRefusedNow(harness(t, PATHS[name], withHeadroom(0)), 'request-zero', { reasonCode: shortageCode(name) }),
     'over-current': async (t, name) => assertRefusedNow(
-        harness(t, PATHS[name], { max: `${CAP}\n`, current: `${CAP + GIB}\n` }), 'request-over'),
-    'one-byte': async (t, name) => assertRefusedNow(harness(t, PATHS[name], withHeadroom(1)), 'request-one'),
+        harness(t, PATHS[name], { max: `${CAP}\n`, current: `${CAP + GIB}\n` }), 'request-over', { reasonCode: shortageCode(name) }),
+    'one-byte': async (t, name) => assertRefusedNow(harness(t, PATHS[name], withHeadroom(1)), 'request-one', { reasonCode: shortageCode(name) }),
     'reserve-minus-one': async (t, name) => {
         const { need, reserve } = await requirement(t, name);
-        await assertRefusedNow(harness(t, PATHS[name], withHeadroom(need + reserve - 1)), 'request-minus');
+        await assertRefusedNow(harness(t, PATHS[name], withHeadroom(need + reserve - 1)), 'request-minus', { reasonCode: shortageCode(name) });
     },
     'exact-reserve': async (t, name) => {
         const { need, reserve } = await requirement(t, name);
@@ -280,7 +286,7 @@ const VECTORS = Object.freeze({
 test('LL.controller-zero-no-launch', async (t) => {
     // Known zero headroom is exhausted memory, not an absent reading: refused now, nothing launched.
     for (const name of ['llama', 'cpu-llama', 'unified-llama']) {
-        await assertRefusedNow(harness(t, PATHS[name], withHeadroom(0)), `request-zero-${name.replace(/\W/g, '')}`);
+        await assertRefusedNow(harness(t, PATHS[name], withHeadroom(0)), `request-zero-${name.replace(/\W/g, '')}`, { reasonCode: shortageCode(name) });
     }
 });
 

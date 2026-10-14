@@ -1,7 +1,10 @@
 {
   "_meta": {
     "generatedFrom": "a84617d (Phase 2 fix round head, before llama.cpp-cpu, the agent lock and the Ollama pin)",
-    "how": "git archive a84617d local-llm; collectOverviews and collectOllamaRuns from tests/overview-scenarios.mjs with that tree's modules and an installer over the image lock alone"
+    "how": "git archive a84617d local-llm; collectOverviews and collectOllamaRuns from tests/overview-scenarios.mjs with that tree's modules and an installer over the image lock alone",
+    "deliberateChanges": [
+      "GB10 hardware-limits Phase 1 (P1-L), unified profile only: the overview limits gain reserveAppliesTo and budgetCoversGpuAllocations; the unified vLLM gpuMemoryUtilization description states the model-sized default and the budget bound; llama.cpp unified estimates gain physicalPoolBytes. No other value differs; the dedicated scenarios are untouched."
+    ]
   },
   "scenarios": {
     "dedicated, amd64 image": {
@@ -2459,7 +2462,9 @@
       },
       "limits": {
         "floorBytes": 8589934592,
-        "hostReserveBytes": 17179869184
+        "hostReserveBytes": 17179869184,
+        "reserveAppliesTo": "physical",
+        "budgetCoversGpuAllocations": false
       },
       "hardware": {
         "gpu": {
@@ -2642,7 +2647,7 @@
                 "maximum": 0.95,
                 "default": null,
                 "title": "GPU memory utilization",
-                "description": "Share of the shared memory pool vLLM may use for weights and KV cache; empty takes what is free now, keeping the host reserve and the floor (at most 0.9)."
+                "description": "Share of the shared memory pool vLLM may use for weights and KV cache; empty sizes it to the model (weights, a KV cache for maxModelLen × maxNumSeqs tokens and vLLM's overhead, at least 0.1), never above what is free now with the host reserve and the floor kept, or what this agent's Ploinky RAM budget leaves (at most 0.9)."
               },
               "dtype": {
                 "type": "string",
@@ -2886,6 +2891,7 @@
                   "cacheRamBytes": 8589934592,
                   "unifiedBytes": 11507786056,
                   "poolBytes": 128453013504,
+                  "physicalPoolBytes": 128453013504,
                   "floorBytes": 8589934592,
                   "hostReserveBytes": 17179869184,
                   "envelope": null,
@@ -3052,6 +3058,7 @@
                   "cacheRamBytes": 8589934592,
                   "unifiedBytes": 22496862536,
                   "poolBytes": 128453013504,
+                  "physicalPoolBytes": 128453013504,
                   "floorBytes": 8589934592,
                   "hostReserveBytes": 17179869184,
                   "envelope": null,
@@ -3190,7 +3197,9 @@
       },
       "limits": {
         "floorBytes": 8589934592,
-        "hostReserveBytes": 17179869184
+        "hostReserveBytes": 17179869184,
+        "reserveAppliesTo": "physical",
+        "budgetCoversGpuAllocations": false
       },
       "hardware": {
         "gpu": {
@@ -3371,7 +3380,7 @@
                 "maximum": 0.95,
                 "default": null,
                 "title": "GPU memory utilization",
-                "description": "Share of the shared memory pool vLLM may use for weights and KV cache; empty takes what is free now, keeping the host reserve and the floor (at most 0.9)."
+                "description": "Share of the shared memory pool vLLM may use for weights and KV cache; empty sizes it to the model (weights, a KV cache for maxModelLen × maxNumSeqs tokens and vLLM's overhead, at least 0.1), never above what is free now with the host reserve and the floor kept, or what this agent's Ploinky RAM budget leaves (at most 0.9)."
               },
               "dtype": {
                 "type": "string",
@@ -3617,6 +3626,7 @@
                   "cacheRamBytes": 8589934592,
                   "unifiedBytes": 11507786056,
                   "poolBytes": 128453013504,
+                  "physicalPoolBytes": 128453013504,
                   "floorBytes": 8589934592,
                   "hostReserveBytes": 17179869184,
                   "envelope": null,
@@ -3794,6 +3804,7 @@
                   "cacheRamBytes": 8589934592,
                   "unifiedBytes": 22496862536,
                   "poolBytes": 128453013504,
+                  "physicalPoolBytes": 128453013504,
                   "floorBytes": 8589934592,
                   "hostReserveBytes": 17179869184,
                   "envelope": null,
