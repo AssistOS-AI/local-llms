@@ -1258,8 +1258,13 @@ test('the Add form offers the enabled registries that serve the Source kind, and
         { id: 'mirror', kind: 'oci', url: 'https://r.example.com', authOrigins: ['https://a.example.com', 'https://b.example.com'] });
     assert.deepEqual(registryFromForm({ id: 'm', kind: 'huggingface', url: 'https://h.example.com', label: 'M', authOrigins: 'https://ignored.example.com' }).registry,
         { id: 'm', kind: 'huggingface', url: 'https://h.example.com', label: 'M' }, 'authOrigins are OCI only');
-    assert.deepEqual(registryFromForm({ id: 'm', kind: 'huggingface', url: 'https://h.example.com' }, { editing: true }).registry,
+    assert.deepEqual(registryFromForm({ id: 'm', kind: 'huggingface', url: 'https://h.example.com' }, { editing: true, record: { kind: 'huggingface', authOrigins: [] } }).registry,
         { id: 'm', url: 'https://h.example.com' }, 'the kind is fixed once the registry exists');
+    // Editing an OCI registry's URL leaves the sign-in origins out unless they were changed, so they can follow the new URL.
+    const record = { kind: 'oci', authOrigins: ['https://r.example.com'] };
+    const edited = (authOrigins) => registryFromForm({ id: 'm', url: 'https://new.example.com', authOrigins }, { editing: true, record }).registry;
+    assert.deepEqual(edited('https://r.example.com'), { id: 'm', url: 'https://new.example.com' });
+    assert.deepEqual(edited('https://r.example.com https://a.example.com'), { id: 'm', url: 'https://new.example.com', authOrigins: ['https://r.example.com', 'https://a.example.com'] });
 });
 
 // A Registries tab on plain objects: the credential form's two inputs, the list region and the controls the lock disables.

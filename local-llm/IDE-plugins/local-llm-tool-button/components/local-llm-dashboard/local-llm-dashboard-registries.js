@@ -84,16 +84,21 @@ export function registriesListHtml(list = {}) {
     return `${note}<ul class="local-llm-runner-list" aria-label="Registries">${items || '<li class="settings-card-meta">No registries.</li>'}</ul>`;
 }
 
-/** The `registry` object `local_llm_registry_save` takes, from the add or edit form's fields. */
-export function registryFromForm(values = {}, { editing = false } = {}) {
+/**
+ * The `registry` object `local_llm_registry_save` takes, from the add or edit form's fields. Editing a registry (`record`
+ * is what the agent listed) leaves `authOrigins` out unless they were changed, so the agent can let origins that only
+ * followed the old URL follow a new one.
+ */
+export function registryFromForm(values = {}, { editing = false, record = null } = {}) {
     const value = (name) => String(values[name] ?? '').trim();
     const registry = { id: value('id') };
     if (!editing && value('kind')) registry.kind = value('kind');
     if (value('url')) registry.url = value('url');
     if (value('label')) registry.label = value('label');
-    const kind = editing ? '' : value('kind');
+    const kind = editing ? record?.kind : value('kind');
     const origins = value('authOrigins').split(/[\s,]+/).filter(Boolean);
-    if (origins.length && (kind === 'oci' || editing)) registry.authOrigins = origins;
+    const unchanged = editing && origins.join(' ') === (record?.authOrigins || []).join(' ');
+    if (origins.length && kind === 'oci' && !unchanged) registry.authOrigins = origins;
     return { registry };
 }
 
@@ -212,7 +217,7 @@ export class RegistriesTab {
         if (this.dashboard.busy || !form?.reportValidity?.()) return;
         const editing = Boolean(this.editingId);
         const values = Object.fromEntries(REGISTRY_FIELDS.map((name) => [name, form.elements?.[name]?.value]));
-        const { registry } = registryFromForm(values, { editing });
+        const { registry } = registryFromForm(values, { editing, record: this.items.find((entry) => entry.id === this.editingId) });
         const saved = await this.dashboard.withBusy(`Saving ${registry.id}…`, async () => this.call('local_llm_registry_save', { registry }));
         if (!saved) return;
         this.closeForm();
