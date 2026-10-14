@@ -1094,6 +1094,27 @@ export async function verifyArtifact({ root, artifact, ...options }) {
     return verifyInto({ paths: artifactPaths({ root, artifact }), artifact, identityKeys: IDENTITY_KEYS, ...options });
 }
 
+// One pinned file at paths its store laid out (an OCI registry's, ociStore.mjs), with the same order, resume, free
+// space, verification and records as any model file. `paths` is `{ root, dir, file, partial, identity, meta }` and
+// `identityKeys` the fields its records hold. The file is read from `url` through `fetchImpl`, which has no default
+// and carries any credential itself: no token is added here. Provenance names `url`.
+export async function downloadPinned({ paths, artifact, identityKeys, url, fetchImpl, ...options }) {
+    if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl is required');
+    return downloadInto({ ...options, paths, artifact, identityKeys, url, token: '', fetchImpl });
+}
+
+export async function verifyPinned({ paths, artifact, identityKeys, url = null, ...options }) {
+    return verifyInto({ ...options, paths, artifact, identityKeys, url: url ?? paths.file });
+}
+
+export async function inspectPinned({ paths, artifact, identityKeys, fsApi = fs }) {
+    return inspectWith(fsApi, paths, artifact, identityKeys);
+}
+
+export async function planPinned({ paths, artifact, identityKeys, candidates = [], inspected, fsApi = fs }) {
+    return planWith(fsApi, paths, artifact, identityKeys, candidates, inspected);
+}
+
 function fileSource({ url, size, sha256, target, allowHttp = false }) {
     let parsed;
     try {
@@ -1155,7 +1176,11 @@ async function removeEmptyParents(base, dir) {
 
 // Freed bytes count each inode whose last link this removal takes (R8).
 export async function removeArtifact({ root, artifact, fsApi = fs }) {
-    const paths = artifactPaths({ root, artifact });
+    return removePinned({ paths: artifactPaths({ root, artifact }), fsApi });
+}
+
+/** A pinned file, its partial, its records and stale copies, then the directories it leaves empty up to `paths.root`. */
+export async function removePinned({ paths, fsApi = fs }) {
     const targets = [paths.file, paths.partial, paths.identity, paths.meta, ...await stagingFiles(fsApi, paths)];
     const stats = [];
     for (const target of targets) {
@@ -1167,7 +1192,7 @@ export async function removeArtifact({ root, artifact, fsApi = fs }) {
     }
     const freed = freedBytes(stats);
     for (const target of targets) await fsApi.promises.rm(target, { force: true });
-    await removeEmptyParents(path.resolve(root), path.dirname(paths.file));
+    await removeEmptyParents(paths.root, path.dirname(paths.file));
     return freed;
 }
 

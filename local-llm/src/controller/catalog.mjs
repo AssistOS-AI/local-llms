@@ -21,6 +21,7 @@ import path from 'node:path';
 
 import { LocalLlmError } from '../errors.mjs';
 import { PROFILES, UNIFIED_LOAD_MODES } from './profiles.mjs';
+import { validateOciSnapshotSource, validateOciSource } from './ociSource.mjs';
 import { REGISTRY_ID_RE } from './registries.mjs';
 import { CATALOG_V3, CATALOG_V4, METADATA_PROFILES, validateVenusParams, validateVenusMeasurements } from './venusMetadata.mjs';
 
@@ -100,7 +101,7 @@ export function splitGgufFiles(firstFile) {
 // A split GGUF (DS002): still the gguf weight format; `file` is the first
 // shard, which llama.cpp opens, and `shards` pins every shard by size and
 // sha256, in canonical order, in one directory. `size` is their sum.
-function validateShards(value, field) {
+export function validateShards(value, field) {
     const expected = splitGgufFiles(value.file);
     if (!expected) throw invalid(`${field}.file must be the first shard (…-00001-of-0000N.gguf) when shards are given`, `${field}.file`);
     if (expected.length > MAX_SHARDS) throw invalid(`${field} has more than ${MAX_SHARDS} shards`, `${field}.shards`);
@@ -282,15 +283,28 @@ export function validateOllamaSource(value, field) {
     });
 }
 
+// A format that more than one source type serves validates by `type`; the message names every type it takes.
+function byType(validators) {
+    const types = Object.keys(validators);
+    return (value, field, options) => {
+        if (!plainObject(value)) return validators[types[0]](value, field, options);
+        const validate = Object.hasOwn(validators, value.type) ? validators[value.type] : null;
+        if (!validate) throw invalid(`${field}.type must be ${types.join(' or ')}`, `${field}.type`);
+        return validate(value, field, options);
+    };
+}
+
 /**
- * The weight formats a source may be given for, and the source type each
- * takes. A runner reads exactly one format (its `weightFormat`).
+ * The weight formats a source may be given for, and the source types each
+ * takes (the first is the Hugging Face one). A runner reads exactly one format (its `weightFormat`).
  */
 export const WEIGHT_FORMATS = Object.freeze({
-    gguf: Object.freeze({ sourceType: 'huggingface', label: 'GGUF file', validate: validateHuggingFaceSource }),
+    gguf: Object.freeze({ sourceType: 'huggingface', label: 'GGUF file',
+        validate: byType({ huggingface: validateHuggingFaceSource, oci: (value, field, options) => validateOciSource(value, field, options) }) }),
     ollama: Object.freeze({ sourceType: 'ollama', label: 'Ollama tag', validate: (value, field) => validateOllamaSource(value, field) }),
-    // Hugging Face snapshots: safetensors for vLLM, EXL3 for TabbyAPI.
-    hf: Object.freeze({ sourceType: 'hf-snapshot', label: 'Hugging Face snapshot', validate: validateHfSnapshotSource }),
+    // Snapshots: safetensors for vLLM (from Hugging Face or an OCI registry), EXL3 for TabbyAPI.
+    hf: Object.freeze({ sourceType: 'hf-snapshot', label: 'Hugging Face snapshot',
+        validate: byType({ 'hf-snapshot': validateHfSnapshotSource, 'oci-snapshot': (value, field, options) => validateOciSnapshotSource(value, field, options) }) }),
     exl3: Object.freeze({ sourceType: 'hf-snapshot', label: 'EXL3 snapshot', validate: validateHfSnapshotSource }),
 });
 

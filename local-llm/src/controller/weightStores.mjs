@@ -21,7 +21,8 @@
 // test of the store alone) uses the downloader's own fetch.
 //
 // A source may name a registry (a Hugging Face-compatible mirror, or ModelScope). Its files
-// and keys live under `_r/<id>`, derived from the source alone. The registry
+// and keys live under `_r/<id>`, derived from the source alone; `oci` and
+// `oci-snapshot` sources live under `_oci/<id>` (ociStore.mjs). The registry
 // itself is consulted only by `pin` and `fetch`, through a session resolved
 // once at their start (registrySessions.mjs); `key`, `state`, `plan`,
 // `recheck`, `remove` and `paths` never read the registry list.
@@ -42,6 +43,7 @@ import {
     verifySnapshotFile,
 } from './downloader.mjs';
 import { resolveModelScopeGguf, resolveModelScopeSnapshot } from './modelScope.mjs';
+import { createOciStores } from './ociStore.mjs';
 import { createSessions } from './registrySessions.mjs';
 import { freedBytes, orderCandidates, regularFilesIn, walkShared } from './workspaceReuse.mjs';
 import { splitGgufFiles, splitGgufName } from './catalog.mjs';
@@ -81,6 +83,8 @@ export function createWeightStores({
     registryTransport = null,
     // The registry service (registries.mjs), consulted by `pin` and `fetch` only.
     registries = null,
+    // The OCI stores' pinned-file download (tests); the downloader's by default.
+    downloadOci = undefined,
 }) {
     const sessions = createSessions({ env, hfBaseUrl, registryTransport, registries });
     // The id prefix of a mirror's keys; huggingface.co's keys carry none.
@@ -440,5 +444,8 @@ export function createWeightStores({
         },
     });
 
-    return Object.freeze({ huggingface, ollama, 'hf-snapshot': hfSnapshot });
+    const oci = createOciStores({
+        ggufRoot, hfRoot, sessions, lazyCandidates, sharedIndex, sumPlans, fsApi, ...(downloadOci ? { download: downloadOci } : {}),
+    });
+    return Object.freeze({ huggingface, ollama, 'hf-snapshot': hfSnapshot, ...oci });
 }

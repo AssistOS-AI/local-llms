@@ -1417,7 +1417,7 @@ export function createController({
     // not sized at all. A well-formed header whose architecture this reader cannot use checks nothing: the stored (or
     // defaulted) values stand, a warning says so, and the Run goes on.
     async function verifiedGgufSizing(model, source, file) {
-        if (model.seed || model.sizingSource !== 'gguf-header' || source?.type !== 'huggingface') return model;
+        if (model.seed || model.sizingSource !== 'gguf-header' || !['huggingface', 'oci'].includes(source?.type)) return model;
         let sizing;
         try {
             sizing = ggufSizing((await readGgufHeaderFile(file)).kv);

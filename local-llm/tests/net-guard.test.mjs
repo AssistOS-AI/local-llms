@@ -428,8 +428,14 @@ function runSeeds() {
     const onMs = (model, id, format) => validateModel({
         ...model, id, sources: { ...model.sources, [format]: { ...model.sources[format], registry: 'ms' } },
     }, { seed: true });
+    const oci = { registry: 'reg', repository: OCI_REPO, tag: 'latest', manifestDigest: OCI.gguf.digest };
+    const onOci = [
+        validateModel({ ...gguf, id: 'a5o-gguf', sources: { gguf: { type: 'oci', ...oci, layout: 'cncf', file: 'm.gguf', size: gguf.sources.gguf.size, sha256: 'e'.repeat(64) } } }, { seed: true }),
+        validateModel({ ...snapshot, id: 'a5o-snapshot', sources: { hf: { type: 'oci-snapshot', ...oci, files: [{ path: 'config.json', size: CONFIG.length, sha256: 'f'.repeat(64) },
+            { path: 'model.safetensors', size: snapshot.sources.hf.size, sha256: '9'.repeat(64) }] } } }, { seed: true }),
+    ];
     return [gguf, split, snapshot, onMirror(gguf, 'a5m-gguf', 'gguf'), onMirror(split, 'a5m-split', 'gguf'), onMirror(snapshot, 'a5m-snapshot', 'hf'),
-        onMs(gguf, 'a5s-gguf', 'gguf'), onMs(split, 'a5s-split', 'gguf'), onMs(snapshot, 'a5s-snapshot', 'hf')];
+        onMs(gguf, 'a5s-gguf', 'gguf'), onMs(split, 'a5s-split', 'gguf'), onMs(snapshot, 'a5s-snapshot', 'hf'), ...onOci];
 }
 
 // Earlier requests of a flow answered in process, so the row's own request is the one that reaches the transport.
@@ -437,12 +443,12 @@ function runSeeds() {
 const answered = (answers) => {
     const served = new Map();
     return (url) => {
-        for (const [key, { body, times = Infinity, status = 200 }] of Object.entries(answers)) {
+        for (const [key, { body, times = Infinity, status = 200, headers = {} }] of Object.entries(answers)) {
             if (key.startsWith('~') ? !new RegExp(key.slice(1)).test(url.pathname) : url.pathname !== key) continue;
             const count = served.get(key) ?? 0;
             if (count >= times) return null;
             served.set(key, count + 1);
-            return cannedResponse(status, body, { 'content-type': 'application/json' });
+            return cannedResponse(status, body, { 'content-type': 'application/json', ...(typeof headers === 'function' ? headers(url) : headers) });
         }
         return null;
     };
@@ -523,14 +529,71 @@ function msRows() {
         { name: 'snapshot Run', kind: 'run', answers: null, target: repoRead, act: (c) => c.run({ modelId: 'a5s-snapshot', runnerId: 'vllm', requestId: 'a5-run-snap-02' }) },
     ].map((row) => ({ ...row, name: `ms: ${row.name}`, registry: 'ms' }));
 }
-const A5_ROWS = [...a5Rows(), ...a5Rows({ prefix: '/p', registry: 'mirror' }), ...msRows()];
+// The same rows for the OCI registry `reg` (`https://localhost:<port>`, its own origin its only auth origin): the manifest
+// HEAD and GET, the token realm a 401 names, the config blob, a GGUF header, config.json, the pins and both Runs. A Run
+// row's twin answers the retry after the dropped connection with 404, so the Run ends after one backoff.
+const OCI_REPO = 'ai/m';
+const ociDigest = (bytes) => `sha256:${crypto.createHash('sha256').update(bytes).digest('hex')}`;
+function ociImage(format, layers, legacy = false) {
+    const config = Buffer.from(JSON.stringify({ config: { format } }));
+    const describe = (mediaType, bytes, filepath) => ({ mediaType, digest: ociDigest(bytes), size: bytes.length, ...(filepath ? { annotations: { 'org.cncf.model.filepath': filepath } } : {}) });
+    const bytes = Buffer.from(JSON.stringify({
+        schemaVersion: 2, mediaType: 'application/vnd.oci.image.manifest.v1+json', ...(legacy ? {} : { artifactType: 'application/vnd.cncf.model.manifest.v1+json' }),
+        config: describe(legacy ? 'application/vnd.docker.ai.model.config.v0.1+json' : 'application/vnd.cncf.model.config.v1+json', config),
+        layers: layers.map(([mediaType, body, filepath]) => describe(mediaType, body, filepath)),
+    }));
+    return { bytes, digest: ociDigest(bytes), config, configDigest: ociDigest(config), layers: layers.map(([, body]) => ociDigest(body)) };
+}
+const OCI = {
+    gguf: ociImage('gguf', [['application/vnd.cncf.model.weight.v1.raw', Buffer.from('gguf bytes'), 'm.gguf']]),
+    snap: ociImage('safetensors', [['application/vnd.cncf.model.weight.config.v1.raw', CONFIG, 'config.json'], ['application/vnd.cncf.model.weight.v1.raw', Buffer.from('st'), 'model.safetensors']]),
+    split: ociImage('gguf', [['application/vnd.docker.ai.gguf.v3', Buffer.from('shard one')], ['application/vnd.docker.ai.gguf.v3', Buffer.from('shard two')]], true),
+};
+function ociRows() {
+    const v2 = `/v2/${OCI_REPO}`;
+    const head = (tag, image) => ({ [`${v2}/manifests/${tag}`]: { body: '', headers: { 'docker-content-digest': image.digest } } });
+    const get = (image) => ({ [`${v2}/manifests/${image.digest}`]: { body: image.bytes } });
+    const config = (image) => ({ [`${v2}/blobs/${image.configDigest}`]: { body: image.config } });
+    const gguf = { ...head('latest', OCI.gguf), ...get(OCI.gguf) };
+    const snap = { ...head('snap', OCI.snap), ...get(OCI.snap) };
+    const challenge = { [`${v2}/manifests/latest`]: { status: 401, body: '', headers: (url) => ({ 'www-authenticate': `Bearer realm="${url.origin}/token",service="reg"` }) } };
+    const lookup = (extra = {}) => (c) => c.lookupModel({ registry: 'reg', repo: OCI_REPO, ...extra });
+    const add = (sources) => (c) => c.addModel({ id: 'a5-added', sources });
+    const source = (type, tag) => ({ type, registry: 'reg', repository: OCI_REPO, tag });
+    const blob = /^\/v2\/ai\/m\/blobs\/sha256:[0-9a-f]{64}$/;
+    return [
+        { name: 'lookup: manifest HEAD', kind: 'lookup', answers: null, target: `${v2}/manifests/latest`, act: lookup() },
+        { name: 'lookup: token realm', kind: 'lookup', answers: challenge, target: /^\/token$/, act: lookup() },
+        { name: 'lookup: manifest GET', kind: 'lookup', answers: head('latest', OCI.gguf), target: `${v2}/manifests/${OCI.gguf.digest}`, act: lookup() },
+        { name: 'lookup: config blob', kind: 'lookup', answers: gguf, target: `${v2}/blobs/${OCI.gguf.configDigest}`, act: lookup() },
+        { name: 'lookup: GGUF header', kind: 'lookup', answers: { ...gguf, ...config(OCI.gguf) }, target: `${v2}/blobs/${OCI.gguf.layers[0]}`, act: lookup({ file: 'm.gguf' }) },
+        { name: 'lookup: config.json', kind: 'lookup', answers: { ...snap, ...config(OCI.snap) }, target: `${v2}/blobs/${OCI.snap.layers[0]}`, act: lookup({ revision: 'snap', format: 'hf' }) },
+        { name: 'oci pin: manifest HEAD', kind: 'pin', answers: null, target: `${v2}/manifests/latest`, act: add({ gguf: source('oci', 'latest') }) },
+        { name: 'oci pin: config blob', kind: 'pin', answers: gguf, target: `${v2}/blobs/${OCI.gguf.configDigest}`, act: add({ gguf: source('oci', 'latest') }) },
+        { name: 'legacy split pin: shard header', kind: 'pin', answers: { ...head('split', OCI.split), ...get(OCI.split) }, target: `${v2}/blobs/${OCI.split.layers[0]}`,
+            act: add({ gguf: source('oci', 'split') }) },
+        { name: 'oci-snapshot pin: config blob', kind: 'pin', answers: snap, target: `${v2}/blobs/${OCI.snap.configDigest}`, act: add({ hf: source('oci-snapshot', 'snap') }) },
+        { name: 'GGUF Run', kind: 'run', answers: null, once: true, target: blob, act: (c) => c.run({ modelId: 'a5o-gguf', runnerId: 'llama.cpp', requestId: 'a5-run-gguf-03' }) },
+        { name: 'snapshot Run', kind: 'run', answers: null, once: true, target: blob, act: (c) => c.run({ modelId: 'a5o-snapshot', runnerId: 'vllm', requestId: 'a5-run-snap-03' }) },
+    ].map((row) => ({ ...row, name: `oci: ${row.name}`, registry: 'reg' }));
+}
+// The twin of a Run row: the first request reaches the listener; its retry is answered 404 in process.
+const onceThen404 = () => {
+    let sent = false;
+    return () => {
+        if (!sent) { sent = true; return null; }
+        return cannedResponse(404, '');
+    };
+};
+const A5_ROWS = [...a5Rows(), ...a5Rows({ prefix: '/p', registry: 'mirror' }), ...msRows(), ...ociRows()];
 
 // The admin registry list a mirror row's controller starts with: `mirror` at a name that resolves to loopback.
 function writeMirrorRegistry(dataDir, port) {
     fs.mkdirSync(path.join(dataDir, 'state'), { recursive: true });
     fs.writeFileSync(path.join(dataDir, 'state', 'registries.json'), JSON.stringify({
         version: 1,
-        registries: [{ id: 'mirror', kind: 'huggingface', url: `https://localhost:${port}/p` }, { id: 'ms', kind: 'modelscope', url: `https://localhost:${port}` }],
+        registries: [{ id: 'mirror', kind: 'huggingface', url: `https://localhost:${port}/p` }, { id: 'ms', kind: 'modelscope', url: `https://localhost:${port}` },
+            { id: 'reg', kind: 'oci', url: `https://localhost:${port}` }],
         builtins: {},
     }));
 }
@@ -630,7 +693,7 @@ test('every model path goes through the production transport (with its twin)', {
         // Twin: the same rows with loopback allowed reach the listener, each through its own request.
         for (const row of A5_ROWS) {
             const inner = createTestTransport({ allowHttp: false });
-            const scripted = scriptedTransport(inner, row.answers ? answered(row.answers) : () => null);
+            const scripted = scriptedTransport(inner, row.once ? onceThen404() : row.answers ? answered(row.answers) : () => null);
             const before = listener.stats.connections;
             const dir = dataDir();
             if (row.registry) writeMirrorRegistry(dir, listener.port);

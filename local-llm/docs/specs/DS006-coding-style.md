@@ -37,6 +37,9 @@ local-llms/
     src/controller/modelLookup.mjs                the Hugging Face lookup behind the Add model form (DS002)
     src/controller/modelScope.mjs                 the ModelScope commit, listing, pins and lookup (DS002)
     src/controller/netGuard.mjs                   the network guard every model request goes through (DS002)
+    src/controller/ociSource.mjs                  the oci and oci-snapshot source shapes and OCI name rules (DS002)
+    src/controller/ociRegistry.mjs                the OCI session, manifests, dialects, pins and lookup (DS002)
+    src/controller/ociStore.mjs                   the oci and oci-snapshot weight stores under _oci/<id> (DS002)
     src/controller/registries.mjs                 the model registries, their admin operations and snapshots (DS002)
     src/controller/registryCredentials.mjs        registry credentials, encrypted at rest (DS002)
     src/controller/registryLookup.mjs             the lookup input and its dispatch by registry kind (DS002)
@@ -53,7 +56,7 @@ local-llms/
 - **Validate at the boundary and fail closed.** Tool input has strict schemas (`additionalProperties: false`); runner parameters are validated against the runner's schema for the hardware profile; identifiers use restrictive patterns (ids `[a-z0-9][a-z0-9._-]{1,63}`, request ids `[A-Za-z0-9_-]{8,128}`), which keeps path traversal and injection out of argv, file paths and registry entries. Values that cannot be read (a GPU's memory, `/proc/meminfo`) mean "unknown" and refuse, never a default.
 - **No shell between input and a process.** Runners and helpers are spawned with an argv array, never through a shell, and get a minimal environment (DS003): never the agent's secrets or tokens.
 - **Errors carry a code.** Controller errors are `LocalLlmError` with a stable `code` (for example `admission_incompatible`, `runner_unavailable`) and a message that says what to do.
-- **Nothing unpinned at run time.** Downloads are pinned by commit, size and sha256 (models, DS002) or by URL, size and sha256 (runners, DS004).
+- **Nothing unpinned at run time.** Downloads are pinned by commit or manifest digest, size and sha256 (models, DS002) or by URL, size and sha256 (runners, DS004).
 - **No per-runner branches** in the controller, the tools or the dashboard: a runner is an adapter plus data (DS000).
 - **English** for all documentation, specifications and comments. Comments say why, not what.
 
