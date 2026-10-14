@@ -139,8 +139,8 @@ const physicalPoolOf = (memory) => {
 // RAM budget, when there is one, whether the budget can ever hold it; U3 the
 // floor whether the physical pool holds it now; U4 the budget's headroom
 // whether the budget holds it now; U5 the disk. The budget is advisory for GPU
-// bytes: GPU allocations are not charged to it, so this estimate is what keeps
-// the run inside it. `fixedBytes` is the part of the need no parameter lowers
+// device memory: cudaMalloc buffers are not charged to it, so this estimate is
+// what keeps the run inside it. `fixedBytes` is the part of the need no parameter lowers
 // (llama.cpp's prompt cache and runtime), named in U2 as the smallest budget's floor.
 function unifiedVerdict({ needBytes, memory, disk, remainingDownloadBytes, result, estimate, warnings, tooLarge, fixedBytes = null }) {
     const pool = unifiedPool(memory);
@@ -150,7 +150,7 @@ function unifiedVerdict({ needBytes, memory, disk, remainingDownloadBytes, resul
     }
     if (pool.budgetBytes !== null && needBytes > pool.budgetBytes) {
         return result('incompatible', `Needs about ${gib(needBytes)} of shared memory; this agent's Ploinky RAM budget is ${gib(pool.budgetBytes)}. `
-            + 'On unified memory GPU allocations are not charged to that budget, so local-llm keeps the run inside it by this estimate. '
+            + 'On unified memory GPU device memory (cudaMalloc) is not charged to that budget, so local-llm keeps the run inside it by this estimate. '
             + `The smallest budget this run fits is about ${gib(needBytes)}`
             + (fixedBytes === null ? '.' : `, of which ${gib(fixedBytes)} is llama.cpp's fixed prompt cache and runtime.`),
         estimate, warnings, 'budget_exceeded');

@@ -473,7 +473,7 @@ export function createController({
         // limit), only when there is one: unlimited overviews are unchanged.
         const budget = overviewBudget({ observation: memoryBudgetOf(snap), cpuQuota: cpuQuotaOf(snap), gpuShare: gpuBudgetOf(snap, env).gpuShare });
         const withBudget = (limits) => (budget ? { ...(limits || {}), budget } : limits);
-        // The reserve and floor apply to the physical pool only, and a Ploinky RAM budget does not cover GPU allocations (DS005).
+        // The reserve and floor apply to the physical pool only, and a Ploinky RAM budget does not cover GPU device memory (cudaMalloc, DS005).
         if (profile === 'unified') {
             return withBudget({ floorBytes: UNIFIED.floorBytes, hostReserveBytes: UNIFIED.hostReserveBytes,
                 reserveAppliesTo: 'physical', budgetCoversGpuAllocations: false });

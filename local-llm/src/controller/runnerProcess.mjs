@@ -206,8 +206,8 @@ function wholeLines(emit) {
 // echoes request bodies (LM Studio) uses it to keep them out of the log.
 /**
  * Make a runner the kernel OOM killer's first choice. Its memory on an
- * integrated GPU is invisible to RSS, the OOM score and memory cgroups (DS005),
- * so without this an out-of-memory kill would pick another process. Raising
+ * integrated GPU (cudaMalloc device memory) is outside RSS, the OOM score and
+ * memory cgroups (DS005), so without this an out-of-memory kill would pick another process. Raising
  * the value needs no privilege, and children the runner starts inherit it.
  */
 export function setOomScoreAdj(pid, value = 1000, { fsApi = fs } = {}) {

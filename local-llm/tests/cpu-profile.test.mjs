@@ -823,7 +823,7 @@ test('controller: the overview and status report the decision, the limits and pe
     // The unified profile reports its constants and what they apply to, and the other profiles none.
     const unified = harness(t, { imageContract: null, snap: () => ({ ...cpuSnapshot(), gpu: structuredClone(gb10) }) });
     const uni = await unified.controller.overview();
-    // Deliberate change (GB10 hardware limits, DS005): the reserve and floor apply to the physical pool, and a Ploinky RAM budget does not cover GPU allocations.
+    // Deliberate change (GB10 hardware limits, DS005): the reserve and floor apply to the physical pool, and a Ploinky RAM budget does not cover GPU device memory (cudaMalloc).
     assert.deepEqual([uni.profile, uni.profileDecision.cause, uni.limits], ['unified', 'gpu',
         { floorBytes: UNIFIED.floorBytes, hostReserveBytes: UNIFIED.hostReserveBytes, reserveAppliesTo: 'physical', budgetCoversGpuAllocations: false }]);
     const dedicated = harness(t, { imageContract: null, snap: () => ({ ...cpuSnapshot(), gpu: structuredClone(x86) }) });

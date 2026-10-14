@@ -1,6 +1,6 @@
 // Unified memory under a Ploinky RAM budget (DS003, DS005): the host reserve and
 // the floor belong to the physical pool, the budget is checked on its own and is
-// advisory for GPU bytes, and vLLM's automatic share is sized to the model.
+// advisory for GPU device memory, and vLLM's automatic share is sized to the model.
 //
 // Admission is driven through admit() with the snapshot's budget observation
 // attached as the production reader attaches it; the controller is used where a
@@ -88,7 +88,7 @@ test('LL.budget-boundary', () => {
     assert.equal(short.reasonCode, 'budget_exceeded');
     // The words name the estimate, the budget, the advisory nature and the smallest budget with its fixed part.
     assert.equal(short.reason, `Needs about ${(NEED / GIB).toFixed(1)} GiB of shared memory; this agent's Ploinky RAM budget is ${((NEED - 1) / GIB).toFixed(1)} GiB. `
-        + 'On unified memory GPU allocations are not charged to that budget, so local-llm keeps the run inside it by this estimate. '
+        + 'On unified memory GPU device memory (cudaMalloc) is not charged to that budget, so local-llm keeps the run inside it by this estimate. '
         + `The smallest budget this run fits is about ${(NEED / GIB).toFixed(1)} GiB, of which 9.5 GiB is llama.cpp's fixed prompt cache and runtime.`);
     assert.equal(UNIFIED.cacheRamMiB * MIB + UNIFIED.runtimeBytes, 9.5 * GIB, 'the fixed part at the defaults');
     // The spec 95 assertion matches both texts.
