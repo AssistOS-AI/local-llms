@@ -9,13 +9,16 @@ import util from 'node:util';
 
 import {
     DownloadError,
+    PIN_METADATA_MAX_BYTES,
+    TREE_PAGE_REJECTED,
     artifactPaths,
     downloadArtifact,
     inspectArtifact,
+    nextTreePage,
     removeArtifact,
     resolveHuggingFaceArtifact,
 } from '../src/controller/downloader.mjs';
-import { VIAS, fetchVia, named } from './net-fixture.mjs';
+import { VIAS, fakeServer, fetchVia, named } from './net-fixture.mjs';
 
 const REPO = 'org/model-GGUF';
 const FILE = 'model-Q4_K_M.gguf';
@@ -661,4 +664,74 @@ for (const via of VIAS) test(named('a metadata request that never answers fails 
         (err) => err instanceof DownloadError && err.code === 'RESOLVE_FAILED' && err.details?.reason === 'timeout',
     );
     assert.ok(Date.now() - started < 2000);
+});
+
+test('a next tree page is followed only on the base origin and under its path prefix', () => {
+    const next = (link, base = 'https://hf.test') => nextTreePage(link, base);
+    assert.equal(next(null), null, 'no Link header: the listing is complete');
+    assert.equal(next('<https://hf.test/x>; rel="prev"'), null, 'no next link');
+    assert.equal(next('<https://hf.test/api/models/a/b/tree/c?cursor=2>; rel="next"'), 'https://hf.test/api/models/a/b/tree/c?cursor=2');
+    assert.equal(next('</api/models/a/b/tree/c?cursor=2>; rel=next'), 'https://hf.test/api/models/a/b/tree/c?cursor=2');
+    assert.equal(next('<https://cdn.test/api/models/a/b/tree/c>; rel="next"'), TREE_PAGE_REJECTED, 'another origin');
+    assert.equal(next('<http://hf.test/api/models/a/b/tree/c>; rel="next"'), TREE_PAGE_REJECTED, 'another scheme is another origin');
+    assert.equal(next('<https://hf.test:8443/api/models/a/b/tree/c>; rel="next"'), TREE_PAGE_REJECTED, 'another port is another origin');
+    assert.equal(next('<https://[bad>; rel="next"'), TREE_PAGE_REJECTED, 'an unparsable link is not followed and not ignored');
+    // A base URL with a path prefix (a mirror): links under the prefix, and root-relative API links taken under it.
+    const base = 'https://mirror.test/p';
+    assert.equal(next('<https://mirror.test/p/api/models/a/b/tree/c?cursor=2>; rel="next"', base), 'https://mirror.test/p/api/models/a/b/tree/c?cursor=2');
+    assert.equal(next('</api/models/a/b/tree/c?cursor=2>; rel="next"', base), 'https://mirror.test/p/api/models/a/b/tree/c?cursor=2');
+    assert.equal(next('<https://mirror.test/other/api/models/a/b/tree/c>; rel="next"', base), TREE_PAGE_REJECTED, 'outside the prefix');
+    assert.equal(next('<https://mirror.test/px/api/models/a/b/tree/c>; rel="next"', base), TREE_PAGE_REJECTED, 'a longer segment is not under the prefix');
+});
+
+// A small hub for the pin's metadata rules: the revision, and a tree whose answer a test chooses.
+async function metadataHub(t, tree) {
+    const hub = await fakeServer((req, res, url) => {
+        const json = (value, headers = {}) => {
+            const text = JSON.stringify(value);
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(text), ...headers });
+            res.end(text);
+        };
+        if (url.pathname === `/api/models/${REPO}/revision/main`) return json({ sha: COMMIT });
+        if (url.pathname === `/api/models/${REPO}/tree/${COMMIT}`) return tree(req, res, json);
+        res.writeHead(404, { 'Content-Length': 0 });
+        res.end();
+    });
+    t.after(() => hub.close());
+    return hub;
+}
+
+for (const via of VIAS) test(named('a GGUF pin whose listing names a next page that is not followed fails as listing-incomplete', via), { timeout: TIMEOUT }, async (t) => {
+    const other = await fakeServer((req, res) => { res.writeHead(200, { 'Content-Length': 2 }); res.end('[]'); });
+    t.after(() => other.close());
+    const elsewhere = { Link: `<${other.origin}/api/models/${REPO}/tree/${COMMIT}?cursor=1>; rel="next"` };
+    const listingIncomplete = (err) => err instanceof DownloadError && err.code === 'RESOLVE_FAILED' && err.details?.reason === 'listing-incomplete';
+    // The file would be on the page that is not read.
+    const missing = await metadataHub(t, (req, res, json) => json([treeEntries()[0]], elsewhere));
+    await assert.rejects(resolveHuggingFaceArtifact({ repo: REPO, file: FILE, baseUrl: missing.origin, fetchImpl: fetchVia(via, missing.origin) }), listingIncomplete);
+    // A listing that names a page it does not let the agent read is not trusted, even beside the file.
+    const beside = await metadataHub(t, (req, res, json) => json(treeEntries(), elsewhere));
+    await assert.rejects(resolveHuggingFaceArtifact({ repo: REPO, file: FILE, baseUrl: beside.origin, fetchImpl: fetchVia(via, beside.origin) }), listingIncomplete);
+    assert.deepEqual(other.requests, [], 'the other origin was never contacted');
+    // The same listing with a same-origin next page pins the file.
+    const paged = await metadataHub(t, (req, res, json) => (new URL(req.url, 'http://h').searchParams.get('cursor')
+        ? json(treeEntries())
+        : json([treeEntries()[0]], { Link: `</api/models/${REPO}/tree/${COMMIT}?cursor=1>; rel="next"` })));
+    const pinned = await resolveHuggingFaceArtifact({ repo: REPO, file: FILE, baseUrl: paged.origin, fetchImpl: fetchVia(via, paged.origin) });
+    assert.equal(pinned.sha256, SHA256);
+});
+
+for (const via of VIAS) test(named('a pin reads at most 8 MiB of a metadata answer and stops when its signal aborts', via), { timeout: TIMEOUT }, async (t) => {
+    assert.equal(PIN_METADATA_MAX_BYTES, 8 * MIB);
+    const big = await metadataHub(t, (req, res, json) => json([...treeEntries(), { type: 'file', path: 'pad.txt', size: 1, oid: 'e'.repeat(40), pad: 'x'.repeat(9 * MIB) }]));
+    await assert.rejects(resolveHuggingFaceArtifact({ repo: REPO, file: FILE, baseUrl: big.origin, fetchImpl: fetchVia(via, big.origin) }),
+        (err) => err instanceof DownloadError && err.code === 'RESOLVE_FAILED' && err.details?.reason === 'too-large');
+    // A tree that never answers: the pin ends when its signal aborts (a drain), long before the 15 s metadata limit.
+    const silent = await metadataHub(t, () => {});
+    const stop = new AbortController();
+    setTimeout(() => stop.abort(), 100);
+    const started = Date.now();
+    await assert.rejects(resolveHuggingFaceArtifact({ repo: REPO, file: FILE, baseUrl: silent.origin, fetchImpl: fetchVia(via, silent.origin), signal: stop.signal }),
+        (err) => err instanceof DownloadError && err.code === 'RESOLVE_FAILED');
+    assert.ok(Date.now() - started < 2000, `the pin ended after ${Date.now() - started} ms`);
 });

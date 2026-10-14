@@ -205,6 +205,13 @@ test('the connected address is judged again, and a refused one gets no request b
         assert.equal(listener.stats.connections, 1, 'the socket was opened');
         assert.equal(listener.stats.bytes, 0, 'and nothing was written to it');
         assert.equal(calls, 2);
+        // Twin: the connected address allowed too, so the request is written (and the counter counts it).
+        const twin = createGuardedTransport({ resolve: scriptedResolver({ 'flip.test': ['127.0.0.1'] }), classify: allowing(['127.0.0.1'], classifyAddress),
+            allowHttp: true, keepAlive: false, headersTimeoutMs: 200 });
+        await assert.rejects(twin(`http://flip.test:${listener.port}/secret`, { headers: { Authorization: 'Bearer secret-token' } }),
+            (error) => error.code === 'HEADERS_TIMEOUT');
+        assert.equal(listener.stats.connections, 2);
+        assert.ok(listener.stats.bytes > 0, 'the allowed connection carried the request');
     } finally {
         await listener.close();
     }
