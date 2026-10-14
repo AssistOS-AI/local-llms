@@ -32,3 +32,4 @@ __pycache__/
 /.agents/skills/review-specs
 /.agents/skills/unslop
 /.agents/skills/web-design
+.DS_Store
