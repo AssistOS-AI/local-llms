@@ -9,6 +9,7 @@
 // Strict RAM readings (ploinkyBudget.mjs): zero is a known value (no headroom),
 // not an absent one; an unknown reading under a finite limit is refused before
 // any policy runs (budgetGuard).
+import { unifiedTupleQualified } from './hardware.mjs';
 import { budgetGuard, effectiveGpu, effectiveMemory, gpuBudgetOf, knownByte, memoryBudgetOf } from './ploinkyBudget.mjs';
 import { APU_BUDGET_REASON, isVulkanProfile, vulkanRefusal } from './vulkan.mjs';
 
@@ -442,17 +443,21 @@ export function admit({ runner, model, source, params, snapshot, remainingDownlo
             + 'restart local-llm to use it.', {});
     }
     if (gpuBudget.state === 'known') {
-        if (selected !== 'dedicated' || gpu.memoryModel !== 'dedicated') {
+        // A share on the qualified GB10 is the one unified case (the same tuple as the Phase 1b stop). The GPU has no
+        // memory figures of its own there: totalBytes and freeBytes stay null (never 0) and effectiveGpu is not applied;
+        // the share reaches the unified policy as `gpuShare` (DS005).
+        const unifiedShare = selected === 'unified' && gpu.memoryModel === 'unified' && unifiedTupleQualified(rawGpu);
+        if (!unifiedShare && (selected !== 'dedicated' || gpu.memoryModel !== 'dedicated')) {
             return result('incompatible', 'Ploinky GPU sharing requires a verified dedicated-memory GPU. Unified or unknown memory-model GPUs cannot use this MPS share; clear it through Ploinky.', {}, [], 'gpu_share_unsupported');
         }
-        if (![gpu.totalBytes, gpu.freeBytes].every((bytes) => Number.isFinite(bytes) && bytes >= 0 && bytes <= Number.MAX_SAFE_INTEGER) || gpu.totalBytes <= 0) {
+        if (!unifiedShare && (![gpu.totalBytes, gpu.freeBytes].every((bytes) => Number.isFinite(bytes) && bytes >= 0 && bytes <= Number.MAX_SAFE_INTEGER) || gpu.totalBytes <= 0)) {
             return result('insufficient-now', 'The physical GPU capacity or current free memory cannot be read under this Ploinky share. Retry after repairing GPU telemetry.', {}, [], 'gpu_budget_unreadable');
         }
         if (typeof runner.qualifyMps === 'function') {
             const qualification = runner.qualifyMps({ ...runnerContext, gpu: rawGpu });
             if (!qualification.qualified) return result('incompatible', qualification.fix, {}, [], qualification.code);
         }
-        gpu = effectiveGpu(rawGpu, gpuBudget);
+        if (!unifiedShare) gpu = effectiveGpu(rawGpu, gpuBudget);
     }
     if (selected === 'unified') {
         if (typeof runner.admitUnified !== 'function') {
@@ -461,6 +466,7 @@ export function admit({ runner, model, source, params, snapshot, remainingDownlo
         // Capped once by a finite budget; the physical total stays beside it.
         return runner.admitUnified({
             model, source, params, gpu, memory: effectiveMemory(snapshot.memory || {}, budget), disk: snapshot.disk, remainingDownloadBytes,
+            gpuShare: gpuBudget.state === 'known' ? gpuBudget.gpuShare : null,
         });
     }
     return runner.admit({

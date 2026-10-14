@@ -451,10 +451,156 @@ test('LL.partial-mps-refused', async (t) => {
 });
 for (const vector of INVALID_MPS_VALUES.entries()) test(`invalid MPS vector: ${vector[0]}`, (t) => checkInvalidMps(t, vector));
 
-test('LL.unified-share-refused', async (t) => {
-    const h = gpuHarness(t, { gpu: { ...TEST_GPU, memoryModel: 'unified', totalBytes: null, freeBytes: null } });
-    await assert.rejects(h.run({}, { runnerId: 'llama.cpp', modelId: 'qwen2.5-0.5b-instruct-q4_k_m' }), (error) => error.details?.admission?.reasonCode === 'gpu_share_unsupported');
-    assert.equal(h.started.length, 0);
+// A known Ploinky GPU share on a unified GPU (DS005): refused everywhere except the qualified GB10 tuple (PCI 0x2E1210DE with
+// driver 580.178.04), where llama.cpp is admitted with the share bounding its GPU part and the RAM budget its host part.
+const UNIFIED_GB10 = Object.freeze({ available: true, name: 'NVIDIA GB10', memoryModel: 'unified', driverVersion: '580.178.04',
+    totalBytes: null, usedBytes: null, freeBytes: null, processes: [],
+    device: { pciDeviceId: '0x2E1210DE', computeCapability: '12.1', addressingMode: 'ATS' } });
+const UNQUALIFIED_GB10 = Object.freeze({ ...UNIFIED_GB10, driverVersion: '580.159.03' });
+const SHARE_REFUSAL = 'Ploinky GPU sharing requires a verified dedicated-memory GPU. Unified or unknown memory-model GPUs cannot use this MPS share; clear it through Ploinky.';
+const SMALL_MODEL = 'qwen2.5-0.5b-instruct-q4_k_m';
+const MPS_KEYS = ['CUDA_MPS_ACTIVE_THREAD_PERCENTAGE', 'CUDA_MPS_PINNED_DEVICE_MEM_LIMIT', 'CUDA_MPS_PIPE_DIRECTORY'];
+const mpsEnvOf = (processEnv) => Object.fromEntries(Object.entries(processEnv).filter(([key]) => key.startsWith('CUDA_MPS_')));
+const shareEnv = (vramMiB) => ({ ...MPS_ENV, CUDA_MPS_PINNED_DEVICE_MEM_LIMIT: `0=${vramMiB}M` });
+
+// The admission verdict of the small llama.cpp model on a 128 GiB / 120 GiB unified host under a share and a RAM budget.
+function shareVerdict({ gpu = UNIFIED_GB10, env = MPS_ENV, budget = null, memory = { totalBytes: 128 * GIB, availableBytes: 120 * GIB } } = {}) {
+    const model = loadSeedCatalog().find((entry) => entry.id === SMALL_MODEL);
+    const runner = getRunner('llama.cpp');
+    const snapshot = { gpu: structuredClone(gpu), memory, disk: { freeBytes: 1024 * GIB }, cgroupMemory: budget };
+    return admit({ runner, model, source: model.sources.gguf, params: runner.normalizeParams({}, { model, profile: 'unified' }), snapshot, profile: 'unified',
+        gpuBudget: parseMpsBudget(env) });
+}
+
+test('LL.unified-share-refused: an unqualified unified GPU still refuses a share with the existing text; the qualified tuple accepts it', async (t) => {
+    // The synthetic unified GPU of Phase 1 and the GB10 on driver 580.159.03 are not qualified.
+    for (const gpu of [{ ...TEST_GPU, memoryModel: 'unified', totalBytes: null, freeBytes: null }, UNQUALIFIED_GB10,
+        { ...UNIFIED_GB10, device: { ...UNIFIED_GB10.device, pciDeviceId: '0x2B0010DE' } }]) {
+        const h = gpuHarness(t, { gpu });
+        await assert.rejects(h.run({}, { runnerId: 'llama.cpp', modelId: SMALL_MODEL }), (error) => error.details?.admission?.reasonCode === 'gpu_share_unsupported'
+            && error.details.admission.reason === SHARE_REFUSAL);
+        assert.equal(h.started.length, 0);
+    }
+    // A-LL-24: the same share on the qualified tuple is accepted.
+    const h = gpuHarness(t, { gpu: UNIFIED_GB10 });
+    await h.run({}, { runnerId: 'llama.cpp', modelId: SMALL_MODEL });
+    const runner = await waitForLaunch(h);
+    assert.equal(h.controller.state.deployment.admission.status, 'ok');
+    assert.equal(runner.env.PRIVATE_AGENT_SECRET, undefined);
+});
+
+test('A-LL-24: vLLM under a share on unified memory is vllm_mps_unqualified on the qualified tuple and gpu_share_unsupported elsewhere', () => {
+    const model = validateModel({
+        id: 'share-vllm-hf', displayName: 'Share vLLM fixture', architecture: 'dense', contextLength: 32768, profiles: ['unified'], memory: { layers: 24, kvBytesPerToken: 12288 },
+        sources: { hf: { type: 'hf-snapshot', repo: 'Qwen/Qwen2.5-0.5B-Instruct', revision: 'main', commit: 'c'.repeat(40), files: [
+            { path: 'config.json', size: 659, sha256: 'a'.repeat(64) }, { path: 'model.safetensors', size: 999585688, sha256: 'b'.repeat(64) },
+        ] } },
+    }, { seed: false });
+    const vllm = getRunner('vllm');
+    const verdict = (gpu) => admit({ runner: vllm, model, source: model.sources.hf, profile: 'unified', gpuBudget: parseMpsBudget(MPS_ENV),
+        params: vllm.normalizeParams({}, { model, profile: 'unified' }),
+        snapshot: { gpu: structuredClone(gpu), memory: { totalBytes: 128 * GIB, availableBytes: 120 * GIB }, disk: { freeBytes: 1024 * GIB } } });
+    const qualified = verdict(UNIFIED_GB10);
+    assert.deepEqual([qualified.status, qualified.reasonCode], ['incompatible', 'vllm_mps_unqualified']);
+    const unqualified = verdict(UNQUALIFIED_GB10);
+    assert.deepEqual([unqualified.status, unqualified.reasonCode, unqualified.reason], ['incompatible', 'gpu_share_unsupported', SHARE_REFUSAL]);
+});
+
+test('LL.unified-share-split (A-LL-9): the share bounds the GPU part, the budget the host part, and the runner gets exactly the three MPS variables', async (t) => {
+    // G of the small model is 2.78 GiB: a 2 GiB share is too small, a 3 GiB share holds it.
+    const small = shareVerdict({ env: shareEnv(2048) });
+    assert.equal(small.status, 'incompatible');
+    assert.equal(small.reasonCode, 'gpu_share_too_small');
+    assert.match(small.reason, /^Needs about 2\.8 GiB of GPU memory; this agent's Ploinky GPU memory share is 2\.0 GiB\./);
+    const { cacheRamBytes, gpuBytes, hostChargedBytes, unifiedBytes } = shareVerdict().estimate;
+    assert.equal(gpuBytes, unifiedBytes - cacheRamBytes);
+    assert.equal(hostChargedBytes, cacheRamBytes + 1.5 * GIB);
+    // S >= G, C <= B and Hb >= C: ok, and the launched runner has exactly the three variables (and none of the agent's secrets).
+    const h = gpuHarness(t, { gpu: UNIFIED_GB10, cgroupMemory: { maxBytes: 64 * GIB, currentBytes: GIB } });
+    await h.run({}, { runnerId: 'llama.cpp', modelId: SMALL_MODEL });
+    const runner = await waitForLaunch(h);
+    assert.deepEqual(Object.keys(mpsEnvOf(runner.env)).sort(), MPS_KEYS);
+    assert.deepEqual(mpsEnvOf(runner.env), MPS_ENV);
+    assert.equal(runner.env.PRIVATE_AGENT_SECRET, undefined);
+    // The order of the rules: U1 first, then the share (U2s), then the budget (U2c), then the floor (U3), then the headroom (U4c).
+    assert.equal(shareVerdict({ env: shareEnv(2048), budget: { maxBytes: GIB, currentBytes: 0 } }).reasonCode, 'gpu_share_too_small');
+    assert.equal(shareVerdict({ memory: { totalBytes: 12 * GIB, availableBytes: 11 * GIB } }).status, 'incompatible');
+    assert.equal(shareVerdict({ memory: { totalBytes: 12 * GIB, availableBytes: 11 * GIB } }).reasonCode, undefined, 'U1 has no code');
+    assert.match(shareVerdict({ memory: { totalBytes: 12 * GIB, availableBytes: 11 * GIB } }).reason, /must keep 16\.0 GiB for the host/);
+    const floor = shareVerdict({ memory: { totalBytes: 128 * GIB, availableBytes: 18 * GIB }, budget: { maxBytes: 64 * GIB, currentBytes: 0 } });
+    assert.equal(floor.status, 'insufficient-now');
+    assert.equal(floor.reasonCode, undefined, 'U3 keeps its own text');
+});
+
+test('LL.unified-share-no-fabricated-capacity (A-LL-16): the unified policy sees the GPU with null memory figures, never 0, and the share', () => {
+    let seen = null;
+    const model = loadSeedCatalog().find((entry) => entry.id === SMALL_MODEL);
+    const llama = getRunner('llama.cpp');
+    const runner = { ...llama, admitUnified(input) { seen = input; return llama.admitUnified(input); } };
+    const verdict = admit({ runner, model, source: model.sources.gguf, params: llama.normalizeParams({}, { model, profile: 'unified' }), profile: 'unified',
+        snapshot: { gpu: structuredClone(UNIFIED_GB10), memory: { totalBytes: 128 * GIB, availableBytes: 120 * GIB }, disk: { freeBytes: 1024 * GIB } },
+        gpuBudget: parseMpsBudget(MPS_ENV) });
+    assert.equal(verdict.status, 'ok', verdict.reason);
+    assert.equal(seen.gpu.totalBytes, null);
+    assert.equal(seen.gpu.freeBytes, null);
+    assert.equal(seen.gpu.usedBytes, null);
+    assert.equal('budgetBytes' in seen.gpu || 'deviceTotalBytes' in seen.gpu, false, 'effectiveGpu is not applied on unified');
+    assert.deepEqual(seen.gpuShare, { smPercent: 50, vramBytes: 3 * GIB });
+    // No share: the policy gets none.
+    admit({ runner, model, source: model.sources.gguf, params: llama.normalizeParams({}, { model, profile: 'unified' }), profile: 'unified',
+        snapshot: { gpu: structuredClone(UNIFIED_GB10), memory: { totalBytes: 128 * GIB, availableBytes: 120 * GIB }, disk: { freeBytes: 1024 * GIB } } });
+    assert.equal(seen.gpuShare, null);
+});
+
+test('LL.share-budget-boundary (A-LL-17..20): the RAM budget must hold C = prompt cache + runtime, now and ever, and nothing else', async (t) => {
+    const { hostChargedBytes: C } = shareVerdict().estimate;
+    // A-LL-17: B = C, nothing used: ok (the 10.8 GiB need alone would not fit a budget of C).
+    assert.equal(shareVerdict({ budget: { maxBytes: C, currentBytes: 0 } }).status, 'ok');
+    // A-LL-18: B = C - 1: refused for good, before any launch.
+    const never = shareVerdict({ budget: { maxBytes: C - 1, currentBytes: 0 } });
+    assert.deepEqual([never.status, never.reasonCode], ['incompatible', 'budget_exceeded']);
+    assert.match(never.reason, /^Needs about 9\.5 GiB of host memory charged to this agent \(the prompt cache and runtime\); this agent's Ploinky RAM budget is 9\.5 GiB\./);
+    // A-LL-19: B ample, Hb = C: ok. A-LL-20: Hb = C - 1: insufficient-now, budget_insufficient_now.
+    assert.equal(shareVerdict({ budget: { maxBytes: 64 * GIB, currentBytes: 64 * GIB - C } }).status, 'ok');
+    const busy = shareVerdict({ budget: { maxBytes: 64 * GIB, currentBytes: 64 * GIB - C + 1 } });
+    assert.deepEqual([busy.status, busy.reasonCode], ['insufficient-now', 'budget_insufficient_now']);
+    assert.match(busy.reason, /of this agent's 64\.0 GiB budget is free now\.$/);
+    // The rules keep their order when a later one would also fire (18 GiB available: need 10.8 GiB plus the 8 GiB floor does not fit):
+    // U2c comes before U3, and U3 (its own text, no code) before U4c.
+    const crowded = { totalBytes: 128 * GIB, availableBytes: 18 * GIB };
+    const budgetFirst = shareVerdict({ memory: crowded, budget: { maxBytes: C - 1, currentBytes: 0 } });
+    assert.deepEqual([budgetFirst.status, budgetFirst.reasonCode], ['incompatible', 'budget_exceeded']);
+    const floorFirst = shareVerdict({ memory: crowded, budget: { maxBytes: 64 * GIB, currentBytes: 64 * GIB - C + 1 } });
+    assert.equal(floorFirst.status, 'insufficient-now');
+    assert.equal(floorFirst.reasonCode, undefined);
+    assert.match(floorFirst.reason, /kept free; 18\.0 GiB is available now\. Other processes on this machine hold the rest\.$/);
+    // Without a share the same budgets are U2/U4 on the whole need, as before.
+    const unshared = shareVerdict({ env: {}, budget: { maxBytes: C, currentBytes: 0 } });
+    assert.deepEqual([unshared.status, unshared.reasonCode], ['incompatible', 'budget_exceeded']);
+    // Through the controller: refused before launch, no runner started.
+    for (const [budget, code] of [[{ maxBytes: C - 1, currentBytes: 0 }, 'budget_exceeded'], [{ maxBytes: 64 * GIB, currentBytes: 64 * GIB - C + 1 }, 'budget_insufficient_now']]) {
+        const h = gpuHarness(t, { gpu: UNIFIED_GB10, cgroupMemory: budget });
+        await assert.rejects(h.run({}, { runnerId: 'llama.cpp', modelId: SMALL_MODEL }), (error) => error.details?.admission?.reasonCode === code);
+        assert.equal(h.started.length, 0);
+    }
+    const ok = gpuHarness(t, { gpu: UNIFIED_GB10, cgroupMemory: { maxBytes: C, currentBytes: 0 } });
+    await ok.run({}, { runnerId: 'llama.cpp', modelId: SMALL_MODEL });
+    await waitForLaunch(ok);
+});
+
+test('A-LL-16e: under a known share the Phase 1b guard reports not-applicable and never calls nvidia-smi', async (t) => {
+    const calls = [];
+    const h = gpuHarness(t, { gpu: UNIFIED_GB10, cgroupMemory: { maxBytes: 64 * GIB, currentBytes: GIB }, guardSampleMs: 5,
+        controllerOptions: { gpuSampleMs: 5, readGpuProcesses: () => { calls.push(1); return Promise.resolve({ ok: false, reason: 'unexpected' }); },
+            readProcGroup: () => null, readLeafMemoryStat: () => null } });
+    await h.run({}, { runnerId: 'llama.cpp', modelId: SMALL_MODEL });
+    await waitForLaunch(h);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const guard = (await h.controller.status()).memoryGuard;
+    assert.equal(guard.gpuBudgetSignal, 'not-applicable');
+    assert.ok(guard.samples >= 3, 'the guard ticked');
+    assert.equal(guard.gpuSamples, 0);
+    assert.equal(calls.length, 0);
 });
 
 test('LL.gpu-unlimited-golden', async () => {

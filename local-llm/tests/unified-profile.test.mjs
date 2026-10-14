@@ -958,8 +958,8 @@ test('A-LL-16d: a qualified GB10 without a finite budget has no GPU-aware stop: 
     assert.equal(h.stub.calls.length, 0);
 });
 
-// A known GPU share on unified memory is still refused at admission (admission.mjs, gpu_share_unsupported), so no Run
-// reaches the guard with one yet; the qualifying decision itself is proven here.
+// The qualifying decision itself, with the facts spelled out; the controller vector for a known share (admitted on the
+// qualified tuple) is A-LL-16e in ploinky-budget.test.mjs.
 test('A-LL-16e and A-LL-16i: a known share, or no admitted GPU facts at all, never samples', async () => {
     const { gpuGuardSignal } = await import('../src/controller/gpuBudgetGuard.mjs');
     const qualified = { gpu: { driverVersion: '580.178.04', device: { pciDeviceId: '0x2E1210DE' } }, shareKnown: false };

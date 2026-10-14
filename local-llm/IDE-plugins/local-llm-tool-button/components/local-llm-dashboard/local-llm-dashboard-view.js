@@ -480,10 +480,13 @@ export function estimateHtml({ admission = null, context = null, error = '', mea
             </div>`);
     }
     if (Number.isFinite(estimate.gpuBytes) && gpu.available) {
+        // Under a Ploinky GPU share on unified memory the GPU reports no total of its own: the share is the bound.
+        const shared = Number.isFinite(estimate.gpuShareBytes);
+        const bound = shared ? estimate.gpuShareBytes : gpu.totalBytes;
         parts.push(`
             <div class="local-llm-estimate-row">
-                <span class="settings-card-meta">GPU about ${escapeHtml(formatMiB(estimate.gpuBytes))} of ${escapeHtml(formatMiB(gpu.totalBytes))}</span>
-                ${meter({ label: 'Estimated GPU memory', value: estimate.gpuBytes, max: gpu.totalBytes, text: `GPU about ${formatMiB(estimate.gpuBytes)}` })}
+                <span class="settings-card-meta">GPU about ${escapeHtml(formatMiB(estimate.gpuBytes))} of ${escapeHtml(formatMiB(bound))}${shared ? ' (Ploinky GPU share)' : ''}</span>
+                ${meter({ label: 'Estimated GPU memory', value: estimate.gpuBytes, max: bound, text: `GPU about ${formatMiB(estimate.gpuBytes)}` })}
             </div>`);
     }
     if (Number.isFinite(estimate.ramBytes) && Number.isFinite(memory.availableBytes)) {

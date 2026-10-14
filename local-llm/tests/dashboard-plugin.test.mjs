@@ -295,6 +295,13 @@ test('the summary cards show live GPU use, and the status card names what runs a
     assert.match(estimateHtml({ error: 'Context size must be a whole number.' }), /settings-status error/);
 });
 
+test('under a Ploinky GPU share on unified memory the GPU estimate is shown against the share, not against a missing total', () => {
+    const unified = { gpu: { available: true, memoryModel: 'unified', totalBytes: null }, memory: { totalBytes: 128 * 2 ** 30, availableBytes: 120 * 2 ** 30 } };
+    const share = estimateHtml({ admission: { status: 'ok', estimate: { unifiedBytes: 11 * 2 ** 30, gpuBytes: 2800 * 2 ** 20, gpuShareBytes: 3072 * 2 ** 20 } } }, unified);
+    assert.match(share, /GPU about 2,800 MiB of 3,072 MiB \(Ploinky GPU share\)/);
+    assert.doesNotMatch(share, /of —/);
+});
+
 test('on unified memory one card shows the shared pool, and the run form one shared-memory estimate', () => {
     const hardware = {
         gpu: { available: true, memoryModel: 'unified', name: 'NVIDIA GB10', totalBytes: null, usedBytes: null, freeBytes: null,

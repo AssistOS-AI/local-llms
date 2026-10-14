@@ -35,7 +35,7 @@ export function testQualification(gpu = TEST_GPU) {
 }
 
 export function gpuHarness(t, { gpu = TEST_GPU, env = MPS_ENV, qualificationDataProvider = () => [testQualification(gpu)], profile = null, seedCatalog = null,
-    cgroupMemory = null, readMemory = () => ({ totalBytes: 128 * GIB, availableBytes: 120 * GIB }), guardSampleMs = 60_000 } = {}) {
+    cgroupMemory = null, readMemory = () => ({ totalBytes: 128 * GIB, availableBytes: 120 * GIB }), guardSampleMs = 60_000, controllerOptions = {} } = {}) {
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-gpu-budget-')));
     const dataDir = path.join(root, 'data');
     const weights = path.join(root, 'weights.gguf');
@@ -64,6 +64,7 @@ export function gpuHarness(t, { gpu = TEST_GPU, env = MPS_ENV, qualificationData
         fileExists: () => true, sharedModelsRoot: null, shmDir: path.join(root, 'shm'), readMemory,
         readBudget: () => observeMemoryBudget({ maxText: cgroupMemory ? String(cgroupMemory.maxBytes) : undefined, currentText: cgroupMemory ? String(cgroupMemory.currentBytes) : undefined }),
         readPressure: () => 0, unifiedGuardMs: guardSampleMs, memoryGuardLoadMs: guardSampleMs, memoryGuardReadyMs: guardSampleMs, dropCache: () => true, pollMs: 2, stopGraceMs: 20,
+        ...controllerOptions,
         startRunner({ command, args, env: runnerEnv }) {
             let running = true;
             let finish;

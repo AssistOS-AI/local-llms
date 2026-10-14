@@ -145,12 +145,15 @@ const physicalPoolOf = (memory) => {
 // device memory: cudaMalloc buffers are not charged to it, so this estimate is
 // what keeps the run inside it. `fixedBytes` is the part of the need no parameter lowers
 // (llama.cpp's prompt cache and runtime), named in U2 as the smallest budget's floor.
-function unifiedVerdict({ needBytes, memory, disk, remainingDownloadBytes, result, estimate, warnings, tooLarge, fixedBytes = null }) {
+// With a Ploinky GPU share on the qualified GB10 (`share`: the pinned bytes S, the GPU part G of the need and the
+// host-charged part C), the share bounds the GPU part (U2s) and the RAM budget needs to hold only C (U2c, U4c).
+function unifiedVerdict({ needBytes, memory, disk, remainingDownloadBytes, result, estimate, warnings, tooLarge, fixedBytes = null, share = null }) {
     const pool = unifiedPool(memory);
     if (needBytes > pool.total - UNIFIED.hostReserveBytes) {
         return result('incompatible', `Needs about ${gib(needBytes)} of the ${gib(pool.total)} shared memory pool, `
             + `which must keep ${gib(UNIFIED.hostReserveBytes)} for the host. ${tooLarge}`, estimate, warnings);
     }
+    if (share !== null) return unifiedShareVerdict({ needBytes, pool, share, disk, remainingDownloadBytes, result, estimate, warnings, tooLarge });
     if (pool.budgetBytes !== null && needBytes > pool.budgetBytes) {
         return result('incompatible', `Needs about ${gib(needBytes)} of shared memory; this agent's Ploinky RAM budget is ${gib(pool.budgetBytes)}. `
             + 'On unified memory GPU device memory (cudaMalloc) is not charged to that budget, so local-llm keeps the run inside it by this estimate. '
@@ -164,6 +167,33 @@ function unifiedVerdict({ needBytes, memory, disk, remainingDownloadBytes, resul
     }
     if (pool.budgetBytes !== null && needBytes > pool.headroomBytes) {
         return result('insufficient-now', `Needs about ${gib(needBytes)} of shared memory; ${gib(pool.headroomBytes)} of this agent's `
+            + `${gib(pool.budgetBytes)} budget is free now.`, estimate, warnings, 'budget_insufficient_now');
+    }
+    if (Number.isFinite(disk?.freeBytes) && remainingDownloadBytes * 1.05 > disk.freeBytes) {
+        return result('insufficient-now', `The weights need ${gib(remainingDownloadBytes * 1.05)} of free disk (download or copy, with a 5 % reserve); `
+            + `${gib(disk.freeBytes)} is free.`, estimate, warnings);
+    }
+    return result('ok', null, estimate, warnings);
+}
+
+// U2s, U2c, U3, U4c and U5 for a run under a GPU share (U1 was checked by the caller), first match wins.
+function unifiedShareVerdict({ needBytes, pool, share, disk, remainingDownloadBytes, result, estimate, warnings, tooLarge }) {
+    if (share.gpuBytes > share.shareBytes) {
+        return result('incompatible', `Needs about ${gib(share.gpuBytes)} of GPU memory; this agent's Ploinky GPU memory share is ${gib(share.shareBytes)}. `
+            + `Raise the share in Ploinky, or reduce the context or the parallel slots, or pick a smaller model. ${tooLarge}`,
+        estimate, warnings, 'gpu_share_too_small');
+    }
+    if (pool.budgetBytes !== null && share.hostBytes > pool.budgetBytes) {
+        return result('incompatible', `Needs about ${gib(share.hostBytes)} of host memory charged to this agent (the prompt cache and runtime); `
+            + `this agent's Ploinky RAM budget is ${gib(pool.budgetBytes)}. The GPU memory is bounded by the GPU share, not by the RAM budget. `
+            + `The smallest budget this run fits is about ${gib(share.hostBytes)}.`, estimate, warnings, 'budget_exceeded');
+    }
+    if (needBytes > pool.available - UNIFIED.floorBytes) {
+        return result('insufficient-now', `Needs about ${gib(needBytes)} of shared memory and ${gib(UNIFIED.floorBytes)} kept free; `
+            + `${gib(pool.available)} is available now. Other processes on this machine hold the rest.`, estimate, warnings);
+    }
+    if (pool.budgetBytes !== null && share.hostBytes > pool.headroomBytes) {
+        return result('insufficient-now', `Needs about ${gib(share.hostBytes)} of host memory charged to this agent; ${gib(pool.headroomBytes)} of this agent's `
             + `${gib(pool.budgetBytes)} budget is free now.`, estimate, warnings, 'budget_insufficient_now');
     }
     if (Number.isFinite(disk?.freeBytes) && remainingDownloadBytes * 1.05 > disk.freeBytes) {
@@ -304,7 +334,7 @@ export function estimateUnifiedLlamaServer({ model, source, params, memory: host
  * against a fresh snapshot, and the memory guard is the backstop, not the
  * control: one load allocates faster than any sampling can follow.
  */
-export function admitUnifiedLlamaServer({ runnerId, model, source, params, memory, disk, remainingDownloadBytes = 0 },
+export function admitUnifiedLlamaServer({ runnerId, model, source, params, memory, disk, remainingDownloadBytes = 0, gpuShare = null },
     result) {
     const rectangle = envelopeFor(model, runnerId, params);
     const warnings = [];
@@ -345,10 +375,17 @@ export function admitUnifiedLlamaServer({ runnerId, model, source, params, memor
         if (estimate.userSizing.length) warnings.push(userSizingWarning(estimate.userSizing, 'llama-server', model));
     }
     if (unreadable(memory)) return result('incompatible', MEMORY_UNREADABLE, estimate, warnings);
+    // Under a share the GPU part (everything but the prompt cache) is bounded by S, and the host-charged part C (the
+    // prompt cache and the runtime, conservatively counting the runtime in both parts) by the RAM budget.
+    const hostBytes = estimate.cacheRamBytes + UNIFIED.runtimeBytes;
+    const share = gpuShare === null ? null : { shareBytes: gpuShare.vramBytes, gpuBytes: estimate.unifiedBytes - estimate.cacheRamBytes, hostBytes };
+    if (share !== null) {
+        estimate = { ...estimate, gpuShareBytes: share.shareBytes, gpuBytes: share.gpuBytes, hostChargedBytes: share.hostBytes };
+    }
     return unifiedVerdict({
         needBytes: estimate.unifiedBytes, memory, disk, remainingDownloadBytes, result, estimate, warnings,
         tooLarge: 'Reduce the context or the parallel slots, or pick a smaller model.',
-        fixedBytes: estimate.cacheRamBytes + UNIFIED.runtimeBytes,
+        fixedBytes: hostBytes, share,
     });
 }
 
