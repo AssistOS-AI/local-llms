@@ -473,6 +473,10 @@ function a5Rows({ prefix = '', registry = null } = {}) {
             act: (c) => c.lookupModel({ ...as, repo: REPO, file: 'm-Q4_K_M.gguf' }) },
         { name: 'lookup: config.json', kind: 'lookup', answers: { ...info, ...canary, ...revision, ...treeOf(SNAPSHOT_TREE) }, target: resolve('config.json'),
             act: (c) => c.lookupModel({ ...as, repo: REPO, format: 'hf' }) },
+        ...(registry ? [
+            { name: 'lookup: revision after the canary', kind: 'lookup', answers: { ...info, ...canary }, target: `${api}/revision/main`, act: (c) => c.lookupModel({ ...as, repo: REPO }) },
+            { name: 'GGUF pin: revision after the canary', kind: 'pin', answers: { ...canary }, target: `${api}/revision/main`, act: (c) => c.addModel(ggufEntry('m-Q4_K_M.gguf', registry)) },
+        ] : []),
         { name: 'GGUF pin: revision', kind: 'pin', answers: null, target: revisionTarget, act: (c) => c.addModel(ggufEntry('m-Q4_K_M.gguf', registry)) },
         { name: 'GGUF pin: tree', kind: 'pin', answers: { ...canary, ...revision }, target: `${api}/tree/${COMMIT}`, act: (c) => c.addModel(ggufEntry('m-Q4_K_M.gguf', registry)) },
         { name: 'split pin: second shard', kind: 'pin', answers: { ...canary, ...revision, ...treeOf(GGUF_TREE, 1) }, target: `${api}/tree/${COMMIT}`,

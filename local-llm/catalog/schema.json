@@ -384,8 +384,20 @@
           }
         }
       },
-      "dependentRequired": {
-        "registry": [
+      "if": {
+        "required": [
+          "registry"
+        ],
+        "properties": {
+          "registry": {
+            "not": {
+              "const": "huggingface"
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
           "revision"
         ]
       }
@@ -484,8 +496,20 @@
           "type": "string"
         }
       },
-      "dependentRequired": {
-        "registry": [
+      "if": {
+        "required": [
+          "registry"
+        ],
+        "properties": {
+          "registry": {
+            "not": {
+              "const": "huggingface"
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
           "revision"
         ]
       }

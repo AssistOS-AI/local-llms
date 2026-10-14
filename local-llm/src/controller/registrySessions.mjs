@@ -30,6 +30,8 @@ export function createSessions({ env, hfBaseUrl, registryTransport = null, regis
 
     function forSource(source, { registry = null } = {}) {
         if (!source.registry) return session({ baseUrl: hfBaseUrl, token: env.HF_TOKEN || '' });
+        // A named registry holds a credential, which is only ever sent through the guarded transport.
+        if (!registryTransport) throw new LocalLlmError('internal_error', `Registry '${source.registry}' cannot be read without the network guard.`);
         let taken = registry?.id === source.registry ? registry : null;
         if (!taken) {
             if (!registries) {

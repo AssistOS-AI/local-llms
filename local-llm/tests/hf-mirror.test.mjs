@@ -262,9 +262,33 @@ test('a source names a registry: huggingface is normalized away, any other id ne
     const schema = JSON.parse(fs.readFileSync(new URL('../catalog/schema.json', import.meta.url), 'utf8'));
     for (const name of ['huggingface', 'hfSnapshot']) {
         assert.equal(schema.$defs[name].properties.registry.pattern, REGISTRY_ID_RE.source);
-        assert.deepEqual(schema.$defs[name].dependentRequired, { registry: ['revision'] });
+        // A registry other than huggingface needs a revision; `huggingface` is normalized away and needs none.
+        assert.deepEqual(schema.$defs[name].if, { required: ['registry'], properties: { registry: { not: { const: 'huggingface' } } } });
+        assert.deepEqual(schema.$defs[name].then, { required: ['revision'] });
     }
     assert.equal(schema.$id, 'local-llm.catalog/v4');
+});
+
+test('a store without the network guard refuses a named registry before any request; huggingface.co keeps the downloader\'s own fetch', async (t) => {
+    const { ops, stores } = storeOn(t, null);
+    await ops.saveRegistry({ registry: MIRROR });
+    await ops.setRegistryCredential({ id: 'mirror', token: MIRROR_TOKEN });
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => {
+        calls += 1;
+        throw new Error('globalThis.fetch is not a model path');
+    };
+    t.after(() => { globalThis.fetch = realFetch; });
+    const mirrorSnapshot = { type: 'hf-snapshot', registry: 'mirror', repo: REPO, revision: 'main' };
+    await assert.rejects(stores.huggingface.pin(ggufSource()), { code: 'internal_error' });
+    await assert.rejects(stores.huggingface.fetch({ artifact: pinnedGguf() }), { code: 'internal_error' });
+    await assert.rejects(stores['hf-snapshot'].pin(mirrorSnapshot), { code: 'internal_error' });
+    await assert.rejects(stores['hf-snapshot'].fetch({ artifact: snapshotSource() }), { code: 'internal_error' });
+    assert.equal(calls, 0, 'the credential was never put on a request');
+    // Twin: the same store reads huggingface.co with the downloader's own fetch, which is the stub here.
+    await assert.rejects(stores.huggingface.pin({ ...ggufSource(), registry: undefined }), (error) => error.code !== 'internal_error');
+    assert.ok(calls >= 1, 'the stub is live');
 });
 
 // ------------------------------------------------------------------ A17 paths and keys, A16 records
