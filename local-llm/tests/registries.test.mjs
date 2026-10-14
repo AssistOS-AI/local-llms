@@ -136,6 +136,21 @@ test('A18: a url or kind change and a remove are refused while a stored entry or
     assert.equal(await codeOf(ops.setRegistryCredential({ id: 'nope', token: 'x' })), 'invalid_registry');
 });
 
+test('A18: through the controller, a stored entry naming a registry blocks its url change and removal until the entry is removed', async (t) => {
+    // Raw, as this catalog keeps an entry it cannot read yet; the controller passes its state.registry to the service.
+    const entry = userEntry('mirrored', { gguf: pinnedGguf({ registry: 'mirror', commit: COMMIT, size: 1000, sha256: 'b'.repeat(64) }) });
+    const h = registryHarness(t, { initialState: { version: 1, deployment: null, params: {}, requests: {}, registry: [entry] } });
+    await h.controller.saveRegistry({ registry: MIRROR });
+    assert.deepEqual((await h.controller.listRegistries()).registries.find((registry) => registry.id === 'mirror').usedBy, ['mirrored']);
+    assert.equal(await codeOf(h.controller.saveRegistry({ registry: { id: 'mirror', url: 'https://other.example/hf' } })), 'registry_in_use');
+    assert.equal(await codeOf(h.controller.removeRegistry({ id: 'mirror' })), 'registry_in_use');
+    // Twin: once the entry is gone, both succeed.
+    await h.controller.removeModel({ modelId: 'mirrored' });
+    assert.deepEqual((await h.controller.listRegistries()).registries.find((registry) => registry.id === 'mirror').usedBy, []);
+    assert.equal((await h.controller.saveRegistry({ registry: { id: 'mirror', url: 'https://other.example/hf' } })).registry.url, 'https://other.example/hf');
+    assert.deepEqual(await h.controller.removeRegistry({ id: 'mirror' }), { removed: 'mirror' });
+});
+
 test('the list shows the built-ins, kinds, formats and credential states, and registries.json is rewritten, never deleted', async (t) => {
     const { ops, dataDir } = service(t);
     let list = await ops.listRegistries();

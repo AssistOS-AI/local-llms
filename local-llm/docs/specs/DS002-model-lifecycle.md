@@ -148,7 +148,7 @@ An administrator may add up to 32 entries, with these keys only:
 | `enabled` | Boolean, true by default |
 | `authOrigins` | `oci` only: 1–4 `https:` origins whose token realm may receive the credential. The registry's own origin when absent; while it is only that, it follows a change of `url`. |
 
-Formats: `huggingface` and `modelscope` registries offer `gguf`, `hf` and `exl3`; `oci` registries offer `gguf` and `hf`. A source names its registry with `registry`; no `registry` means `huggingface`. `huggingface` and `modelscope` registries serve `huggingface` and `hf-snapshot` sources, and `oci` registries serve `oci` and `oci-snapshot` sources.
+Formats: `huggingface` and `modelscope` registries offer `gguf`, `hf` and `exl3`; `oci` registries offer `gguf` and `hf`. A source names its registry with `registry`; no `registry` means `huggingface`. The catalog does not accept `registry` on a source yet, and the lookup has no `registry` field yet, so today every source and every lookup resolve to `huggingface`; the rules below already apply to them. `huggingface` and `modelscope` registries serve `huggingface` and `hf-snapshot` sources, and `oci` registries serve `oci` and `oci-snapshot` sources.
 
 | Case | Rule |
 | --- | --- |
@@ -156,10 +156,10 @@ Formats: `huggingface` and `modelscope` registries offer `gguf`, `hf` and `exl3`
 | In use | A stored model entry, including one this catalog cannot read, and the deployment of the running job use the registries their sources name. While one does, a change of `url` or `kind` and a remove give `registry_in_use`, which names the models. |
 | Built-ins | Saving `huggingface` gives `read_only`. Another built-in accepts only `id` and `enabled`; any other key gives `invalid_registry`. Removing a built-in gives `read_only`; disable it instead. |
 | Disable | Allowed while the registry is in use. Add, Update and Run against it give `registry_disabled`. Delete weights, Remove, the overview and status still work. |
-| Snapshots | A lookup, pin or job resolves its registry once, at its start, into a frozen snapshot: the record and the credential decrypted then. Later edits apply to later operations. |
+| Snapshots | A pin (Add or Update) resolves each source's registry once, at its start, into a frozen snapshot: the record and the credential decrypted then. Later edits apply to later operations. Lookups and download jobs take the same snapshot once they read registries other than `huggingface`. |
 | Pin and queue re-check | Add and Update take the snapshot of every source's registry before they pin, and pin outside the command queue. Inside the queue block, before anything is saved, each registry must still exist, be enabled, and have the snapshot's `kind` and `url`. Otherwise the operation fails with `registry_unknown` (gone), `registry_disabled`, or `registry_changed` (kind or URL differ, for example a registry removed and re-created elsewhere during the pin), and `state.registry` is unchanged. |
 | Kind mismatch | A source type the registry's kind cannot serve (an `oci` source naming a `modelscope` registry) is `invalid_model` at Add and Update, and `registry_changed` at Run for a stored entry. |
-| Missing registry | Possible after a manual edit or a downgrade. Only Add, Update, Run and the lookup give `registry_unknown`. A store's paths, keys, state and Delete weights come from the source alone and never consult the list, so the overview still loads. |
+| Missing registry | Possible after a manual edit or a downgrade. Only Add, Update and Run (and the lookup, once it takes `registry`) give `registry_unknown`. A store's paths, keys, state and Delete weights come from the source alone and never consult the list, so the overview still loads. |
 
 ### Registry credentials
 
@@ -173,7 +173,7 @@ Formats: `huggingface` and `modelscope` registries offer `gguf`, `hf` and `exl3`
 | Key absent or malformed | `local_llm_registry_credential_set` gives `credentials_unavailable` ("The agent did not receive LOCAL_LLM_CREDENTIALS_KEY; restart local-llm with a Ploinky that supplies generated secrets."). `local_llm_registry_list` reports `credentialStorage: { available: false, reason }`, and every stored entry reads `unreadable`, never `set`. Clearing still works. Requests go anonymously. |
 | Key changed | An entry sealed under another key id, or one whose tag check fails, reads `unreadable`; requests through it go anonymously; and the agent logs one line per such registry at start, saying to re-enter it. Setting it again overwrites it under the current key. |
 | States | `set` (it decrypts with this key for this exact registry), `none`, or `unreadable`. `huggingface` shows `set` when `HF_TOKEN` is set. |
-| Use | A credential is decrypted only for a snapshot (a lookup, pin or job), held in that snapshot as a property that is not serialized, never cached across operations, and never written to state, provenance, the log, an error or a tool result. Error messages name a field, never its value. The token is 1–4096 characters with no control characters; `tokenUsername` is 1–256 printable characters with no colon, because the OCI Basic credential is `tokenUsername:token`. |
+| Use | A credential is decrypted for a snapshot (a pin today; a lookup or job once they read other registries), held in that snapshot as a property that is not serialized, and decrypted and discarded at once when `local_llm_registry_list` and the start-up check tell `set` from `unreadable`. It is never cached across operations, and never written to state, provenance, the log, an error or a tool result. Error messages name a field, never its value. The token is 1–4096 characters with no control characters; `tokenUsername` is 1–256 printable characters with no colon, because the OCI Basic credential is `tokenUsername:token`. |
 | Threat model | The encryption protects a copy of `<workspace>/.data/local-llm` made without `.ploinky/master-key`. It does not protect against the host user, who holds both. |
 
 ### Deployment state machine
