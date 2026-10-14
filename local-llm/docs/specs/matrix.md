@@ -2,7 +2,7 @@
 
 | Name | Description |
 | --- | --- |
-| [DS000-vision-and-scope](DS000-vision-and-scope.md) | What local-llm is, the retired shared-image agents and the services that went with them, its runners (LM Studio for internal use only), and what it deliberately leaves out. |
+| [DS000-vision-and-scope](DS000-vision-and-scope.md) | What local-llm is, the retired shared-image agents and the services that went with them, its runners (LM Studio for internal use only), the model registries it can read from and the NVIDIA NGC adapter it dropped, and what it deliberately leaves out. |
 | [DS001-agent-contract](DS001-agent-contract.md) | Manifest, process model, tools, authorization, the chat endpoint, drain, and LM Studio's operator switch and limits. |
 | [DS002-model-lifecycle](DS002-model-lifecycle.md) | Catalog, registry, on-demand download, the deployment state machine, and restart behaviour. |
 | [DS003-gpu-and-resources](DS003-gpu-and-resources.md) | Manifest-declared GPU access and the operator override, admission, runner isolation, and memory estimates. |

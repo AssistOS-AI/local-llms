@@ -1,6 +1,6 @@
 ---
 title: DS000-vision-and-scope
-summary: What local-llm is, the retired shared-image agents and the services that went with them, its runners (LM Studio for internal use only), and what it deliberately leaves out.
+summary: What local-llm is, the retired shared-image agents and the services that went with them, its runners (LM Studio for internal use only), the model registries it can read from and the NVIDIA NGC adapter it dropped, and what it deliberately leaves out.
 ---
 
 # DS000 Vision and Scope
@@ -68,9 +68,38 @@ LM Studio was first left out (runners plan, decision R5 = b). On 2026-09-25 the 
 
 The agent uses none of what LM Studio adds on top of llama.cpp: its native REST API, `/v1/responses`, `/v1/messages`, MCP and plugins stay unused, and only `/v1/chat/completions` is proxied (DS001). Just-in-time loading cannot be turned off headlessly, so the controller unloads any model but its own (DS003).
 
+### Model sources
+
+Besides huggingface.co and Ollama, an administrator can add models from three protocol families, without a restart (DS002):
+
+| Family | Covers |
+| --- | --- |
+| Hugging Face-compatible endpoints | Mirrors, with an optional path prefix |
+| OCI distribution registries | Docker Hub, GHCR or any OCI registry that serves GGUF, and CNCF per-file safetensors |
+| ModelScope | Site-scoped: `www.modelscope.cn` is built in, and another site such as `www.modelscope.ai` is added by an administrator |
+
+Administrators define the registries and their credentials in settings, so the egress hosts are an administrator's decision. The network guard is therefore the safety boundary for those hosts: it allows only globally routable addresses, checks them after DNS and on every redirect hop, and nothing in the environment or in administrator input can relax it. A credential is sent only to its registry's origin or to its configured OCI token-realm origin; it is write-only, encrypted at rest and bound to the registry definition. Every file is pinned by size and sha256 (or a git object id, Hugging Face only) when the model is added, and huggingface.co keeps its store paths, keys and verification records byte for byte.
+
+NVIDIA NGC was considered and dropped (decision D2). Its anonymous catalog lists 904 models, of which only three contain a GGUF file (one a chat model whose own configuration says it was copied from Hugging Face) and two are plain Hugging Face safetensors snapshots whose file hashes equal the Hugging Face repositories'. Almost every other language-model entry is a NeMo, TensorRT-LLM or ONNX artifact, or is not anonymously readable, and no runner here reads those formats; current Nemotron models appear on NGC only as NIM containers. Fewer than a fifth of the listed files carry a sha256, the documented download routes answer 401 anonymously, and the working anonymous route is undocumented and redirects to 24-hour signed URLs. An NGC adapter would add an undocumented, weakly verifiable protocol for almost no model that Hugging Face does not already serve, so there is none.
+
 ### Out of scope
 
 Translation and reranking services, a shared host model cache, ROCm/HIP, AMD Instinct GPUs, Intel GPUs, host-native Metal, Vulkan on NVIDIA, and GPU sharing on Vulkan are out of scope. Only llama.cpp's Vulkan build accelerates AMD and Apple GPUs in this release. APU qualification, budget support and capacity tuning await owner-authorized hardware evidence for a specific tuple. No APU family is qualified by unit tests.
+
+For model sources, these are also out of scope:
+
+| Item | Why |
+| --- | --- |
+| NVIDIA NGC adapter | Dropped (above) |
+| Runner downloads | DS004 |
+| llama.cpp's own `-dr` download | The controller fetches and verifies every file, and `-dr` mishandles the CNCF dialect and legacy splits |
+| Legacy Docker safetensors (`vnd.docker.ai.safetensors` with `vllm.config.tar`) and the legacy per-file layout (`vnd.docker.ai.model.file`) | The tar's digest is not a per-file digest, and Docker marks the per-file layout untested and uses it on two tags only. Both are refused with `unsupported_artifact`. |
+| KitOps and Ollama-format OCI artifacts, indexes, `dir.tar`, config v0.2, CNCF `weight.v1.tar*` layers, EXL3 from OCI | Not modelled, or no per-file digest |
+| Private-network registries | The guard refuses them |
+| Browsing a registry's tags or repositories | The administrator types the repository and the tag or revision |
+| Pinning an Ollama tag through the guard | The Ollama runner pulls with its own client |
+| Custom certificate authorities, Basic-authentication Hugging Face mirrors, HTTP proxies | Not supported |
+| Deduplication across registries | Only adoption from `/shared/models` by sha256 (DS002) |
 
 ### Rationale
 

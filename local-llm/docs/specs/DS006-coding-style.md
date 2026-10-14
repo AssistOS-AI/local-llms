@@ -30,7 +30,7 @@ local-llms/
     catalog/models.json, catalog/schema.json      seed catalog (DS002)
     catalog/runners.lock.linux-{amd64,arm64}.json the agent's own runner lock per platform (DS004)
     src/main.mjs                                  controller process entry point (DS001)
-    src/agentProcess.mjs                          the process body: controller, control socket and AgentServer (DS001)
+    src/agentProcess.mjs                          the process body: controller, control socket and AgentServer; the only place that reads the registry credentials key (DS001, DS002)
     src/controlHandlers.mjs                       the control socket's operations on the controller (DS001)
     src/controller/                               state, admission, profiles, downloads, runner processes
     src/controller/ggufHeader.mjs                 the bounded GGUF header reader and the sizing read from it (DS002)
@@ -47,6 +47,7 @@ local-llms/
     src/runners/                                  one adapter per runner
     tools/                                        MCP tool entry points and the CI install check
     IDE-plugins/                                  the Local LLMs dashboard and Settings
+    IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-registries.js   the dashboard's Registries tab logic and markup helpers (DS002)
     tests/*.test.mjs
     docs/specs/                                   DS000-DS006 and matrix.md
 ```
