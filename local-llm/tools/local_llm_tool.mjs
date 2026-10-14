@@ -49,6 +49,19 @@ export const TOOL_OPERATIONS = Object.freeze({
         }),
     },
     local_llm_runner_uninstall: { op: 'uninstallRunner', args: (input) => ({ runnerId: input.runnerId }) },
+    // Registries (DS002). A credential is passed through to the controller once and never echoed or logged.
+    local_llm_registry_list: { op: 'listRegistries', args: () => ({}) },
+    local_llm_registry_save: { op: 'saveRegistry', args: (input) => ({ registry: input.registry }) },
+    local_llm_registry_remove: { op: 'removeRegistry', args: (input) => ({ id: input.id }) },
+    local_llm_registry_credential_set: {
+        op: 'setRegistryCredential',
+        args: (input) => ({
+            id: input.id,
+            token: input.token,
+            ...(input.tokenUsername !== undefined ? { tokenUsername: input.tokenUsername } : {}),
+        }),
+    },
+    local_llm_registry_credential_clear: { op: 'clearRegistryCredential', args: (input) => ({ id: input.id }) },
 });
 
 /** The verified caller's name for the licence record. */

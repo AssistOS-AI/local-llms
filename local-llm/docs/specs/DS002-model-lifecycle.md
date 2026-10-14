@@ -126,6 +126,56 @@ Every request a model path makes (the lookup, the pins and the controller's down
 | Connections | The transport owns its own HTTP and HTTPS agents (keep-alive), never the process-wide ones, so a pooled socket was always opened under this one policy. |
 | Refusal | `ADDRESS_REFUSED` (Add, Update, and a Run, which fails with its message) or `address_refused` (lookup), not retried. The message names the host and the class (`<host> resolves to a <class> address, which local-llm does not contact`), never an address, a token or a query. |
 
+### Model registries
+
+A registry is where a model source's files come from. Administrators define registries and their credentials with five admin tools (DS001), and edits apply without a restart. Because an administrator chooses the hosts, the network guard above is the safety boundary for them. The list is kept in `/data/state/registries.json`, `{ version: 1, registries: [ …administrator entries ], builtins: { dockerhub: { enabled }, ghcr: { enabled }, modelscope: { enabled } } }`, written atomically at mode 0600 in a 0700 directory (`src/controller/registries.mjs`). It is a separate file because the `controller.json` loader keeps only the keys it knows, so an older agent would erase a field stored there, and because a separate file stays out of the frequent progress saves. A missing file means the defaults. The file is rewritten on every edit and never deleted, so it stays even when it holds only the defaults. A file that cannot be parsed, or one of another version, is moved aside as `registries.json.corrupt-<time>` or `.unsupported-<time>` and the built-ins are used. An entry that fails validation (a manual edit) is not used and is logged once at start.
+
+| id | kind | url | authOrigins | What an administrator may do |
+| --- | --- | --- | --- | --- |
+| `huggingface` | huggingface | `https://huggingface.co` | none | Nothing. It is always enabled, and its credential is the operator's `HF_TOKEN`. |
+| `dockerhub` | oci | `https://registry-1.docker.io` | `https://auth.docker.io` | Enable or disable it, and set or clear its credential |
+| `ghcr` | oci | `https://ghcr.io` | `https://ghcr.io` | Enable or disable it, and set or clear its credential |
+| `modelscope` | modelscope | `https://www.modelscope.cn` | none | Enable or disable it, and set or clear its credential. It cannot be re-pointed; another ModelScope site is added under its own id. |
+
+An administrator may add up to 32 entries, with these keys only:
+
+| Key | Rule |
+| --- | --- |
+| `id` | `^[a-z0-9][a-z0-9-]{1,31}$`, unique. The built-in ids are reserved. |
+| `kind` | `huggingface`, `oci` or `modelscope`. It never changes; a different kind is a new registry. |
+| `url` | `https:` with a lowercase DNS host name and an optional port, and no user name, password, query or fragment. A host that is an IP address is refused when the registry is saved, after WHATWG normalization, so `https://2130706433`, `https://0x7f.1` and `https://127.1` (all `127.0.0.1`) are refused like `https://127.0.0.1`. A redirect to a literal address is still judged by the guard. A `huggingface` registry may have a path prefix of plain segments, at most 256 characters, with no `.`, `..` or empty segment; `oci` and `modelscope` registries are a bare origin. The URL must be written in its normal form (a trailing slash is allowed), so nothing typed is rewritten. It cannot change while a stored model entry or the running job uses the registry. |
+| `label` | Plain text, at most 60 characters. The id when absent. |
+| `enabled` | Boolean, true by default |
+| `authOrigins` | `oci` only: 1–4 `https:` origins whose token realm may receive the credential. The registry's own origin when absent; while it is only that, it follows a change of `url`. |
+
+Formats: `huggingface` and `modelscope` registries offer `gguf`, `hf` and `exl3`; `oci` registries offer `gguf` and `hf`. A source names its registry with `registry`; no `registry` means `huggingface`. `huggingface` and `modelscope` registries serve `huggingface` and `hf-snapshot` sources, and `oci` registries serve `oci` and `oci-snapshot` sources.
+
+| Case | Rule |
+| --- | --- |
+| Edits | Every save, remove and credential change runs in the controller's command queue, so it never interleaves with an Add, Update or Run check. It changes the file first and then the in-memory list. |
+| In use | A stored model entry, including one this catalog cannot read, and the deployment of the running job use the registries their sources name. While one does, a change of `url` or `kind` and a remove give `registry_in_use`, which names the models. |
+| Built-ins | Saving `huggingface` gives `read_only`. Another built-in accepts only `id` and `enabled`; any other key gives `invalid_registry`. Removing a built-in gives `read_only`; disable it instead. |
+| Disable | Allowed while the registry is in use. Add, Update and Run against it give `registry_disabled`. Delete weights, Remove, the overview and status still work. |
+| Snapshots | A lookup, pin or job resolves its registry once, at its start, into a frozen snapshot: the record and the credential decrypted then. Later edits apply to later operations. |
+| Pin and queue re-check | Add and Update take the snapshot of every source's registry before they pin, and pin outside the command queue. Inside the queue block, before anything is saved, each registry must still exist, be enabled, and have the snapshot's `kind` and `url`. Otherwise the operation fails with `registry_unknown` (gone), `registry_disabled`, or `registry_changed` (kind or URL differ, for example a registry removed and re-created elsewhere during the pin), and `state.registry` is unchanged. |
+| Kind mismatch | A source type the registry's kind cannot serve (an `oci` source naming a `modelscope` registry) is `invalid_model` at Add and Update, and `registry_changed` at Run for a stored entry. |
+| Missing registry | Possible after a manual edit or a downgrade. Only Add, Update, Run and the lookup give `registry_unknown`. A store's paths, keys, state and Delete weights come from the source alone and never consult the list, so the overview still loads. |
+
+### Registry credentials
+
+| Item | Rule |
+| --- | --- |
+| Key | The manifest declares `LOCAL_LLM_CREDENTIALS_KEY` with `generatedSecret: true` (DS001). Ploinky derives it from the workspace master key and the agent's identity as 64 hex characters; it is recomputed at each start, never stored. Only exactly `^[0-9a-f]{64}$` is accepted. |
+| Where the key goes | `src/agentProcess.mjs` reads the variable once, deletes it from the process environment before anything is spawned, and passes it explicitly to the controller and the registry service. No other code reads it from an environment. AgentServer, which gets a copy of the environment, and every child spawned without an explicit environment (such as `nvidia-smi`) therefore never receive it. The runner environment was already an allowlist without it or `HF_TOKEN`. |
+| Derived keys | From the 32 bytes the key encodes: the AES key `HKDF-SHA256(salt '', info 'local-llm/registry-credentials/aes-256-gcm/v1', 32 bytes)` and the key id `HKDF-SHA256(salt '', info 'local-llm/registry-credentials/key-id/v1', 8 bytes)`, as hex |
+| File | `/data/state/registry-credentials.json`, mode 0600 in a 0700 directory, written atomically: `{ version: 1, keyId, entries: { <id>: { keyId, iv, ciphertext, tag, updatedAt } } }`. Each entry is AES-256-GCM with a random 12-byte IV, base64. The plaintext is `{ token, username? }`. The entry's `keyId` names the key that sealed it; the file's names the key of the last write. Clearing the last credential rewrites the file with `entries: {}`; the file is never deleted. A file that cannot be parsed, or one of another version, is moved aside as `.corrupt-<time>` or `.unsupported-<time>`. |
+| Binding | The GCM additional data is `local-llm/registry-credential/v1\n<id>\n<kind>\n<url>\n<sorted authOrigins joined by a space>`. A credential moved to another id, or read after its registry's URL changed by hand, fails the tag check. A save that changes `url` or `authOrigins` deletes the credential first, and so do removing a registry and adding one under an id that still has a stored entry. |
+| Key absent or malformed | `local_llm_registry_credential_set` gives `credentials_unavailable` ("The agent did not receive LOCAL_LLM_CREDENTIALS_KEY; restart local-llm with a Ploinky that supplies generated secrets."). `local_llm_registry_list` reports `credentialStorage: { available: false, reason }`, and every stored entry reads `unreadable`, never `set`. Clearing still works. Requests go anonymously. |
+| Key changed | An entry sealed under another key id, or one whose tag check fails, reads `unreadable`; requests through it go anonymously; and the agent logs one line per such registry at start, saying to re-enter it. Setting it again overwrites it under the current key. |
+| States | `set` (it decrypts with this key for this exact registry), `none`, or `unreadable`. `huggingface` shows `set` when `HF_TOKEN` is set. |
+| Use | A credential is decrypted only for a snapshot (a lookup, pin or job), held in that snapshot as a property that is not serialized, never cached across operations, and never written to state, provenance, the log, an error or a tool result. Error messages name a field, never its value. The token is 1–4096 characters with no control characters; `tokenUsername` is 1–256 printable characters with no colon, because the OCI Basic credential is `tokenUsername:token`. |
+| Threat model | The encryption protects a copy of `<workspace>/.data/local-llm` made without `.ploinky/master-key`. It does not protect against the host user, who holds both. |
+
 ### Deployment state machine
 
 ```

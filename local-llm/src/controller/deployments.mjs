@@ -43,6 +43,7 @@ import {
 } from './hardware.mjs';
 import { lookupHuggingFaceModel } from './modelLookup.mjs';
 import { createGuardedTransport } from './netGuard.mjs';
+import { createRegistryService } from './registries.mjs';
 import { BUDGET_UNREADABLE, MPS_VARIABLES, cpuQuotaOf, gpuBudgetOf, knownByte, memoryBudgetOf, mpsRunnerEnvironment, overviewBudget } from './ploinkyBudget.mjs';
 import {
     APU,
@@ -152,6 +153,9 @@ export function createController({
     seedCatalog = loadSeedCatalog(env.LOCAL_LLM_CATALOG_FILE || undefined),
     hfBaseUrl = 'https://huggingface.co',
     registryTransport = createGuardedTransport(),
+    // The registry list and its credentials (registries.mjs); the key is only ever this option (agentProcess.mjs).
+    credentialsKey = null,
+    registryService = null,
     stateStore = createStateStore({ dataDir }),
     runners = RUNNERS,
     // A snapshot's queries stop when `signal` aborts (a Stop, a Cancel or the drain).
@@ -404,6 +408,9 @@ export function createController({
         sharedModelsRoot,
         registryTransport,
     });
+    const registries = registryService ?? createRegistryService({ dataDir, credentialsKey, hfBaseUrl });
+    const registryOperations = registries.operations({ queue, log: (message) => log.append('controller', message), hfToken: Boolean(env.HF_TOKEN),
+        references: () => ({ entries: state.registry, active: job !== null ? state.deployment : null }) });
 
     // A drain has a fixed time budget (drainBudget.mjs); a Stop gives the
     // runner the full grace period.
@@ -1747,6 +1754,7 @@ export function createController({
         if (refusal) throw new LocalLlmError('runner_unavailable', refusal, { runner: runnerId });
         assertEnabled(definition);
         if (!source) throw new LocalLlmError('no_source', `${model.displayName} has no ${definition.displayName} source.`);
+        registries.assertRunnable(source);
         if (installJob?.runnerId === runnerId) {
             throw new LocalLlmError('busy', `${definition.displayName} is being installed; run it once the install finishes.`);
         }
@@ -1944,9 +1952,11 @@ export function createController({
     async function addModel(entry) {
         const draft = validateModel(entry, { seed: false });
         assertNewModelId(draft.id);
+        const pinnedFrom = registries.snapshotSources(draft.sources);
         const pinned = validateModel(await pinSources(draft), { seed: false });
         return queue.run(async () => {
             assertNewModelId(pinned.id);
+            registries.recheck(pinnedFrom);
             state.registry.push(JSON.parse(JSON.stringify({ ...pinned, seed: undefined })));
             save();
             return { model: pinned };
@@ -1985,9 +1995,11 @@ export function createController({
     async function updateModel(entry) {
         const candidate = validateModel(entry);
         const existing = validateModel(state.registry[userModelIndex(candidate.id)]);
+        const pinnedFrom = registries.snapshotSources(candidate.sources);
         const pinned = validateModel(await pinSources(carryPins(candidate, existing)), { seed: false });
         return queue.run(async () => {
             const index = userModelIndex(pinned.id);
+            registries.recheck(pinnedFrom);
             const current = validateModel(state.registry[index]);
             assertModelNotInUse(current);
             // A changed or removed source must not leave its downloaded weights
@@ -2245,6 +2257,7 @@ export function createController({
         removeModel,
         installRunner,
         uninstallRunner,
+        ...registryOperations,
         redetectRunners,
         drain,
         get state() { return state; },

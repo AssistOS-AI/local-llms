@@ -494,6 +494,208 @@
       "env": {
         "TOOL_NAME": "local_llm_model_lookup"
       }
+    },
+    {
+      "name": "local_llm_registry_list",
+      "title": "List model registries",
+      "description": "List the registries models can come from: the built-in huggingface, dockerhub, ghcr and modelscope, and those an administrator added. Each shows its kind, URL, weight formats, whether it is enabled, its auth origins, whether a credential is set (set, none, or unreadable when this agent's key cannot read it), and the models that use it. credentialStorage says whether credentials can be stored. Never returns a credential.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_registry_list"
+      }
+    },
+    {
+      "name": "local_llm_registry_save",
+      "title": "Add or change a model registry",
+      "description": "Add a registry (id, kind huggingface, oci or modelscope, an https url naming a DNS host, optional label, enabled and, for oci, up to 4 authOrigins), or change one. The kind never changes, and the URL cannot change while a model uses the registry. A new URL or new auth origins delete the stored credential. Built-in registries can only be enabled or disabled; huggingface cannot be changed. Registries are reached only at globally routable addresses.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "registry": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 32,
+                "pattern": "^[a-z0-9][a-z0-9-]{1,31}$",
+                "description": "2-32 lowercase letters, digits or dashes."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "huggingface",
+                  "oci",
+                  "modelscope"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "maxLength": 512,
+                "description": "https://host[:port], plus a path prefix for the huggingface kind."
+              },
+              "label": {
+                "type": "string",
+                "maxLength": 60
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "authOrigins": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4,
+                "items": {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                "description": "oci only: the https origins whose token realm may receive the credential."
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "registry"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_registry_save"
+      }
+    },
+    {
+      "name": "local_llm_registry_remove",
+      "title": "Remove a model registry",
+      "description": "Remove a registry an administrator added, and its credential. Refused while a model uses it. Built-in registries cannot be removed.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 32,
+            "pattern": "^[a-z0-9][a-z0-9-]{1,31}$"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_registry_remove"
+      }
+    },
+    {
+      "name": "local_llm_registry_credential_set",
+      "title": "Set a registry credential",
+      "description": "Store a registry's credential, encrypted, replacing any earlier one: a bearer token for the huggingface and modelscope kinds, or tokenUsername and token for an oci token realm. Write-only: no tool returns it. Refused with credentials_unavailable when the agent did not receive its credentials key, and for huggingface, which uses the operator's HF_TOKEN.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 32,
+            "pattern": "^[a-z0-9][a-z0-9-]{1,31}$"
+          },
+          "token": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "tokenUsername": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f:]{1,256}$",
+            "description": "oci only: the user name sent with the token to the token realm."
+          }
+        },
+        "required": [
+          "id",
+          "token"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_registry_credential_set"
+      }
+    },
+    {
+      "name": "local_llm_registry_credential_clear",
+      "title": "Clear a registry credential",
+      "description": "Delete a registry's stored credential; requests to it are then anonymous.",
+      "command": "node",
+      "args": [
+        "/code/tools/local_llm_tool.mjs"
+      ],
+      "cwd": "/code",
+      "timeoutMs": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 32,
+            "pattern": "^[a-z0-9][a-z0-9-]{1,31}$"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "admin"
+      ],
+      "env": {
+        "TOOL_NAME": "local_llm_registry_credential_clear"
+      }
     }
   ]
 }

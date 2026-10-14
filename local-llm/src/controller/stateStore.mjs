@@ -55,7 +55,8 @@ export function emptyState() {
     };
 }
 
-function writeAtomically(fsApi, target, text) {
+/** Write `text` to `target` atomically: a 0600 temporary file in the same directory (made 0700), fsync, rename. */
+export function writeAtomically(fsApi, target, text) {
     const directory = path.dirname(target);
     fsApi.mkdirSync(directory, { recursive: true, mode: 0o700 });
     const temporary = path.join(directory, `.${path.basename(target)}.${crypto.randomUUID()}.tmp`);

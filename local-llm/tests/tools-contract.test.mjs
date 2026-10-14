@@ -113,6 +113,54 @@ test('an admin reaches the controller operation of each tool', async () => {
     assert.equal(Object.keys(TOOL_OPERATIONS).length + 1, TOOL_NAMES.length);
 });
 
+test('A11: the credential tool declares token and tokenUsername, names AgentServer redacts, and refuses any other field', () => {
+    const config = read('mcp-config.json');
+    const set = config.tools.find((tool) => tool.name === 'local_llm_registry_credential_set');
+    const { properties, required, additionalProperties } = set.inputSchema;
+    assert.deepEqual(Object.keys(properties).sort(), ['id', 'token', 'tokenUsername']);
+    assert.deepEqual(required, ['id', 'token']);
+    assert.equal(additionalProperties, false);
+    // AgentServer redacts argument names that match this pattern from its logs.
+    for (const name of ['token', 'tokenUsername']) assert.match(name, /token|secret|credential/i, name);
+    assert.deepEqual([properties.token.minLength, properties.token.maxLength], [1, 4096]);
+    assert.equal(properties.tokenUsername.maxLength, 256);
+    const username = new RegExp(properties.tokenUsername.pattern);
+    assert.ok(username.test('robot') && username.test('u'.repeat(256)));
+    assert.ok(!username.test('ro\nbot') && !username.test('ro:bot') && !username.test('u'.repeat(257)) && !username.test(''));
+    for (const name of ['local_llm_registry_list', 'local_llm_registry_save', 'local_llm_registry_remove', 'local_llm_registry_credential_clear']) {
+        const tool = config.tools.find((entry) => entry.name === name);
+        assert.ok(tool, name);
+        assert.equal(Object.keys(tool.inputSchema.properties).some((key) => /token|secret|credential/i.test(key)), false, `${name} takes no credential`);
+    }
+    const save = config.tools.find((tool) => tool.name === 'local_llm_registry_save').inputSchema.properties.registry;
+    assert.equal(save.additionalProperties, false);
+    assert.deepEqual(Object.keys(save.properties).sort(), ['authOrigins', 'enabled', 'id', 'kind', 'label', 'url']);
+});
+
+test('the registry tools reach their controller operations, passing a credential through without echoing it', async () => {
+    const seen = [];
+    const call = async (op, args) => { seen.push([op, args]); return op === 'setRegistryCredential' ? { id: args.id, credential: 'set' } : { ok: true }; };
+    const authInfo = { user: { roles: ['admin'] } };
+    await handleTool('local_llm_registry_list', { ignored: true }, { authInfo, call });
+    await handleTool('local_llm_registry_save', { registry: { id: 'mirror', enabled: false } }, { authInfo, call });
+    await handleTool('local_llm_registry_remove', { id: 'mirror' }, { authInfo, call });
+    const result = await handleTool('local_llm_registry_credential_set', { id: 'ghcr', token: 'pass-through-value', tokenUsername: 'robot' }, { authInfo, call });
+    await handleTool('local_llm_registry_credential_set', { id: 'ghcr', token: 'pass-through-value' }, { authInfo, call });
+    await handleTool('local_llm_registry_credential_clear', { id: 'ghcr' }, { authInfo, call });
+    assert.deepEqual(seen, [
+        ['listRegistries', {}],
+        ['saveRegistry', { registry: { id: 'mirror', enabled: false } }],
+        ['removeRegistry', { id: 'mirror' }],
+        ['setRegistryCredential', { id: 'ghcr', token: 'pass-through-value', tokenUsername: 'robot' }],
+        ['setRegistryCredential', { id: 'ghcr', token: 'pass-through-value' }],
+        ['clearRegistryCredential', { id: 'ghcr' }],
+    ]);
+    assert.equal(JSON.stringify(result).includes('pass-through-value'), false);
+    // The tool entry itself never logs or prints its input.
+    const entry = fs.readFileSync(new URL('tools/local_llm_tool.mjs', ROOT), 'utf8');
+    assert.doesNotMatch(entry, /console\.|stderr/);
+});
+
 test('Install records the verified caller as the licence acceptor and takes no URL or acceptor from input', async () => {
     const seen = [];
     const call = async (op, args) => { seen.push([op, args]); return { ok: true }; };
@@ -268,6 +316,8 @@ test('the manifest declares the LM Studio switch as an optional variable that is
         // The operator's switch for experimental vLLM on unified memory (DS004), off by default.
         [VLLM_UNIFIED_SWITCH]: { required: false },
         LOCAL_LLM_AMD_APU: { required: false }, LOCAL_LLM_APU_GUARD_FLOOR_BYTES: { required: false },
+        // The registry credentials key, a Ploinky generated secret (DS002); recomputed, never stored.
+        LOCAL_LLM_CREDENTIALS_KEY: { generatedSecret: true },
     });
     assert.match(manifest.description, new RegExp(`ploinky var ${VLLM_UNIFIED_SWITCH} experimental`));
     assert.match(manifest.description, /LM Studio/);

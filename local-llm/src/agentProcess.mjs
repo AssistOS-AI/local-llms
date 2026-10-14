@@ -4,6 +4,12 @@
 // transport, a fake Hugging Face base URL), which nothing in the environment
 // can supply.
 //
+// The registry credentials key (LOCAL_LLM_CREDENTIALS_KEY, a Ploinky generated
+// secret) is read once and deleted from this process's environment before
+// anything is spawned, then passed explicitly to the controller and the
+// registry service. AgentServer, which gets a copy of the environment, and
+// every child spawned without an explicit environment therefore never see it.
+//
 // Modelled on AssistOSExplorer/userPersistoAgent/main.mjs. It owns downloads
 // and runner processes, serves the container-local control socket, and
 // spawns /Agent/server/AgentServer.mjs directly (not AgentServer.sh, whose
@@ -16,11 +22,24 @@ import { join } from 'node:path';
 import { controllerHandlers } from './controlHandlers.mjs';
 import { newControlChannel, startControlServer } from './controlSocket.mjs';
 import { createController } from './controller/deployments.mjs';
+import { createRegistryService } from './controller/registries.mjs';
 import { AGENT_SERVER_KILL_MS, DRAIN_DEADLINE_MS } from './drainBudget.mjs';
 
 
-/** Starts the agent once per process. `controllerOptions` are merged over the production controller options. */
-export function startAgent({ controllerOptions = {} } = {}) {
+/**
+ * Starts the agent once per process. `controllerOptions` are merged over the production controller options. The
+ * other options are test seams for the process's collaborators; production uses the real ones.
+ */
+export function startAgent({
+    controllerOptions = {},
+    makeController = createController,
+    makeRegistryService = createRegistryService,
+    spawnProcess = spawn,
+    startServer = startControlServer,
+} = {}) {
+    // N4: the key is taken out of the environment before anything else runs, and travels only as an option.
+    const credentialsKey = process.env.LOCAL_LLM_CREDENTIALS_KEY ?? null;
+    delete process.env.LOCAL_LLM_CREDENTIALS_KEY;
     // The control channel is new on every start: an abstract socket name (tests
     // may choose it) and a token that only AgentServer receives, through its
     // environment. A token in this process's own environment is never used and
@@ -84,15 +103,18 @@ export function startAgent({ controllerOptions = {} } = {}) {
     }
 
     const startup = (async () => {
-        controller = createController({ dataDir: process.env.LOCAL_LLM_DATA_DIR || '/data', ...controllerOptions });
-        control = await startControlServer({
+        const options = { dataDir: process.env.LOCAL_LLM_DATA_DIR || '/data', ...controllerOptions };
+        const registryService = makeRegistryService({ dataDir: options.dataDir, credentialsKey,
+            ...(options.hfBaseUrl ? { hfBaseUrl: options.hfBaseUrl } : {}) });
+        controller = makeController({ ...options, credentialsKey, registryService });
+        control = await startServer({
             socketPath,
             token: channel.token,
             handlers: controllerHandlers(controller),
         });
         if (stopping) return;
         // The generic runtime owns MCP, invocation verification and tool dispatch.
-        agentServer = spawn(process.execPath, [
+        agentServer = spawnProcess(process.execPath, [
             join(process.env.PLOINKY_AGENT_LIB_DIR || '/Agent', 'server', 'AgentServer.mjs'),
         ], {
             env: { ...process.env, LOCAL_LLM_SOCKET: socketPath, LOCAL_LLM_CONTROL_TOKEN: channel.token },

@@ -68,6 +68,9 @@
         },
         "LOCAL_LLM_APU_GUARD_FLOOR_BYTES": {
           "required": false
+        },
+        "LOCAL_LLM_CREDENTIALS_KEY": {
+          "generatedSecret": true
         }
       }
     }

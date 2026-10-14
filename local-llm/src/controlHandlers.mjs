@@ -16,6 +16,12 @@ export function controllerHandlers(controller) {
         removeModel: (args) => controller.removeModel(args),
         installRunner: (args) => controller.installRunner(args),
         uninstallRunner: (args) => controller.uninstallRunner(args),
+        // Model registries and their write-only credentials (DS002).
+        listRegistries: () => controller.listRegistries(),
+        saveRegistry: (args) => controller.saveRegistry(args),
+        removeRegistry: (args) => controller.removeRegistry(args),
+        setRegistryCredential: (args) => controller.setRegistryCredential(args),
+        clearRegistryCredential: (args) => controller.clearRegistryCredential(args),
         chatTarget: () => controller.chatTarget(),
         beginPromptObservation: (args) => controller.beginPromptObservation(args),
         recordPromptObservation: (args) => controller.recordPromptObservation(args),
