@@ -33,6 +33,7 @@ local-llms/
     src/controlHandlers.mjs                       the control socket's operations on the controller (DS001)
     src/controller/                               state, admission, profiles, downloads, runner processes
     src/controller/ggufHeader.mjs                 the bounded GGUF header reader and the sizing read from it (DS002)
+    src/controller/gpuBudgetGuard.mjs             the unified guard's GPU memory sampler and budget decision on the qualified GB10 (DS005)
     src/controller/modelLookup.mjs                the Hugging Face lookup behind the Add model form (DS002)
     src/runners/                                  one adapter per runner
     tools/                                        MCP tool entry points and the CI install check

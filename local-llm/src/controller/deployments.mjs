@@ -32,10 +32,14 @@ import {
     verifySnapshotFile,
 } from './downloader.mjs';
 import { ggufSizing, readGgufHeaderFile } from './ggufHeader.mjs';
+import { gpuGuardSignal, gpuGuardStats, startGpuBudgetGuard } from './gpuBudgetGuard.mjs';
 import {
     readCgroupMemoryObservation,
+    readGpuProcesses as readHostGpuProcesses,
+    readLeafMemoryStat as readHostLeafMemoryStat,
     readMemory as readHostMemory,
     readMemoryPressure,
+    readProcessGroup,
     readSnapshot,
     stoppedQueriesSettled,
     unreapedQueries as hardwareUnreaped,
@@ -212,6 +216,12 @@ export function createController({
     apuActivityCounterLimit = Number.MAX_SAFE_INTEGER,
     // A container memory limit's current headroom (ploinkyBudget.mjs), sampled by the guard.
     readBudget = () => readCgroupMemoryObservation(),
+    // The unified guard's GPU-aware stop on a qualified GB10 (DS005): the runner's GPU memory from nvidia-smi
+    // every gpuSampleMs, a PID's process group, and the leaf cgroup's memory.stat.
+    readGpuProcesses = (options) => readHostGpuProcesses(options),
+    readProcGroup = (pid) => readProcessGroup(pid),
+    readLeafMemoryStat = () => readHostLeafMemoryStat(),
+    gpuSampleMs = UNIFIED.gpuSampleMs,
     // The hardware profile; null decides it from the first snapshot (DS005).
     profile: fixedProfile = null,
     // What the image contains; null (no source.contract) makes every runner available.
@@ -318,6 +328,9 @@ export function createController({
     let committedIcdFile = null;
     // The unified guard's view of the current runner (in memory only).
     let guardStats = null;
+    // The GPU facts a Run was admitted on, from recheckAdmission's snapshot, for the guard's GPU-aware stop.
+    // In memory only, keyed by the deployment object: never persisted, never in a status or overview.
+    const admittedGpuFacts = new WeakMap();
 
     function evidenceMonotonicMs() {
         let value;
@@ -1158,7 +1171,21 @@ export function createController({
         };
         const budgeted = Number.isSafeInteger(sampleBudget()?.finiteMemoryBytes);
         let unreadableBudgetSamples = 0;
+        let tickBudget = null;
         if (pooled) guardStats = { floorBytes: floor, minAvailableBytes: null, maxPressureAvg10: null, samples: 0 };
+        // On a qualified GB10 under a finite budget and no GPU share the GPU memory the cgroup does not
+        // charge is added to the charge (DS005). Otherwise no sampler starts and the signal says why.
+        let gpuGuard = null;
+        if (unified) {
+            const signal = gpuGuardSignal(admittedGpuFacts.get(deployment), budgeted);
+            Object.assign(guardStats, gpuGuardStats(signal));
+            if (signal === 'unavailable') {
+                gpuGuard = startGpuBudgetGuard({
+                    runnerPid: current.pid, intervalMs: gpuSampleMs, stats: guardStats, readGpuProcesses, readProcGroup,
+                    readLeafStat: readLeafMemoryStat, monotonicNow, wallNow: () => now().getTime(),
+                });
+            }
+        }
         let lastSampleMs = monotonicNow();
         if (apu) guardStats.maxMonotonicGapMs = 0;
         const schedule = () => {
@@ -1169,6 +1196,7 @@ export function createController({
         };
         const breach = (message, { kill = pooled, cause = null } = {}) => {
             cancelled = true;
+            gpuGuard?.cancel();
             stopForMemory(deployment, current, message, { kill, cause }).catch(() => {});
         };
         // The available memory within the container budget, or undefined when
@@ -1176,6 +1204,7 @@ export function createController({
         const withinBudget = (available, memory) => {
             if (!budgeted) return available;
             const observation = sampleBudget();
+            tickBudget = observation;
             if (observation?.memoryReadState !== 'known'
                 || (knownByte(observation.finiteMemoryBytes)
                     && (!knownByte(memory?.totalBytes) || !knownByte(memory?.availableBytes) || !knownByte(observation.headroomBytes)))) {
@@ -1187,6 +1216,7 @@ export function createController({
             return Math.min(available, observation.finiteMemoryBytes, observation.headroomBytes);
         };
         const budgetUnreadable = () => {
+            gpuGuard?.unavailable();
             if (unreadableBudgetSamples < 2) {
                 schedule();
                 return;
@@ -1249,6 +1279,13 @@ export function createController({
                     breach(`stopped: memory pressure ${pressure.toFixed(1)} % with ${gib(available)} available`);
                     return;
                 }
+                // After the floor and pressure checks, so their messages keep priority.
+                const over = gpuGuard?.evaluate(tickBudget);
+                if (over) {
+                    breach(`stopped: over the Ploinky RAM budget (${gib(over.chargedBytes)} charged + ${gib(over.gpuBytes)} GPU, `
+                        + `budget ${gib(over.budgetBytes)})`, { kill: true });
+                    return;
+                }
                 schedule();
                 return;
             }
@@ -1262,6 +1299,7 @@ export function createController({
         return () => {
             cancelled = true;
             clearTimeout(timer);
+            gpuGuard?.cancel();
         };
     }
 
@@ -1357,6 +1395,10 @@ export function createController({
             definition, model, source, params: deployment.params, snap, remainingDownloadBytes, selected: deployment.profile,
         });
         deployment.admission = result;
+        admittedGpuFacts.set(deployment, {
+            gpu: { driverVersion: snap?.gpu?.driverVersion, device: { pciDeviceId: snap?.gpu?.device?.pciDeviceId } },
+            shareKnown: gpuBudgetOf(snap, env).state === 'known',
+        });
         if (result.status !== 'ok') {
             throw new LocalLlmError(`admission_${result.status.replace('-', '_')}`, result.reason, { admission: result });
         }

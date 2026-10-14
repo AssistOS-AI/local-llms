@@ -135,6 +135,20 @@ function optionalNumber(text) {
 // as nvidia-smi prints it): NVIDIA GB10 (DGX Spark).
 export const KNOWN_UNIFIED_DEVICE_IDS = Object.freeze(['0x2E1210DE']);
 const UNIFIED_ADDRESSING = Object.freeze(['ATS', 'HMM']);
+
+// The GB10 tuples whose allocation kinds were measured against the memory
+// cgroup (Phase 0, run gb10p-20261014151531-013eff5b): the GPU-aware budget
+// stop (DS005) runs only on these. An exact driver, never a branch: a driver
+// update is unqualified until it is measured again.
+export const UNIFIED_QUALIFIED_TUPLES = Object.freeze([
+    Object.freeze({ pciDeviceId: '0x2E1210DE', driverVersion: '580.178.04', evidenceRun: 'gb10p-20261014151531-013eff5b' }),
+]);
+
+/** True only for a GPU whose PCI device id (as readGpu normalises it) and driver version match a qualified tuple. */
+export function unifiedTupleQualified(gpu) {
+    const driverVersion = typeof gpu?.driverVersion === 'string' ? gpu.driverVersion.trim() : null;
+    return UNIFIED_QUALIFIED_TUPLES.some((tuple) => tuple.pciDeviceId === gpu?.device?.pciDeviceId && tuple.driverVersion === driverVersion);
+}
 // The second, optional query (DS005). The first query stays exactly as it was,
 // so an older driver that does not know a field here loses only these values.
 export const DEVICE_QUERY_FIELDS = 'pci.device_id,compute_cap,addressing_mode,utilization.gpu,power.draw,temperature.gpu';
@@ -175,6 +189,69 @@ export function memoryModelOf({ memoryNumeric, device }) {
 function csvRows(text) {
     return text.split('\n').map((line) => line.trim()).filter(Boolean)
         .map((line) => line.split(',').map((cell) => cell.trim()));
+}
+
+const COMPUTE_APPS_ARGS = Object.freeze(['--query-compute-apps=pid,process_name,used_memory', '--format=csv,noheader,nounits']);
+// The budget guard's sampler bounds each query by this (DS005); the guard's own stop ends it sooner.
+const GPU_PROCESSES_TIMEOUT_MS = 1500;
+
+/**
+ * The compute apps of the GPU in one `nvidia-smi` spawn: the cheap query the
+ * unified budget guard repeats. A row whose PID or memory is not a plain
+ * number (`[N/A]`, empty, garbage) is dropped; `readGpu` keeps its own
+ * parse of the same query. Never throws for a failed query: a stop (`signal`)
+ * gives `{ ok: false, reason: 'aborted' }`.
+ */
+export async function readGpuProcesses({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI, signal, timeoutMs = GPU_PROCESSES_TIMEOUT_MS } = {}) {
+    const startedMs = performance.now();
+    const query = await run(execFileImpl, nvidiaSmi, COMPUTE_APPS_ARGS, { signal, timeoutMs });
+    const execMs = performance.now() - startedMs;
+    if (query.aborted) return { ok: false, reason: 'aborted', execMs };
+    if (!query.ok) return { ok: false, reason: `nvidia-smi failed: ${(query.stderr || query.error?.message || '').trim().slice(0, 200)}`, execMs };
+    const rows = [];
+    for (const [pid, name, usedMemory] of csvRows(query.stdout)) {
+        if (!/^\d+$/.test(pid ?? '') || !/^\d+$/.test(usedMemory ?? '')) continue;
+        const pidNumber = Number(pid);
+        const usedBytes = Number(usedMemory) * MIB;
+        if (Number.isSafeInteger(pidNumber) && Number.isSafeInteger(usedBytes)) rows.push({ pid: pidNumber, name, usedBytes });
+    }
+    return { ok: true, rows, execMs };
+}
+
+/**
+ * The process group of a process from `/proc/<pid>/stat`, or null when it does
+ * not exist or cannot be parsed. The command name is parenthesised and may
+ * itself hold `) `, so the fields are read after the last `)`.
+ */
+export function readProcessGroup(pid, { fsApi = fs } = {}) {
+    if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+    const text = readText(fsApi, `/proc/${pid}/stat`);
+    const end = text ? text.lastIndexOf(')') : -1;
+    if (end < 0) return null;
+    // After the name: state, ppid, pgrp.
+    const fields = text.slice(end + 1).trim().split(/\s+/);
+    return /^\d+$/.test(fields[2] ?? '') ? Number(fields[2]) : null;
+}
+
+/**
+ * The reclaimable page cache of a cgroup v2 `memory.stat`: `active_file +
+ * inactive_file`. Pinned host memory (`shmem`) lives on the anonymous LRU
+ * lists and is not in these, so it stays counted. Null when either is missing.
+ */
+export function parsePageCacheBytes(text) {
+    if (typeof text !== 'string') return null;
+    const field = (name) => {
+        const match = new RegExp(`^${name} (\\d+)$`, 'm').exec(text);
+        return match ? Number(match[1]) : null;
+    };
+    const active = field('active_file');
+    const inactive = field('inactive_file');
+    return Number.isSafeInteger(active) && Number.isSafeInteger(inactive) && Number.isSafeInteger(active + inactive) ? active + inactive : null;
+}
+
+/** The leaf cgroup's `memory.stat` text (the same root as memory.max and memory.current), or null when unreadable. */
+export function readLeafMemoryStat({ fsApi = fs } = {}) {
+    return readText(fsApi, '/sys/fs/cgroup/memory.stat');
 }
 
 /**
@@ -239,10 +316,7 @@ export async function readGpu({ execFileImpl = execFile, nvidiaSmi = NVIDIA_SMI,
                 + 'GPUs that share system memory are supported only when the driver reports ATS or HMM addressing.',
         };
     }
-    const apps = await run(execFileImpl, nvidiaSmi, [
-        '--query-compute-apps=pid,process_name,used_memory',
-        '--format=csv,noheader,nounits',
-    ], { signal });
+    const apps = await run(execFileImpl, nvidiaSmi, COMPUTE_APPS_ARGS, { signal });
     if (apps.aborted) throw apps.error;
     const processes = apps.ok
         ? csvRows(apps.stdout).map(([pid, processName, usedMemory]) => ({

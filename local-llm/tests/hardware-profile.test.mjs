@@ -13,6 +13,8 @@ import {
     readMemory,
     readMemoryPressure,
 } from '../src/controller/hardware.mjs';
+import * as hardware from '../src/controller/hardware.mjs';
+import { observeMemoryBudget } from '../src/controller/ploinkyBudget.mjs';
 import { getRunner } from '../src/runners/index.mjs';
 
 const MIB = 1024 * 1024;
@@ -243,5 +245,105 @@ test('until a runner has a unified-memory policy, a unified GPU refuses it by na
         const decision = admit({ runner, model: GPT, source, params: runner.normalizeParams({}, { model: GPT }), snapshot });
         assert.equal(decision.status, 'incompatible', runnerId);
         assert.equal(decision.reason, `${runner.displayName} is not available on a GPU that shares system memory (NVIDIA GB10) in this release.`);
+    }
+});
+
+// A-LL-11b (the local-llm half; ploinky pins its own table, A-P-19): the GB10 tuple the GPU-aware budget stop is qualified on.
+test('A-LL-11b: the GPU-aware budget stop is qualified for exactly PCI 0x2E1210DE with driver 580.178.04', () => {
+    const gpu = (pciDeviceId, driverVersion) => ({ driverVersion, device: { pciDeviceId } });
+    assert.deepEqual(hardware.UNIFIED_QUALIFIED_TUPLES.map(({ pciDeviceId, driverVersion }) => [pciDeviceId, driverVersion]),
+        [['0x2E1210DE', '580.178.04']]);
+    assert.equal(hardware.unifiedTupleQualified(gpu('0x2E1210DE', '580.178.04')), true);
+    // The driver is compared after trim; nothing else is normalised.
+    assert.equal(hardware.unifiedTupleQualified(gpu('0x2E1210DE', ' 580.178.04\n')), true);
+    for (const rejected of [
+        gpu('0x2E1210DE', '580.159.03'), gpu('0x2E1210DE', '580.95.05'), gpu('0x2E1210DE', '580.178.040'), gpu('0x2E1210DE', '580.178'),
+        gpu('0x2E1210DE', '580'), gpu('0x2E1210DE', undefined), gpu('0x2E1210DE', 580.178), gpu('0x2e1210de', '580.178.04'),
+        gpu('0x2B0010DE', '580.178.04'), gpu(null, '580.178.04'), { driverVersion: '580.178.04' }, {}, null, undefined,
+    ]) assert.equal(hardware.unifiedTupleQualified(rejected), false, JSON.stringify(rejected));
+});
+
+// A-LL-16h and the readGpuProcesses contract (r6 n3): the shared query drops bad rows only in readGpuProcesses.
+test('readGpuProcesses: one bounded spawn, rows with a plain PID and memory, never throws', async () => {
+    const calls = [];
+    const host = (answer) => (command, args, options, callback) => {
+        calls.push({ command, args, timeout: options.timeout });
+        if (answer instanceof Error) callback(answer, '', 'boom');
+        else callback(null, answer, '');
+    };
+    const rowsOf = (answer) => hardware.readGpuProcesses({ execFileImpl: host(answer), nvidiaSmi: SMI });
+    const good = await rowsOf('59, /opt/llama.cpp/llama-server, 11875\n61, python, 512\n');
+    assert.equal(good.ok, true);
+    assert.deepEqual(good.rows, [
+        { pid: 59, name: '/opt/llama.cpp/llama-server', usedBytes: 11875 * MIB },
+        { pid: 61, name: 'python', usedBytes: 512 * MIB },
+    ]);
+    assert.ok(Number.isFinite(good.execMs) && good.execMs >= 0);
+    assert.deepEqual(calls, [{ command: SMI, args: APPS_QUERY, timeout: 1500 }], 'one spawn, bounded at 1500 ms');
+    const garbage = await rowsOf('garbage\nx, y, 5\n7, p, [N/A]\n8, p, \n, p, 5\n9, p, 1.5\n12, p, 4\n');
+    assert.equal(garbage.ok, true);
+    assert.deepEqual(garbage.rows, [{ pid: 12, name: 'p', usedBytes: 4 * MIB }], 'a non-numeric PID or memory drops that row');
+    const none = await rowsOf('');
+    assert.equal(none.ok, true);
+    assert.deepEqual(none.rows, []);
+    const failed = await rowsOf(Object.assign(new Error('exit 1'), { code: 1 }));
+    assert.equal(failed.ok, false);
+    assert.match(failed.reason, /^nvidia-smi failed: boom/);
+    // A stop is a result, never a throw.
+    const controller = new AbortController();
+    controller.abort();
+    const aborted = await hardware.readGpuProcesses({ execFileImpl: host('1, p, 1'), nvidiaSmi: SMI, signal: controller.signal });
+    assert.equal(aborted.ok, false);
+    assert.equal(aborted.reason, 'aborted');
+});
+
+// A-LL-16h: readGpuProcesses is built on a shared query, and readGpu's own output for a garbage row must not change.
+test('A-LL-16h: readGpu keeps NaN and an undefined name for a garbage compute-apps row, as before', async () => {
+    const { gpu } = await read({ [GPU_QUERY[0]]: GB10_LINE, [DEVICE_QUERY[0]]: GB10_DEVICE, [APPS_QUERY[0]]: 'garbage\n7, p, [N/A]\n' });
+    assert.equal(gpu.processes.length, 2);
+    assert.ok(Number.isNaN(gpu.processes[0].pid) && gpu.processes[0].name === undefined && Number.isNaN(gpu.processes[0].usedBytes));
+    assert.equal(gpu.processes[1].pid, 7);
+    assert.ok(Number.isNaN(gpu.processes[1].usedBytes));
+});
+
+// A-LL-16f: the command name is parenthesised and may hold ") ", so the fields are read after the last ")".
+test('readProcessGroup parses pgrp after the last ")" of /proc/<pid>/stat, and null for anything else', () => {
+    const fsApi = (files) => ({ readFileSync(file) {
+        if (!Object.hasOwn(files, file)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        return files[file];
+    } });
+    const api = fsApi({
+        '/proc/7000/stat': '7000 (llama-server) S 1 7000 7000 0 -1 4194560 1 0 0\n',
+        '/proc/7001/stat': '7001 (ev) S ) 1) S 1 7001 7001 0 -1 4194560\n',
+        '/proc/7002/stat': '7002 (child) R 7000 7000 7000 0 -1\n',
+        '/proc/7003/stat': 'no parentheses here\n',
+        '/proc/7004/stat': '7004 (short) S 1\n',
+    });
+    assert.equal(hardware.readProcessGroup(7000, { fsApi: api }), 7000);
+    assert.equal(hardware.readProcessGroup(7001, { fsApi: api }), 7001, 'the correct pgrp, not a field of the name');
+    assert.equal(hardware.readProcessGroup(7002, { fsApi: api }), 7000);
+    for (const pid of [7003, 7004, 7999, 0, -1, 1.5, NaN, undefined]) assert.equal(hardware.readProcessGroup(pid, { fsApi: api }), null, String(pid));
+});
+
+test('parsePageCacheBytes: active_file + inactive_file only; file and shmem are ignored; either missing is unreadable', () => {
+    const stat = (extra) => `anon 100\nfile 5368709120\nshmem 1073741824\n${extra}`;
+    assert.equal(hardware.parsePageCacheBytes(stat('active_file 1610612736\ninactive_file 536870912\n')), 2 * 1024 * MIB);
+    assert.equal(hardware.parsePageCacheBytes(stat('active_file 0\ninactive_file 0\n')), 0);
+    for (const bad of [stat('active_file 5\n'), stat('inactive_file 5\n'), stat(''), stat('active_file x\ninactive_file 1\n'),
+        'xactive_file 1\ninactive_file 1\n', null, undefined, 12]) assert.equal(hardware.parsePageCacheBytes(bad), null, String(bad));
+});
+
+// rn1: the budget read that gives the limit also gives memory.current, without changing the observation's published shape.
+test('observeMemoryBudget carries the same read\'s memory.current as a non-enumerable currentBytes', () => {
+    const known = observeMemoryBudget({ maxText: String(12 * GIB), currentText: String(5 * GIB) });
+    assert.equal(known.currentBytes, 5 * GIB);
+    assert.deepEqual(Object.keys(known), ['memoryReadState', 'finiteMemoryBytes', 'headroomBytes', 'reasonCode']);
+    assert.deepEqual(known, { memoryReadState: 'known', finiteMemoryBytes: 12 * GIB, headroomBytes: 7 * GIB, reasonCode: null });
+    assert.ok(Object.isFrozen(known));
+    assert.equal(Object.getOwnPropertyDescriptor(known, 'currentBytes').enumerable, false);
+    assert.equal(JSON.stringify(known).includes('currentBytes'), false);
+    // An unlimited or unreadable budget has none.
+    for (const unlimited of [observeMemoryBudget({ maxText: 'max', currentText: '1' }), observeMemoryBudget({ maxText: String(GIB), currentText: 'x' })]) {
+        assert.equal(unlimited.currentBytes, undefined);
     }
 });

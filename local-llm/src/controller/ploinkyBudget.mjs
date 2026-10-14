@@ -46,7 +46,8 @@ export function parseCpuQuota(text) {
 
 /**
  * The internal memory-budget observation: {memoryReadState, finiteMemoryBytes,
- * headroomBytes, reasonCode}. `maxText` is the file's text, `undefined` when
+ * headroomBytes, reasonCode} plus a non-enumerable `currentBytes` when the
+ * limit is finite and known. `maxText` is the file's text, `undefined` when
  * memory.max does not exist, or `null` when it exists but cannot be read.
  * `established` is a finite limit seen before: a later failure to read the
  * limit never turns it into unlimited.
@@ -67,12 +68,16 @@ export function observeMemoryBudget({ maxText, currentText, established = null }
     const finite = max.bytes;
     const current = parseCgroupBytes(currentText);
     if (current.state !== 'known') return unknownBudget(finite);
-    return Object.freeze({
+    const observation = {
         memoryReadState: 'known',
         finiteMemoryBytes: finite,
         headroomBytes: Math.max(0, finite - current.bytes),
         reasonCode: null,
-    });
+    };
+    // The same read's memory.current, for the unified guard's GPU-aware stop (DS005). Not enumerable:
+    // the published shape of the observation does not change.
+    Object.defineProperty(observation, 'currentBytes', { value: current.bytes, enumerable: false });
+    return Object.freeze(observation);
 }
 
 function noBudget() {

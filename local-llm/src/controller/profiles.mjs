@@ -50,6 +50,9 @@ export const UNIFIED = Object.freeze({
     batchSize: 2048,
     // The memory guard samples MemAvailable this often, loading or ready.
     guardSampleMs: 250,
+    // The budget guard reads the runner's GPU memory this often on a qualified
+    // GB10 under a finite Ploinky RAM budget; a sample older than twice this is stale (DS005).
+    gpuSampleMs: 2000,
     // PSI memory `full avg10` stops a runner only together with MemAvailable
     // below twice the floor: page-cache reclaim alone reached 14-28 with 45 GiB
     // or more available.

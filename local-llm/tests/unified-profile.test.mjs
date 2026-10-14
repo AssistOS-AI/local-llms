@@ -11,7 +11,7 @@ import test from 'node:test';
 import { admit } from '../src/controller/admission.mjs';
 import { loadSeedCatalog, validateModel } from '../src/controller/catalog.mjs';
 import { createController, dropPageCache, readImageContract } from '../src/controller/deployments.mjs';
-import { attachMemoryBudget } from '../src/controller/ploinkyBudget.mjs';
+import { attachMemoryBudget, observeMemoryBudget } from '../src/controller/ploinkyBudget.mjs';
 import { UNIFIED, envelopeFor, profileOf } from '../src/controller/profiles.mjs';
 import { createLogBuffer, startRunnerProcess } from '../src/controller/runnerProcess.mjs';
 import { createStateStore } from '../src/controller/stateStore.mjs';
@@ -170,7 +170,7 @@ function deferred() {
 }
 
 function harness(t, { snap = unifiedSnapshot(), seed = [...SEED, MEASURED], imageContract = null, fileExists = () => true,
-    readMemory, readPressure = () => 0, readBudget, unifiedGuardMs = 5, downloads = true, dropCache } = {}) {
+    readMemory, readPressure = () => 0, readBudget, unifiedGuardMs = 5, downloads = true, dropCache, controllerOptions = {}, exitDelayMs = 0 } = {}) {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-llm-unified-'));
     t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
     const started = [];
@@ -193,7 +193,14 @@ function harness(t, { snap = unifiedSnapshot(), seed = [...SEED, MEASURED], imag
                 pid: 7000 + started.length, command, args, env, exited: exit.promise,
                 get running() { return running; },
                 async stop() { running = false; handle.stopped = 'SIGTERM'; exit.resolve({ code: 0, signal: 'SIGTERM', error: null }); return exit.promise; },
-                async kill() { running = false; handle.stopped = 'SIGKILL'; exit.resolve({ code: null, signal: 'SIGKILL', error: null }); return exit.promise; },
+                async kill() {
+                    running = false;
+                    handle.stopped = 'SIGKILL';
+                    // A real process takes a moment to exit after SIGKILL; a test may model that.
+                    if (exitDelayMs) setTimeout(() => exit.resolve({ code: null, signal: 'SIGKILL', error: null }), exitDelayMs);
+                    else exit.resolve({ code: null, signal: 'SIGKILL', error: null });
+                    return exit.promise;
+                },
             };
             started.push(handle);
             return handle;
@@ -210,6 +217,7 @@ function harness(t, { snap = unifiedSnapshot(), seed = [...SEED, MEASURED], imag
         readBudget,
         unifiedGuardMs,
         dropCache: dropCache || ((file) => { calls.dropped.push(file); return true; }),
+        ...controllerOptions,
     });
     return { controller, started, calls, dataDir, weights };
 }
@@ -569,4 +577,526 @@ test('a user model never reuses a seed id or a stored entry\'s id, whatever the 
     // Its weights can still be deleted on this host.
     const deleted = await h.controller.deleteWeights({ modelId: 'big-moe', runnerId: 'llama.cpp' });
     assert.equal(typeof deleted.freedBytes, 'number');
+});
+
+// ---------------------------------------------------------------------------
+// The GPU-aware budget stop (DS005, B1): on the qualified GB10 (PCI 0x2E1210DE, driver 580.178.04) under a finite
+// Ploinky RAM budget and no GPU share, the guard adds the runner's nvidia-smi memory to the memory the cgroup charges.
+// Every double below replaces nvidia-smi, /proc, the cgroup and the clock sources: no hardware is touched. The
+// existing GB10 stub (driver 580.159.03) stays the negative control.
+// ---------------------------------------------------------------------------
+const QUALIFIED = Object.freeze({ ...GB10, driverVersion: '580.178.04' });
+const RUNNER_PID = 7000; // the first runner the harness starts
+const budgetOf = (limit, current) => observeMemoryBudget({ maxText: String(limit), currentText: String(current) });
+const statText = ({ file = 0, shmem = 0, active = 0, inactive = 0 } = {}) =>
+    `anon 4096\nfile ${file}\nshmem ${shmem}\nactive_file ${active}\ninactive_file ${inactive}\n`;
+const heldRows = (bytes, extra = []) => ({
+    ok: true, rows: [{ pid: RUNNER_PID, name: '/opt/llama.cpp/llama-server', usedBytes: bytes }, ...extra], execMs: 3,
+});
+
+// An nvidia-smi double. `script(index)` returns the call's result, or undefined to leave the call pending until
+// `answer(index, result)` or the sampler's stop (when it honours it). Every call is recorded with its signal.
+function gpuStub(script, { honorsAbort = true } = {}) {
+    const stub = { calls: [], inFlight: 0, settle: [] };
+    stub.read = ({ signal }) => {
+        const index = stub.calls.length;
+        stub.calls.push({ signal });
+        stub.inFlight += 1;
+        return new Promise((resolve, reject) => {
+            let done = false;
+            const finish = (result, failure) => {
+                if (done) return;
+                done = true;
+                stub.inFlight -= 1;
+                signal.removeEventListener('abort', onAbort);
+                if (failure) reject(failure); else resolve(result);
+            };
+            const onAbort = () => { if (honorsAbort) finish({ ok: false, reason: 'aborted', execMs: 1 }); };
+            signal.addEventListener('abort', onAbort, { once: true });
+            stub.settle[index] = finish;
+            try {
+                const result = script(index);
+                if (result !== undefined) finish(result);
+            } catch (error) {
+                finish(null, error);
+            }
+        });
+    };
+    stub.answer = (index, result) => stub.settle[index](result);
+    return stub;
+}
+
+// A budgeted unified controller whose hardware reads are all doubles. `state` is what the doubles answer now.
+function gpuHarness(t, { limit = 12 * GIB, current = 2 * GIB, held = 0, stat = statText(), groups, script = (_, st) => heldRows(st.held),
+    honorsAbort = true, gpuSampleMs = 10, gpu = QUALIFIED, budgeted = true, readMemory, readPressure, controllerOptions = {}, exitDelayMs = 0 } = {}) {
+    const state = { limit, current, held, stat, groups: groups ?? new Map([[RUNNER_PID, RUNNER_PID]]) };
+    const stub = gpuStub((index) => script(index, state), { honorsAbort });
+    const h = harness(t, {
+        // Admission sees an ample budget so the run launches; the guard's own reads are constrained.
+        snap: () => {
+            const snap = unifiedSnapshot({ gpu });
+            return budgeted ? attachMemoryBudget(snap, observed(64 * GIB, 60 * GIB)) : snap;
+        },
+        readBudget: () => (budgeted ? budgetOf(state.limit, state.current) : observeMemoryBudget({ maxText: 'max', currentText: '0' })),
+        readMemory,
+        readPressure,
+        exitDelayMs,
+        controllerOptions: {
+            readGpuProcesses: stub.read,
+            readProcGroup: (pid) => state.groups.get(pid) ?? null,
+            readLeafMemoryStat: () => {
+                if (state.stat === null) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+                return state.stat;
+            },
+            gpuSampleMs,
+            ...controllerOptions,
+        },
+    });
+    return { ...h, state, stub };
+}
+
+const guardOf = async (h) => (await h.controller.status()).memoryGuard;
+const OVER_MESSAGE = /^stopped: over the Ploinky RAM budget \(/;
+const stoppedWith = async (h) => {
+    await until(() => h.controller.state.deployment?.phase === 'error');
+    assert.equal(h.started[0].stopped, 'SIGKILL', 'the process group is killed');
+    return h.controller.state.deployment.error;
+};
+// The run stays up through `ticks` guard ticks; with `samples`, also after that many completed GPU samples.
+async function staysUp(h, { ticks = 8, samples = 0 } = {}) {
+    await sampled(h, ticks);
+    if (samples) await until(async () => (await guardOf(h)).gpuSamples >= samples);
+    await sampled(h, 3);
+    assert.equal(h.controller.state.deployment.phase, 'ready', h.controller.state.deployment.error);
+    assert.equal(h.started[0].stopped, undefined, 'not stopped');
+}
+
+test('A-LL-13: a qualified GB10 stops when the charged memory plus the runner\'s GPU memory exceeds the budget', async (t) => {
+    const h = gpuHarness(t, { limit: 12 * GIB, current: 2 * GIB, held: 11 * GIB, readMemory: () => ({ totalBytes: TOTAL, availableBytes: 100 * GIB }) });
+    await startSmall(h, 'request-gpu-13');
+    const message = await stoppedWith(h);
+    assert.match(message, OVER_MESSAGE);
+    assert.equal(message, 'stopped: over the Ploinky RAM budget (2.0 GiB charged + 11.0 GiB GPU, budget 12.0 GiB)');
+    // One GiB over is not past the fast path: a second, newer sample confirmed it.
+    assert.ok(h.stub.calls.length >= 2, 'a newer sample confirms an overrun of 1 GiB or less');
+    const guard = await guardOf(h);
+    assert.equal(guard.gpuBudgetSignal, 'observed');
+    assert.equal(guard.gpuHeldBytes, 11 * GIB);
+    assert.equal(guard.gpuChargedBytes, 2 * GIB);
+    assert.ok(guard.gpuSamples >= 2);
+    assert.equal(typeof guard.gpuSampleAt, 'number');
+    assert.ok(Number.isFinite(guard.gpuSampleExecMsMedian));
+});
+
+test('A-LL-13b: the budget is a strict limit; a newer sample confirms a small overrun and a reading under budget resets it', async (t) => {
+    // Exactly at the budget (2 + 10 = 12 GiB): no stop. One MiB more: a stop.
+    const h = gpuHarness(t, { held: 10 * GIB });
+    await startSmall(h, 'request-gpu-13b');
+    await staysUp(h, { ticks: 8, samples: 3 });
+    assert.equal((await guardOf(h)).gpuBudgetSignal, 'observed');
+    h.state.held = 10 * GIB + MIB;
+    assert.match(await stoppedWith(h), OVER_MESSAGE);
+
+    // Over by 1 MiB on S1, under on S2: no stop. Over on S3, under on S4: still none (the streak was reset). Then
+    // over on S5 and still over on the newer S6: a stop. Each sample is answered after the guard has ticked on the last.
+    const calls = [10 * GIB + MIB, 10 * GIB, 10 * GIB + MIB, 10 * GIB, 10 * GIB + MIB, 10 * GIB + MIB];
+    const m = gpuHarness(t, { gpuSampleMs: 100, script: () => undefined });
+    await startSmall(m, 'request-gpu-13b-reset');
+    for (let index = 0; index < 4; index += 1) {
+        await until(() => m.stub.calls.length > index);
+        m.stub.answer(index, heldRows(calls[index]));
+        await sampled(m, 3);
+        assert.equal(m.controller.state.deployment.phase, 'ready', `sample ${index + 1}: ${m.controller.state.deployment.error}`);
+    }
+    await until(() => m.stub.calls.length > 4);
+    m.stub.answer(4, heldRows(calls[4]));
+    await sampled(m, 3);
+    assert.equal(m.controller.state.deployment.phase, 'ready', 'one sample over after a reset is not confirmed');
+    await until(() => m.stub.calls.length > 5);
+    m.stub.answer(5, heldRows(calls[5]));
+    assert.match(await stoppedWith(m), OVER_MESSAGE);
+    assert.equal(m.stub.calls.length, 6);
+
+    // More than 1 GiB over on a fresh sample stops at once, before any second sample.
+    const fast = gpuHarness(t, { gpuSampleMs: 100, script: (index) => (index === 0 ? heldRows(12 * GIB) : undefined) });
+    await startSmall(fast, 'request-gpu-13b-fast');
+    assert.match(await stoppedWith(fast), /^stopped: over the Ploinky RAM budget \(2\.0 GiB charged \+ 12\.0 GiB GPU, budget 12\.0 GiB\)$/);
+    assert.equal(fast.stub.calls.length, 1);
+});
+
+test('c1: a pending confirmation survives ticks without a valid reading', async (t) => {
+    // Over on S1; S2 fails (unavailable); still over on S3: a stop, although no tick saw S2.
+    const h = gpuHarness(t, { gpuSampleMs: 100, script: () => undefined });
+    await startSmall(h, 'request-gpu-c1');
+    await until(() => h.stub.calls.length > 0);
+    h.stub.answer(0, heldRows(10 * GIB + MIB));
+    await sampled(h, 3);
+    await until(() => h.stub.calls.length > 1);
+    h.stub.answer(1, { ok: false, reason: 'nvidia-smi failed: exit 1', execMs: 2 });
+    await sampled(h, 3);
+    assert.equal((await guardOf(h)).gpuBudgetSignal, 'unavailable');
+    assert.equal(h.controller.state.deployment.phase, 'ready');
+    await until(() => h.stub.calls.length > 2);
+    h.stub.answer(2, heldRows(10 * GIB + MIB));
+    assert.match(await stoppedWith(h), OVER_MESSAGE);
+    assert.equal(h.stub.calls.length, 3);
+});
+
+test('A-LL-13c: the page-cache term is active_file + inactive_file of memory.stat; file and shmem are ignored', async (t) => {
+    // memory.stat lines that would mislead a file - shmem rule: file 5 GiB, shmem 1 GiB.
+    const h = gpuHarness(t, { current: 6 * GIB, held: 9 * GIB,
+        stat: statText({ file: 5 * GIB, shmem: GIB, active: 3 * GIB, inactive: GIB }) });
+    await startSmall(h, 'request-gpu-13c');
+    await staysUp(h, { ticks: 8, samples: 3 });
+    assert.equal((await guardOf(h)).gpuChargedBytes, 2 * GIB, 'charged = 6 - (3 + 1) GiB; 2 + 9 is within 12');
+    // Page cache of 2 GiB (1.5 active + 0.5 inactive) against file 5 GiB and shmem 1 GiB: charged 4 GiB.
+    h.state.held = 7 * GIB;
+    h.state.stat = statText({ file: 5 * GIB, shmem: GIB, active: 1.5 * GIB, inactive: 0.5 * GIB });
+    await until(async () => (await guardOf(h)).gpuChargedBytes === 4 * GIB);
+    await staysUp(h, { ticks: 4 });
+    // No reclaimable cache left: 6 GiB charged + 9 GiB of GPU memory is past the budget (pinned host memory stays counted).
+    h.state.held = 9 * GIB;
+    h.state.stat = statText({ file: GIB, shmem: GIB, active: 0, inactive: 0 });
+    const message = await stoppedWith(h);
+    assert.equal(message, 'stopped: over the Ploinky RAM budget (6.0 GiB charged + 9.0 GiB GPU, budget 12.0 GiB)');
+});
+
+test('A-LL-14: a qualified run within the budget is not stopped (regression guard)', async (t) => {
+    const h = gpuHarness(t, { held: 9 * GIB });
+    await startSmall(h, 'request-gpu-14');
+    await staysUp(h, { ticks: 8 });
+});
+
+test('A-LL-14b: within the budget the sampler really ran, and the guard reports an observed signal', async (t) => {
+    const h = gpuHarness(t, { held: 9 * GIB });
+    await startSmall(h, 'request-gpu-14b');
+    await staysUp(h, { ticks: 8, samples: 3 });
+    await until(async () => (await guardOf(h)).gpuBudgetSignal === 'observed');
+    const guard = await guardOf(h);
+    assert.equal(guard.gpuHeldBytes, 9 * GIB);
+    assert.equal(guard.gpuChargedBytes, 2 * GIB);
+    assert.ok(guard.gpuSampleAgeMs >= 0);
+});
+
+test('A-LL-15: rows whose process group is not the runner\'s are unmapped: unavailable, no stop', async (t) => {
+    // The only row is in a foreign group (and a second PID no longer exists): 50 GiB of it must not count.
+    const h = gpuHarness(t, { groups: new Map([[RUNNER_PID, 1234]]), script: () => heldRows(50 * GIB, [{ pid: 9001, name: 'gone', usedBytes: GIB }]) });
+    await startSmall(h, 'request-gpu-15');
+    await staysUp(h, { ticks: 8, samples: 3 });
+    const guard = await guardOf(h);
+    assert.equal(guard.gpuBudgetSignal, 'unavailable');
+    assert.equal(guard.gpuHeldBytes, null);
+});
+
+test('A-LL-15b: a hung nvidia-smi is bounded, single flight, and ended with the guard', async (t) => {
+    // Never settles, even when stopped: after two intervals there is no usable reading, and still one call.
+    const hung = gpuHarness(t, { script: () => undefined, honorsAbort: false });
+    await startSmall(hung, 'request-gpu-15b');
+    await sampled(hung, 8);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal((await guardOf(hung)).gpuBudgetSignal, 'unavailable');
+    assert.equal(hung.stub.calls.length, 1, 'exactly one call in flight over five intervals');
+    assert.equal(hung.stub.calls[0].signal.aborted, true, 'the per-exec bound ended it');
+    assert.equal(hung.controller.state.deployment.phase, 'ready');
+    await hung.controller.stop();
+    assert.equal(hung.stub.calls[0].signal.aborted, true);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(hung.stub.calls.length, 1, 'no further call after cancel');
+
+    // Settles only when aborted: the sampler's per-exec timer aborts it, the next sample starts, and a settling one restores 'observed'.
+    const abortOnly = gpuHarness(t, { script: (index, st) => (index === 0 ? undefined : heldRows(st.held)), held: GIB });
+    await startSmall(abortOnly, 'request-gpu-15b-abort');
+    await until(() => abortOnly.stub.calls.length >= 2);
+    assert.equal(abortOnly.stub.calls[0].signal.aborted, true);
+    await until(async () => (await guardOf(abortOnly)).gpuBudgetSignal === 'observed');
+    assert.equal((await guardOf(abortOnly)).gpuHeldBytes, GIB);
+    assert.equal(abortOnly.stub.inFlight <= 1, true);
+    await abortOnly.controller.stop();
+});
+
+test('A-LL-15 stale: a sample older than two intervals is not used, even when a later overrun would have stopped the run', async (t) => {
+    // S1 is under budget; every later call hangs (and ignores the stop), so S1 only ages.
+    const h = gpuHarness(t, { gpuSampleMs: 30, held: 5 * GIB, honorsAbort: false, script: (index, st) => (index === 0 ? heldRows(st.held) : undefined) });
+    await startSmall(h, 'request-gpu-stale');
+    await until(async () => (await guardOf(h)).gpuBudgetSignal === 'observed');
+    await until(async () => (await guardOf(h)).gpuBudgetSignal === 'unavailable');
+    assert.ok((await guardOf(h)).gpuSampleAgeMs > 60, 'unavailable because the sample is older than 2 x 30 ms');
+    // 11 + 5 GiB would be 4 GiB past the budget of 12 if the old sample were still used.
+    h.state.current = 11 * GIB;
+    await staysUp(h, { ticks: 8 });
+    assert.equal((await guardOf(h)).gpuBudgetSignal, 'unavailable');
+    assert.equal(h.stub.calls.length, 2, 'one hung call after the first');
+});
+
+test('A-LL-15c: a failing, throwing or garbage nvidia-smi is unavailable, never a stop and never a throw', async (t) => {
+    const answers = [
+        { ok: false, reason: 'nvidia-smi failed: exit 1', execMs: 2 },
+        { ok: true, rows: [], execMs: 2 }, // what readGpuProcesses returns for garbage output
+        { ok: false, reason: 'aborted', execMs: 1 },
+    ];
+    const h = gpuHarness(t, { script: (index) => {
+        if (index % 4 === 3) throw new Error('spawn failed');
+        return answers[index % 4] ?? answers[0];
+    } });
+    await startSmall(h, 'request-gpu-15c');
+    await staysUp(h, { ticks: 8, samples: 5 });
+    assert.equal((await guardOf(h)).gpuBudgetSignal, 'unavailable');
+    assert.equal((await guardOf(h)).gpuHeldBytes, null);
+});
+
+test('A-LL-15d: the runner\'s GPU memory is the sum of the rows in its process group', async (t) => {
+    const groups = new Map([[RUNNER_PID, RUNNER_PID], [7001, RUNNER_PID], [9000, 9000]]);
+    const rows = [{ pid: 7001, name: 'child', usedBytes: 3 * GIB }, { pid: 9000, name: 'foreign', usedBytes: 50 * GIB },
+        { pid: 9001, name: 'gone', usedBytes: 40 * GIB }];
+    const h = gpuHarness(t, { groups, script: () => heldRows(4 * GIB, rows) });
+    await startSmall(h, 'request-gpu-15d');
+    await staysUp(h, { ticks: 8, samples: 3 });
+    await until(async () => (await guardOf(h)).gpuHeldBytes === 7 * GIB);
+});
+
+test('A-LL-15e: an unreadable memory.stat at the decision is unavailable that tick; reading it again decides', async (t) => {
+    const h = gpuHarness(t, { stat: null, held: 30 * GIB });
+    await startSmall(h, 'request-gpu-15e');
+    await staysUp(h, { ticks: 8, samples: 3 });
+    assert.equal((await guardOf(h)).gpuBudgetSignal, 'unavailable');
+    assert.equal((await guardOf(h)).gpuChargedBytes, null);
+    h.state.stat = statText();
+    assert.match(await stoppedWith(h), OVER_MESSAGE);
+    // memory.stat without the two file terms is unreadable too.
+    const partial = gpuHarness(t, { stat: 'anon 1\nfile 2\n', held: 30 * GIB });
+    await startSmall(partial, 'request-gpu-15e-partial');
+    await staysUp(partial, { ticks: 8, samples: 3 });
+    assert.equal((await guardOf(partial)).gpuBudgetSignal, 'unavailable');
+});
+
+test('A-LL-15f: a budget breach cancels the sampler at once, not when the runner has exited', async (t) => {
+    // The killed runner takes 800 ms to exit, so only the breach itself can have cancelled the sampler. Sample 0 is
+    // under budget; sample 1 is in flight (a 200 ms bound) when an overrun appears.
+    const h = gpuHarness(t, { gpuSampleMs: 200, held: 5 * GIB, exitDelayMs: 800, script: (index, st) => (index === 0 ? heldRows(st.held) : undefined) });
+    await startSmall(h, 'request-gpu-15f');
+    await until(() => h.stub.calls.length === 2);
+    const inFlight = h.stub.calls[1].signal;
+    assert.equal(inFlight.aborted, false);
+    h.state.current = 11 * GIB; // 11 + 5 GiB against 12: past the fast path
+    await until(() => h.started[0].stopped === 'SIGKILL');
+    assert.equal(h.controller.state.deployment.phase, 'ready', 'the runner has not exited yet');
+    assert.equal(inFlight.aborted, true, 'the breach aborts the in-flight call before the runner exits');
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal(h.stub.calls.length, 2, 'no readGpuProcesses call between the breach and the exit');
+    assert.equal(h.stub.inFlight, 0);
+    assert.match(await stoppedWith(h), OVER_MESSAGE);
+    assert.equal(h.stub.calls.length, 2);
+});
+
+test('a late result after cancel is dropped: the guard\'s GPU fields stay as they were', async (t) => {
+    // The stub ignores the stop, so call 1 answers after the Stop.
+    const h = gpuHarness(t, { held: GIB, honorsAbort: false, script: (index, st) => (index === 0 ? heldRows(st.held) : undefined) });
+    await startSmall(h, 'request-gpu-late');
+    await until(() => h.stub.calls.length === 2);
+    await until(async () => (await guardOf(h)).gpuSamples === 1);
+    await h.controller.stop();
+    const before = await guardOf(h);
+    assert.equal(before.gpuSamples, 1);
+    assert.equal(before.gpuHeldBytes, GIB);
+    assert.equal(typeof before.gpuSampleAt, 'number');
+    h.stub.answer(1, heldRows(5 * GIB));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const after = await guardOf(h);
+    assert.equal(after.gpuSamples, before.gpuSamples);
+    assert.equal(after.gpuHeldBytes, before.gpuHeldBytes);
+    assert.equal(after.gpuSampleAt, before.gpuSampleAt);
+    assert.equal(h.stub.calls.length, 2, 'and no further sample is scheduled');
+});
+
+test('A-LL-15g and 15h: the floor and the pressure checks keep priority over the budget stop in the same tick', async (t) => {
+    let available = 100 * GIB;
+    let pressure = 0;
+    const set = { readMemory: () => ({ totalBytes: TOTAL, availableBytes: available }), readPressure: () => pressure };
+    for (const [name, flip, message] of [
+        ['floor', () => { available = 7 * GIB; }, /^stopped: host memory below the floor \(7\.0 GiB available, 8\.0 GiB required\)$/],
+        ['pressure', () => { available = 15 * GIB; pressure = 80; }, /^stopped: memory pressure 80\.0 % with 15\.0 GiB available$/],
+    ]) {
+        available = 100 * GIB;
+        pressure = 0;
+        const h = gpuHarness(t, { held: 5 * GIB, ...set });
+        await startSmall(h, `request-gpu-15-${name}`);
+        await staysUp(h, { ticks: 4, samples: 3 });
+        await until(async () => (await guardOf(h)).gpuBudgetSignal === 'observed');
+        // One synchronous step: the next tick sees both an overrun (16 GiB against 12) and the lower host reading.
+        h.state.current = 11 * GIB;
+        flip();
+        const error = await stoppedWith(h);
+        assert.match(error, message, name);
+        assert.doesNotMatch(error, OVER_MESSAGE, name);
+    }
+});
+
+test('A-LL-16b: the existing GB10 stub (driver 580.159.03) is unqualified: no sampler, no stop', async (t) => {
+    const h = gpuHarness(t, { gpu: GB10, current: 10 * GIB, held: 8 * GIB });
+    await startSmall(h, 'request-gpu-16b');
+    await staysUp(h, { ticks: 8 });
+    const guard = await guardOf(h);
+    assert.equal(guard.gpuBudgetSignal, 'unqualified');
+    assert.equal(guard.gpuSamples, 0);
+    assert.equal(h.stub.calls.length, 0);
+});
+
+test('A-LL-16c: a unified GPU with another PCI id is unqualified, whatever its driver', async (t) => {
+    const other = { ...QUALIFIED, device: { ...QUALIFIED.device, pciDeviceId: '0x2B0010DE' } };
+    const h = gpuHarness(t, { gpu: other, current: 10 * GIB, held: 8 * GIB });
+    await startSmall(h, 'request-gpu-16c');
+    await staysUp(h, { ticks: 8 });
+    assert.equal((await guardOf(h)).gpuBudgetSignal, 'unqualified');
+    assert.equal(h.stub.calls.length, 0);
+});
+
+test('A-LL-16d: a qualified GB10 without a finite budget has no GPU-aware stop: not-applicable, no call', async (t) => {
+    const h = gpuHarness(t, { budgeted: false, current: 10 * GIB, held: 80 * GIB });
+    await startSmall(h, 'request-gpu-16d');
+    await staysUp(h, { ticks: 8 });
+    assert.equal((await guardOf(h)).gpuBudgetSignal, 'not-applicable');
+    assert.equal(h.stub.calls.length, 0);
+});
+
+// A known GPU share on unified memory is still refused at admission (admission.mjs, gpu_share_unsupported), so no Run
+// reaches the guard with one yet; the qualifying decision itself is proven here.
+test('A-LL-16e and A-LL-16i: a known share, or no admitted GPU facts at all, never samples', async () => {
+    const { gpuGuardSignal } = await import('../src/controller/gpuBudgetGuard.mjs');
+    const qualified = { gpu: { driverVersion: '580.178.04', device: { pciDeviceId: '0x2E1210DE' } }, shareKnown: false };
+    assert.equal(gpuGuardSignal(qualified, true), 'unavailable', 'the sampler runs, with no valid reading yet');
+    assert.equal(gpuGuardSignal({ ...qualified, shareKnown: true }, true), 'not-applicable');
+    assert.equal(gpuGuardSignal(qualified, false), 'not-applicable');
+    assert.equal(gpuGuardSignal(undefined, true), 'unqualified', 'a missing entry is unqualified');
+    assert.equal(gpuGuardSignal(null, false), 'unqualified');
+    assert.equal(gpuGuardSignal({ ...qualified, gpu: { ...qualified.gpu, driverVersion: '580.159.03' } }, true), 'unqualified');
+});
+
+test('A-LL-16g: nothing about the sampler is persisted, and the published shapes differ only by the guardStats fields', async (t) => {
+    const shapes = [];
+    for (const gpu of [GB10, QUALIFIED]) {
+        const h = gpuHarness(t, { gpu, held: 5 * GIB });
+        await startSmall(h, 'request-gpu-16g');
+        await staysUp(h, { ticks: 4, samples: gpu === QUALIFIED ? 3 : 0 });
+        const status = await h.controller.status();
+        const overview = await h.controller.overview();
+        const stateText = fs.readFileSync(path.join(h.dataDir, 'state', 'controller.json'), 'utf8');
+        assert.match(stateText, /request-gpu-16g/, 'the scan reads the real state file');
+        assert.doesNotMatch(stateText, /580\.178\.04|shareKnown|gpuBudgetSignal|gpuHeldBytes|gpuSampleAt|pciDeviceId/);
+        assert.doesNotMatch(JSON.stringify(overview), /shareKnown|gpuBudgetSignal|gpuHeldBytes/);
+        // The persisted deployment, byte for byte, apart from its random id and its clock readings.
+        const persisted = JSON.parse(stateText.replace(/"\d{4}-\d\d-\d\dT[\d:.]+Z"/g, '"<time>"')).deployment;
+        persisted.id = '<id>';
+        shapes.push({
+            persisted,
+            status: Object.keys(status).sort(),
+            guard: Object.keys(status.memoryGuard),
+            overview: Object.keys(overview).sort(),
+        });
+        await h.controller.stop();
+    }
+    const [base, sampled_] = shapes;
+    assert.ok(Object.keys(base.persisted).length > 5, 'a persisted deployment was compared');
+    assert.deepEqual(sampled_.persisted, base.persisted, 'the persisted deployment is the same with and without the sampler');
+    assert.deepEqual(sampled_.status, base.status);
+    assert.deepEqual(sampled_.overview, base.overview);
+    assert.deepEqual(sampled_.guard, base.guard, 'the unified guardStats fields are the same on every unified host');
+    assert.deepEqual(base.guard.slice(0, 4), ['floorBytes', 'minAvailableBytes', 'maxPressureAvg10', 'samples']);
+    assert.deepEqual(base.guard.slice(4), ['gpuBudgetSignal', 'gpuHeldBytes', 'gpuChargedBytes', 'gpuSampleAt', 'gpuSampleAgeMs',
+        'gpuSampleExecMsMedian', 'gpuSamples']);
+});
+
+// The other pool profiles keep their guardStats: the GPU fields exist only on the unified profile.
+test('the cpu profile\'s guardStats are unchanged: no GPU fields, no sampler', async (t) => {
+    const h = gpuHarness(t, { gpu: GB10, controllerOptions: { profile: 'cpu' } });
+    await h.controller.run({ modelId: SMALL_ID, runnerId: 'llama.cpp', requestId: 'request-gpu-cpu' });
+    await until(() => h.controller.state.deployment?.phase === 'ready');
+    await until(async () => (await guardOf(h))?.samples >= 3);
+    assert.equal((await h.controller.status()).profile, 'cpu');
+    assert.deepEqual(Object.keys(await guardOf(h)), ['floorBytes', 'minAvailableBytes', 'maxPressureAvg10', 'samples']);
+    assert.equal(h.stub.calls.length, 0);
+    await h.controller.stop();
+});
+
+// Counts the timers set with one delay, so a test can say how many sampler timers are alive: the sampler's interval and its
+// per-exec bound both use `delay`, and no other timer of these tests does.
+function trackTimers(t, delay) {
+    const live = new Set();
+    const created = [];
+    const realSet = globalThis.setTimeout;
+    const realClear = globalThis.clearTimeout;
+    globalThis.setTimeout = (fn, ms, ...args) => {
+        if (ms !== delay) return realSet(fn, ms, ...args);
+        const timer = realSet(() => { live.delete(timer); fn(...args); }, ms);
+        live.add(timer);
+        created.push(timer);
+        return timer;
+    };
+    globalThis.clearTimeout = (timer) => { live.delete(timer); return realClear(timer); };
+    t.after(() => { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; });
+    return { live, created, wait: (ms) => new Promise((resolve) => realSet(resolve, ms)) };
+}
+
+// Cancel leaves nothing behind: no sampler timer, no exec in flight, and a finished sample leaves no timer either.
+test('A-LL-15 timers: after a sample settles and after each cancel there are 0 sampler timers and 0 execs in flight', async (t) => {
+    const DELAY = 13;
+    const { live, created, wait } = trackTimers(t, DELAY);
+    const h = gpuHarness(t, { gpuSampleMs: DELAY, held: GIB });
+    for (const round of [1, 2]) {
+        await startSmall(h, `request-gpu-timers-${round}`);
+        const before = h.stub.calls.length;
+        await until(() => h.stub.calls.length >= before + 3);
+        // Between samples only the next-sample timer is alive; the settled exec's timer is gone.
+        assert.ok(live.size <= 1, `${live.size} sampler timers alive between samples`);
+        assert.equal(h.stub.calls.at(-2).signal.aborted, false, 'a sample that settled is not aborted by its own bound');
+        await h.controller.stop();
+        assert.equal(live.size, 0, `round ${round}: sampler timers after cancel`);
+        assert.equal(h.stub.inFlight, 0, `round ${round}: execs in flight after cancel`);
+        const calls = h.stub.calls.length;
+        await wait(4 * DELAY);
+        assert.equal(h.stub.calls.length, calls, `round ${round}: no call after cancel`);
+    }
+    assert.ok(created.length >= 6);
+    assert.ok(created.every((timer) => timer.hasRef() === false), 'every sampler timer is unref\'d');
+
+    // Cancel while an exec is in flight: its bound timer goes with it, and a late answer breaches nothing.
+    const pending = gpuHarness(t, { gpuSampleMs: DELAY, script: () => undefined });
+    await startSmall(pending, 'request-gpu-timers-pending');
+    await until(() => pending.stub.calls.length >= 1);
+    assert.equal(pending.stub.inFlight, 1);
+    await pending.controller.stop();
+    assert.equal(live.size, 0);
+    assert.equal(pending.stub.inFlight, 0);
+    assert.equal(pending.stub.calls.length, 1);
+    assert.notEqual(pending.controller.state.deployment?.phase, 'error');
+});
+
+test('A-LL-15 replace: the old runner stays sampled through its graceful stop; the new guard gets its own stats, reads its own group, and leaves nothing behind', async (t) => {
+    const DELAY = 13;
+    const { live, wait } = trackTimers(t, DELAY);
+    // Each runner has its own rows: 1 GiB in the old group (7000), 2 GiB in the new one (7001).
+    const groups = new Map([[7000, 7000], [7001, 7001]]);
+    const h = gpuHarness(t, { gpuSampleMs: DELAY, groups, held: GIB,
+        script: (_, st) => heldRows(st.held, [{ pid: 7001, name: 'new', usedBytes: 2 * GIB }]) });
+    await startSmall(h, 'request-gpu-replace-1');
+    await until(async () => (await guardOf(h)).gpuHeldBytes === GIB);
+    const [old] = h.started;
+    old.stop = () => old.exited; // like the real one: a graceful stop settles when the process exits
+    const replacing = h.controller.run({ modelId: SMALL_ID, runnerId: 'llama.cpp', requestId: 'request-gpu-replace-2', replace: true });
+    const calls = h.stub.calls.length;
+    await until(() => h.stub.calls.length >= calls + 3);
+    assert.equal(h.started.length, 1, 'the new runner starts only after the old one has exited');
+    assert.equal(old.stopped, undefined);
+    await old.kill();
+    await replacing;
+    await until(() => h.controller.state.deployment?.requestId === 'request-gpu-replace-2' && h.controller.state.deployment.phase === 'ready');
+    assert.equal(h.started.length, 2);
+    // The new guard has its own stats (counted from zero) and matches only its own process group.
+    await until(async () => (await guardOf(h)).gpuHeldBytes === 2 * GIB);
+    assert.ok(live.size <= 1, `${live.size} sampler timers alive with one guard`);
+    await h.controller.stop();
+    assert.equal(live.size, 0);
+    assert.equal(h.stub.inFlight, 0);
+    const after = h.stub.calls.length;
+    await wait(4 * DELAY);
+    assert.equal(h.stub.calls.length, after, 'no call after both guards are cancelled');
 });
