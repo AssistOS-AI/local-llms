@@ -383,6 +383,9 @@ test('the Add model form builds registry, oci and oci-snapshot sources, and Hugg
     // A mirror or ModelScope names its registry in the same source types.
     const mirror = modelEntryFromForm({ ...base, sourceKind: 'huggingface', file: 'm.gguf', quantization: 'Q4', registry: 'mirror', registryKind: 'huggingface', revision: 'dev' });
     assert.deepEqual(mirror.sources.gguf, { type: 'huggingface', registry: 'mirror', repo: 'owner/repo', file: 'm.gguf', revision: 'dev', quantization: 'Q4' });
+    // An empty revision means each registry's default branch: master for ModelScope, main for Hugging Face.
+    assert.equal(modelEntryFromForm({ ...base, sourceKind: 'hf', registry: 'modelscope', registryKind: 'modelscope' }).sources.hf.revision, 'master');
+    assert.equal(modelEntryFromForm({ ...base, sourceKind: 'hf', registry: 'mirror', registryKind: 'huggingface' }).sources.hf.revision, 'main');
     const scope = modelEntryFromForm({ ...base, sourceKind: 'exl3', registry: 'modelscope', registryKind: 'modelscope', commit: 'c'.repeat(40) });
     assert.deepEqual(scope.sources.exl3, { type: 'hf-snapshot', registry: 'modelscope', repo: 'owner/repo', revision: 'c'.repeat(40) });
     // An OCI registry gives `oci` (GGUF) and `oci-snapshot` sources: the repository, the tag, and the digest only when it is one.

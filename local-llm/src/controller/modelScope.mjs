@@ -172,8 +172,8 @@ export async function lookupModelScope(args, {
     token = '', fetchImpl, baseUrl, timeoutMs = METADATA_TIMEOUT_MS, totalMs = LOOKUP_TIMEOUT_MS, signal = undefined, subject = 'ModelScope',
 } = {}) {
     needFetch(fetchImpl);
-    const input = normalizeLookupInput(args);
-    const revision = args.revision ?? 'master';
+    const input = normalizeLookupInput(args, { kind: 'modelscope' });
+    const { revision } = input;
     const who = { subject, hint: REGISTRY_TOKEN_HINT };
     const deadline = AbortSignal.any([AbortSignal.timeout(totalMs), ...(signal ? [signal] : [])]);
     try {

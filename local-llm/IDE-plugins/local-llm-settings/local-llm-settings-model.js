@@ -260,8 +260,9 @@ function registryOf(raw) {
     return id === 'huggingface' ? '' : id;
 }
 
-// What an empty revision field means for the form's registry: an OCI tag defaults to `latest`, every other kind to `main`.
-const defaultRevision = (raw) => (raw.registryKind === 'oci' ? 'latest' : 'main');
+// What an empty revision field means for the form's registry: an OCI tag defaults to `latest`, ModelScope to `master`, every other kind to `main`.
+const DEFAULT_REVISIONS = Object.freeze({ oci: 'latest', modelscope: 'master' });
+const defaultRevision = (raw) => DEFAULT_REVISIONS[raw.registryKind] ?? 'main';
 
 /**
  * Text from Hugging Face or a model file, for display: without the bidirectional controls (U+202A to U+202E and

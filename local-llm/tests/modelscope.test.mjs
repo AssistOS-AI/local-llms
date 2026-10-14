@@ -259,6 +259,17 @@ test('lookup: commit, then the listing, then the advisory OpenAPI, then the head
     assert.equal(JSON.stringify(found).includes(MS_TOKEN), false);
 });
 
+test('lookup: without a revision the commits request asks for master, ModelScope\'s default branch', async (t) => {
+    const world = await createWorld(t);
+    const h = controllerOn(t, world);
+    await addMs(h);
+    const found = await lookupOf(h, { repo: REPO });
+    assert.equal(found.revision, 'master');
+    const commits = world.ms.requests.filter((request) => new URL(request.url, 'http://x').pathname === `/api/v1/models/${REPO}/commits`);
+    assert.equal(commits.length, 1);
+    assert.equal(new URL(commits[0].url, 'http://x').searchParams.get('Ref'), 'master');
+});
+
 test('lookup: the HF_TOKEN stays at huggingface.co and the ModelScope token never leaves ms', async (t) => {
     const world = await createWorld(t);
     const h = controllerOn(t, world);

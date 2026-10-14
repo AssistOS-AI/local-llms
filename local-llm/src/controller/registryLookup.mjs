@@ -57,7 +57,8 @@ export function normalizeLookupInput(args, { kind = 'huggingface' } = {}) {
         return null;
     }
     if (kind === 'oci') return normalizeOciInput(args, format);
-    const revision = args.revision ?? 'main';
+    // The default branch: ModelScope's is master, Hugging Face's main.
+    const revision = args.revision ?? (kind === 'modelscope' ? 'master' : 'main');
     const file = args.file;
     try {
         assertRepo(args.repo);
