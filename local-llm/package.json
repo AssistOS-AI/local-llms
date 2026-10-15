@@ -4,5 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "pworker": "git+https://github.com/AssistOS-AI/Ploinky-Worker.git#4668a3f0e2cae0c85463945def068741dc8c2b68"
   }
 }
