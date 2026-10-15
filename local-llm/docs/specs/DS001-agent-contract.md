@@ -62,7 +62,7 @@ The controller is the engine's. `main.mjs` builds it with `createAgentController
 | `controller/profiles.mjs` | `APU`, `UNIFIED`, `UNREADABLE_COMMIT_MS`, `VENUS`, `cpuFloorBytes`, `cpuHostReserveBytes`, `decideProfile`, `envelopeFor`, `estimateCpuLlamaServer`, `profileOf`, and through a namespace `cpuPool`, `admitCpuLlamaServer`, `admitVenusLlamaServer`, `admitApuLlamaServer`, `admitCpuOllama` (wrapped) |
 | `controller/runnerLock.mjs` | `archiveCompression`, `loadRunnerLock`, `validateRunnerLock` |
 | `controller/runnerProcess.mjs` | `createLogBuffer`, `parseRunnerReport`, `startRunnerProcess` |
-| `errors.mjs` | `LocalLlmError`, `serializeError` (imported by `chatResponder.mjs`, `testPrompt.mjs`, `promptStream.mjs`, `controlSocket.mjs` and `tools/local_llm_tool.mjs`, to keep the per-request import closure small) |
+| `errors.mjs` | `LocalLlmError`, `serializeError` (imported by `chatResponder.mjs`, `testPrompt.mjs`, `promptStream.mjs`, `controlSocket.mjs` and `tools/local_llm_tool.mjs`, to keep the per-request import closure small; `entry-import-closure.test.mjs` fails when a per-request entry loads any other engine module) |
 | `controller/vulkan.mjs` | `catalogProfileOf`, `readVulkanGpu`, `vulkanContractOf` (the last two wrapped) |
 | `drainBudget.mjs` | `DRAIN_QUEUE_WAIT_MS`, `DRAIN_RUNNER_GRACE_MS`, `HARDWARE_QUERY_REAP_MS` |
 | `promptObservations.mjs` | `createPromptObservations`, `OBSERVATION_ID_RE` (imported by `testPrompt.mjs`) |
