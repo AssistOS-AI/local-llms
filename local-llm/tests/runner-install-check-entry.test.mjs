@@ -1,6 +1,8 @@
 // tools/runner_install_check.mjs is the CI and image-publish install check (DS004). The check itself is the engine's; this entry
 // gives it the container's host. Its command line, its report and its exit codes are what they were when the check lived here:
-// the same cases ran against 34f8f498's tool and this one and printed the same bytes (see the commit message of the move).
+// nine cases (a proprietary entry, --validate-only, an unknown runner with and without a lock, no --lock, no arguments, both
+// shipped agent locks, --require-executable on an entry that names no launch file) printed the same bytes and exited with the
+// same codes from 34f8f498's tool and from this one.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
