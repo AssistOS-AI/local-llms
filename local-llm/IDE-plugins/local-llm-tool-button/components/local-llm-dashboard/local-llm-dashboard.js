@@ -26,15 +26,19 @@ import {
     detailInfoHtml,
     estimateHtml,
     hasWeightsOnDisk,
-    hardwareCardsHtml,
     installMessage,
     lookupResultsHtml,
-    modelsTableHtml,
+    modelsListHtml,
     runnersIntroText,
     runnersPanelHtml,
     splitRunFields,
     statusCardHtml,
-} from './local-llm-dashboard-view.js';
+} from './local-llm-dashboard-view.js?v=compact-capacities-2';
+
+import { hardwareSummaryHtml, hardwareWarningsHtml } from './local-llm-resources-view.js?v=compact-capacities-2';
+import { helpHtml, initHelp, initAddModelDialog } from './local-llm-dashboard-help.js';
+
+import { iconHtml } from './local-llm-icons.js';
 
 const TABS = Object.freeze(['models', 'playground', 'logs', 'runners']);
 const PREVIEW_DELAY_MS = 400;
@@ -71,6 +75,8 @@ export class LocalLlmDashboard {
         this.previewTimer = null;
         this.previewSerial = 0;
         this.overviewTimer = null;
+        this.statusTimer = null;
+        this.busyLoader = null;
         // The Add model form's lookup: its last result and request, what it filled in (to tell hand-edited values from
         // looked-up ones), and which request is current. A lookup never makes the dashboard busy, so Stop and Cancel stay usable.
         this.lookup = null;
@@ -90,7 +96,18 @@ export class LocalLlmDashboard {
     async afterRender() {
         const find = (selector) => this.element.querySelector(selector);
         this.statusLine = find('#localLlmStatus');
-        this.hardware = find('[data-llm-hardware]');
+        for (const [selector, name] of [
+            ['.local-llm-refresh', 'refresh'], ['[data-llm-add-icon]', 'plus'],
+            ['[data-llm-run-icon]', 'play'],
+        ]) {
+            const target = find(selector);
+            if (target) target.innerHTML = iconHtml(name);
+        }
+        const resourceLabel = find('[data-llm-resource-label]');
+        if (resourceLabel) resourceLabel.insertAdjacentHTML('afterbegin', iconHtml('activity'));
+        this.hardwareSummary = find('[data-llm-hardware-summary]');
+        this.hardwareWarnings = find('[data-llm-hardware-warnings]');
+        this.disposeHelp = initHelp(this.element);
         this.deploymentCard = find('[data-llm-deployment]');
         this.tabList = find('#localLlmTabs');
         this.tabs = new Map(TABS.map((tab) => [tab, find(`[data-llm-tab="${tab}"]`)]));
@@ -99,6 +116,12 @@ export class LocalLlmDashboard {
         this.detailEmpty = find('[data-llm-detail-empty]');
         this.detailInfo = find('[data-llm-detail-info]');
         this.addForm = find('[data-llm-form="add"]');
+        this.addDialog = find('#localLlmAddDialog');
+        this.addStatusLine = find('[data-llm-add-status]');
+        if (this.addDialog) this.disposeAddDialog = initAddModelDialog({
+            dialog: this.addDialog, trigger: find('[data-llm-add]'), form: this.addForm,
+            isBusy: () => this.busy, onClose: () => this.cancelAddModel(),
+        });
         this.addButton = find('[data-llm-add]');
         this.lookupRegion = find('[data-llm-lookup]');
         this.lookupButton = find('[data-llm-lookup-button]');
@@ -131,7 +154,6 @@ export class LocalLlmDashboard {
             });
         }
         this.tabList?.addEventListener('keydown', (event) => this.handleTabKeydown(event));
-        this.modelsRegion?.addEventListener('keydown', (event) => this.handleRowKeydown(event));
         this.follow?.addEventListener('change', () => this.renderLogs(true));
         globalThis.document?.addEventListener?.('visibilitychange', this.onVisibilityChange);
 
@@ -147,6 +169,11 @@ export class LocalLlmDashboard {
 
     afterUnload() {
         this.closed = true;
+        clearTimeout(this.statusTimer);
+        this.statusTimer = null;
+        this.hideBusyLoader();
+        this.disposeHelp?.();
+        this.disposeAddDialog?.();
         this.stopPolling();
         clearTimeout(this.previewTimer);
         clearTimeout(this.overviewTimer);
@@ -157,14 +184,28 @@ export class LocalLlmDashboard {
     // ------------------------------------------------------------ plumbing
 
     setStatus(message = '', type = '') {
-        if (!this.statusLine) return;
-        this.statusLine.textContent = message;
+        if (this.closed) return;
+        clearTimeout(this.statusTimer);
+        this.statusTimer = null;
+        const statusLine = this.addDialog?.open ? this.addStatusLine : this.statusLine;
+        if (!statusLine) return;
+        statusLine.textContent = message;
         for (const state of ['loading', 'success', 'error']) {
-            this.statusLine.classList.toggle(state, type === state);
+            statusLine.classList.toggle(state, type === state);
+        }
+        if (message && type === 'success') {
+            // Explorer renders toast messages as HTML; messages may contain model IDs.
+            void assistOS.showToast(escapeHtml(message), 'success', 5000);
+            this.statusTimer = setTimeout(() => {
+                statusLine.textContent = '';
+                statusLine.classList.toggle('success', false);
+                this.statusTimer = null;
+            }, 5000);
         }
     }
 
     setBusy(value) {
+        if (this.closed) return;
         this.busy = Boolean(value);
         this.modelsRegion?.setAttribute('aria-busy', this.busy ? 'true' : 'false');
         for (const control of this.element.querySelectorAll('button, input, textarea')) {
@@ -187,8 +228,10 @@ export class LocalLlmDashboard {
     }
 
     async withBusy(progress, action) {
-        if (this.busy) return undefined;
+        if (this.closed || this.busy) return undefined;
         this.setBusy(true);
+        const ui = window.webSkel;
+        this.busyLoader = { ui, token: ui.showLoading() };
         this.setStatus(progress, 'loading');
         try {
             return await action();
@@ -196,8 +239,15 @@ export class LocalLlmDashboard {
             this.setStatus(error?.message || 'The request failed.', 'error');
             return undefined;
         } finally {
+            this.hideBusyLoader();
             this.setBusy(false);
         }
+    }
+
+    hideBusyLoader() {
+        const loader = this.busyLoader;
+        this.busyLoader = null;
+        if (loader) loader.ui.hideLoading(loader.token);
     }
 
     // Replace a region's markup only when it changed, so a live refresh keeps
@@ -225,7 +275,9 @@ export class LocalLlmDashboard {
     }
 
     async loadOverview() {
-        this.overview = await callLocalLlm('local_llm_overview');
+        const overview = await callLocalLlm('local_llm_overview');
+        if (this.closed) return;
+        this.overview = overview;
         rememberRunners(this.overview?.runners);
         const deployment = this.overview.deployment || null;
         // A status poll carries logs and runner details; keep them unless the
@@ -233,11 +285,13 @@ export class LocalLlmDashboard {
         if (!this.status || this.status.deployment?.id !== deployment?.id || !shouldPoll(this.status.phase)) {
             this.status = { ...(this.status || {}), phase: deployment?.phase || 'idle', deployment };
         }
+        const defaultModel = this.ensureModelSelection();
         this.renderHardware();
         this.renderModels();
         this.renderDetailInfo();
         this.renderRunners();
         this.renderDeployment();
+        if (defaultModel) await this.openRun(defaultModel);
         if (this.gatewayNote && this.overview.gatewayModel) {
             this.gatewayNote.textContent = 'Sends one prompt to the running model inside this agent and shows the runner\'s speed. '
                 + `Other agents use the running model through Soul Gateway as ${this.overview.gatewayModel}.`;
@@ -316,29 +370,38 @@ export class LocalLlmDashboard {
     renderHardware() {
         const gpu = shouldPoll(this.status?.phase) ? this.status?.gpu : null;
         const { profile = null, profileDecision = null, limits = null } = this.overview || {};
-        this.setHtml('hardware', this.hardware, hardwareCardsHtml(this.overview?.hardware || {}, gpu, { profile, decision: profileDecision, limits }));
+        this.setHtml('hardwareSummary', this.hardwareSummary, hardwareSummaryHtml(this.overview?.hardware || {}, gpu, { profile, decision: profileDecision, limits }));
+        this.setHtml('hardwareWarnings', this.hardwareWarnings, hardwareWarningsHtml(this.overview || {}));
     }
 
     renderModels() {
         const models = Array.isArray(this.overview?.models) ? this.overview.models : [];
-        this.setHtml('models', this.modelsRegion, modelsTableHtml(models, {
+        const active = globalThis.document?.activeElement;
+        const focused = this.modelsRegion?.contains?.(active) ? active?.dataset?.modelId : null;
+        const changed = this.setHtml('models', this.modelsRegion, modelsListHtml(models, {
             selectedId: this.selectedModelId,
             activeModelId: this.activeModelId(),
             runners: this.overview?.runners || [],
         }));
+        if (changed && focused) this.modelsRegion.querySelector(`[data-model-id="${focused}"]`)?.focus({ preventScroll: true });
     }
 
     renderDetailInfo() {
         const model = this.findModel(this.selectedModelId);
         if (this.selectedModelId && !model) {
             this.selectedModelId = '';
-            this.detailMode = this.detailMode === 'add' ? 'add' : 'empty';
+            this.detailMode = 'empty';
             this.updateDetailMode();
         }
-        this.setHtml('detail', this.detailInfo, detailInfoHtml(model, {
+        const compatibilityOpen = this.detailInfo?.querySelector?.('.local-llm-compatibility')?.open;
+        const changed = this.setHtml('detail', this.detailInfo, detailInfoHtml(model, {
             runners: this.overview?.runners || [],
             activeModelId: this.activeModelId(),
         }));
+        if (changed && compatibilityOpen) {
+            const compatibility = this.detailInfo.querySelector('.local-llm-compatibility');
+            if (compatibility) compatibility.open = true;
+        }
     }
 
     findModel(modelId) {
@@ -383,20 +446,21 @@ export class LocalLlmDashboard {
 
     // ------------------------------------------------------------ selection
 
-    handleRowKeydown(event) {
-        if (event.key !== 'Enter' && event.key !== ' ') return;
-        const row = event.target?.closest?.('tr[data-model-id]');
-        if (!row) return;
-        event.preventDefault();
-        void this.selectModel(row, row.dataset.modelId);
+    ensureModelSelection() {
+        if (this.findModel(this.selectedModelId)) return null;
+        const models = Array.isArray(this.overview?.models) ? this.overview.models : [];
+        const model = models.find(item => item.id === this.activeModelId()) || models[0] || null;
+        this.selectedModelId = model?.id || '';
+        this.detailMode = model ? 'model' : 'empty';
+        if (!model) this.runModelId = '';
+        this.updateDetailMode();
+        return model;
     }
 
     updateDetailMode() {
-        if (this.detailEmpty) this.detailEmpty.hidden = this.detailMode !== 'empty';
+        if (this.detailEmpty) this.detailEmpty.hidden = this.detailMode !== 'empty' || !this.overview;
         if (this.detailInfo) this.detailInfo.hidden = this.detailMode !== 'model';
         if (this.runForm) this.runForm.hidden = this.detailMode !== 'model';
-        if (this.addForm) this.addForm.hidden = this.detailMode !== 'add';
-        this.addButton?.setAttribute('aria-expanded', this.detailMode === 'add' ? 'true' : 'false');
     }
 
     async selectModel(_target, modelId) {
@@ -413,20 +477,21 @@ export class LocalLlmDashboard {
     // ------------------------------------------------------------ add model
 
     openAddModel() {
-        if (this.busy || !this.addForm) return;
-        this.detailMode = 'add';
-        this.updateDetailMode();
-        this.addForm.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
-        this.addForm.elements?.id?.focus();
+        if (this.busy || !this.addDialog || this.addDialog.open) return;
+        if (this.addStatusLine) this.addStatusLine.textContent = '';
+        this.addDialog.showModal();
+        this.addButton?.setAttribute('aria-expanded', 'true');
     }
 
     cancelAddModel() {
-        if (!this.addForm) return;
-        this.addForm.reset();
-        this.resetLookup({ forget: true });
-        this.detailMode = this.selectedModelId ? 'model' : 'empty';
-        this.updateDetailMode();
-        this.updateSourceFields();
+        if (this.busy || !this.addDialog?.open) return;
+        if (this.lookupPending) this.resetLookup();
+        this.lookupSerial += 1;
+        this.lookupPending = false;
+        this.addDialog.close();
+        this.addButton?.setAttribute('aria-expanded', 'false');
+        this.addButton?.focus({ preventScroll: true });
+        if (this.lookupButton) this.lookupButton.disabled = false;
     }
 
     updateSourceFields() {
@@ -607,10 +672,11 @@ export class LocalLlmDashboard {
             await this.loadOverview();
             return true;
         });
-        if (!added) return;
+        if (!added || this.closed) return;
         this.addForm.reset();
         this.resetLookup({ forget: true });
         this.updateSourceFields();
+        this.cancelAddModel();
         this.setStatus(`${entry.id} was added. Nothing was downloaded.`, 'success');
         await this.selectModel(null, entry.id);
     }
@@ -712,20 +778,19 @@ export class LocalLlmDashboard {
 
     renderField(field) {
         const id = `localLlmParam-${field.name}`;
-        const help = field.description ? `<span class="settings-card-meta">${escapeHtml(field.description)}</span>` : '';
+        const help = field.description ? helpHtml(`${id}-help`, `About ${field.title}`, field.description) : '';
         if (field.kind === 'fixed') {
             return `
                 <div class="local-llm-field">
-                    <span class="form-label">${escapeHtml(field.title)}</span>
+                    <span class="local-llm-field-heading"><span class="form-label">${escapeHtml(field.title)}</span>${help}</span>
                     <code class="local-llm-fixed-value">${escapeHtml(JSON.stringify(field.value ?? null))}</code>
-                    ${help}
                 </div>`;
         }
         if (field.kind === 'enum' || field.kind === 'boolean') {
             const selected = field.value === null || field.value === undefined ? '' : String(field.value);
             return `
-                <label class="local-llm-field">
-                    <span class="form-label">${escapeHtml(field.title)}</span>
+                <div class="local-llm-field">
+                    <span class="local-llm-field-heading"><label class="form-label" for="${escapeHtml(id)}">${escapeHtml(field.title)}</label>${help}</span>
                     <custom-select id="${escapeHtml(id)}"
                                    data-presenter="custom-select"
                                    aria-label="${escapeHtml(field.title)}"
@@ -733,8 +798,7 @@ export class LocalLlmDashboard {
                                    data-param="${escapeHtml(field.name)}"
                                    data-selected="${escapeHtml(selected)}"
                                    data-options="${escapeHtml(encodeURIComponent(JSON.stringify(field.options)))}"></custom-select>
-                    ${help}
-                </label>`;
+                </div>`;
         }
         const value = field.value === null || field.value === undefined ? '' : String(field.value);
         if (field.kind === 'enumOrNumber') {
@@ -742,24 +806,22 @@ export class LocalLlmDashboard {
             const listId = `${id}-choices`;
             const hint = `${field.options.map((option) => option.value).join(', ')} or a number from ${field.min} to ${field.max}`;
             return `
-                <label class="local-llm-field">
-                    <span class="form-label">${escapeHtml(field.title)}</span>
+                <div class="local-llm-field">
+                    <span class="local-llm-field-heading"><label class="form-label" for="${escapeHtml(id)}">${escapeHtml(field.title)}</label>${help}</span>
                     <input class="form-input" id="${escapeHtml(id)}" name="${escapeHtml(field.name)}" data-param="${escapeHtml(field.name)}" type="text"
                            list="${escapeHtml(listId)}" value="${escapeHtml(value)}" placeholder="${escapeHtml(hint)}" ${field.nullable ? '' : 'required'}>
                     <datalist id="${escapeHtml(listId)}">${field.options.map((option) => `<option value="${escapeHtml(option.value)}"></option>`).join('')}</datalist>
-                    ${help}
-                </label>`;
+                </div>`;
         }
         const bounds = field.kind === 'number'
             ? `type="number" ${Number.isFinite(field.min) ? `min="${field.min}"` : ''} ${Number.isFinite(field.max) ? `max="${field.max}"` : ''} step="${field.integer ? 1 : 'any'}"`
             : 'type="text"';
         return `
-            <label class="local-llm-field">
-                <span class="form-label">${escapeHtml(field.title)}</span>
+            <div class="local-llm-field">
+                <span class="local-llm-field-heading"><label class="form-label" for="${escapeHtml(id)}">${escapeHtml(field.title)}</label>${help}</span>
                 <input class="form-input" id="${escapeHtml(id)}" name="${escapeHtml(field.name)}" data-param="${escapeHtml(field.name)}" ${bounds}
                        value="${escapeHtml(value)}" ${field.nullable ? 'placeholder="Runner default"' : 'required'}>
-                ${help}
-            </label>`;
+            </div>`;
     }
 
     readRunForm() {
@@ -834,7 +896,7 @@ export class LocalLlmDashboard {
             return result;
         });
         if (!started) return;
-        this.setStatus(started.duplicate ? 'That run was already requested.' : 'Run accepted. Progress shows in the Running model card above.', 'success');
+        this.setStatus(started.duplicate ? 'That run was already requested.' : 'Run request accepted.', 'success');
         this.renderDeployment();
         this.renderModels();
         this.startPollingIfActive(true);
@@ -941,7 +1003,7 @@ export class LocalLlmDashboard {
     }
 
     renderDeployment() {
-        this.setHtml('deployment', this.deploymentCard, statusCardHtml(this.status || {}));
+        this.setHtml('deployment', this.deploymentCard, statusCardHtml(this.status || {}, { models: this.overview?.models || [] }));
         this.updateDeploymentButtons();
         this.renderLogs();
     }

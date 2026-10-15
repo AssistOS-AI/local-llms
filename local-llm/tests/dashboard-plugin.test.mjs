@@ -10,7 +10,7 @@ import {
     hardwareCardsHtml,
     installMessage,
     lookupResultsHtml,
-    modelsTableHtml,
+    modelsListHtml,
     runnersIntroText,
     runnersPanelHtml,
     splitRunFields,
@@ -97,7 +97,9 @@ test('the dashboard follows Explorer style rules and works in both themes throug
     assert.doesNotMatch(template, /\/explorer\/assets\/icons\//);
     for (const css of [styles, buttonStyles]) {
         assert.doesNotMatch(css, /#[0-9a-f]{3,8}\b/i);
-        assert.doesNotMatch(css, /(?:color|background|border(?:-color|-radius)?|box-shadow):/);
+        for (const [, value] of css.matchAll(/(?:color|background|border-color):\s*([^;}\n]+)/g)) {
+            assert.match(value, /^(?:var\(--[\w-]+\)|transparent|none)$/, 'colors must use existing Explorer tokens');
+        }
         assert.doesNotMatch(css, /min-width:\s*(?:[1-9]\d*px|min\()/);
         assert.doesNotMatch(css, /\/\*/, 'WebSkel mis-scopes the rule after a CSS comment');
     }
@@ -114,18 +116,17 @@ test('the dashboard follows Explorer style rules and works in both themes throug
     scoped(buttonStyles, /^(?:\.app-toolbar-slot )?local-llm-tool-button\b/);
 });
 
-test('the Models table has no buttons; the detail panel holds the one Run and the model actions', () => {
-    const table = modelsTableHtml(OVERVIEW_MODELS, { selectedId: 'qwen3-0.6b', activeModelId: 'gpt-oss-20b', runners: RUNNER_LIST });
-    // One column per supported runner, named by the runner itself.
-    assert.deepEqual([...table.matchAll(/<th scope="col">([^<]*)<\/th>/g)].map((match) => match[1]),
-        ['Model', 'Licence', 'llama.cpp', 'Fake &lt;GGUF&gt;', 'Ollama']);
-    assert.doesNotMatch(table, /<button/);
-    assert.doesNotMatch(table, />\s*Run/);
-    assert.match(table, /data-model-id="qwen3-0.6b"[^>]*aria-selected="true"/);
-    assert.match(table, /class="local-llm-model-row active"/);
+test('the compact Models list uses native selectors; only the detail panel holds Run and model actions', () => {
+    const table = modelsListHtml(OVERVIEW_MODELS, { selectedId: 'qwen3-0.6b', activeModelId: 'gpt-oss-20b', runners: RUNNER_LIST });
+    assert.match(table, /<ul class="local-llm-model-list" aria-label="Models">/);
+    assert.equal((table.match(/<button/g) || []).length, OVERVIEW_MODELS.length);
+    assert.doesNotMatch(table, /<table|<th|<td|>\\s*Run/);
+    assert.match(table, /data-model-id="qwen3-0.6b"[^>]*aria-pressed="true"/);
     assert.match(table, /status-badge success">in use/);
     assert.match(table, /Qwen3 0\.6B &lt;b&gt;/, 'names are escaped');
-    assert.match(table, /<td class="settings-card-meta">—<\/td>/, 'no Ollama source shows a dash');
+    assert.equal((table.match(/class="settings-card-meta local-llm-model-size"/g) || []).length, 2, 'each compact model row has one size summary, not one column per runner');
+    assert.match(table, /GGUF \/ OLLAMA/);
+    assert.doesNotMatch(table, /local-llm-model-downloads/);
 
     const template = readText(new URL('local-llm-dashboard.html', DASHBOARD));
     assert.equal((template.match(/data-run-submit/g) || []).length, 1);
@@ -153,7 +154,7 @@ test('the Models table has no buttons; the detail panel holds the one Run and th
     assert.doesNotMatch(removable, /Delete its weights first/);
     assert.doesNotMatch(added, />\s*Run\s*</);
     assert.equal(detailInfoHtml(null), '');
-    assert.equal(modelsTableHtml([]), '<div class="settings-empty-state">No models in the catalog.</div>');
+    assert.equal(modelsListHtml([]), '<div class="settings-empty-state">No models in the catalog.</div>');
 });
 
 test('the Runners tab offers Install and Uninstall only for on-demand runners, with size, licence and progress', () => {
@@ -324,7 +325,7 @@ function pollingHarness(t, callTool, { document } = {}) {
     let nextId = 1;
     globalThis.setTimeout = (fn, ms) => { const id = nextId++; pending.set(id, { fn, ms }); return id; };
     globalThis.clearTimeout = (id) => { pending.delete(id); };
-    globalThis.window = { webSkel: { appServices: { getClient: () => ({ callTool }) } } };
+    globalThis.window = { webSkel: { showLoading: () => ({}), hideLoading() {}, appServices: { getClient: () => ({ callTool }) } } };
     if (document) globalThis.document = document;
     t.after(() => Object.assign(globalThis, saved));
     const settle = async () => { for (let i = 0; i < 6; i += 1) await new Promise((resolve) => saved.setTimeout(resolve, 0)); };
@@ -592,13 +593,13 @@ test('on the cpu profile the cards show the CPU, memory with its floor and disk,
     assert.match(running({ layers: 25, of: 25 }), /25\/25 layers on the GPU/);
     // The presenter hands the overview's profile, decision and limits to the cards.
     const presenter = new dashboardModule.LocalLlmDashboard({ isConnected: true, querySelector: () => null, querySelectorAll: () => [] }, () => {});
-    presenter.hardware = { innerHTML: '' };
+    presenter.hardwareSummary = { innerHTML: '' };
     presenter.overview = { profile: 'cpu', profileDecision: { cause: 'absent', reason: CPU_REASON }, limits: CPU_LIMITS, hardware: CPU_HARDWARE };
     presenter.renderHardware();
-    assert.match(presenter.hardware.innerHTML, /data-llm-card="compute"[\s\S]*CPU · 4 cores[\s\S]*keeps 589 MiB free/);
+    assert.match(presenter.hardwareSummary.innerHTML, /data-llm-resource="compute"[\s\S]*CPU · 4 cores[\s\S]*keeps 589 MiB free/);
     presenter.overview = { hardware: CPU_HARDWARE };
     presenter.renderHardware();
-    assert.match(presenter.hardware.innerHTML, /data-llm-card="gpu"/, 'no profile: the cards of today');
+    assert.match(presenter.hardwareSummary.innerHTML, /data-llm-resource="gpu"/, 'no profile: the reported GPU remains visible');
 });
 
 test('a runner with no policy for the profile gets no column and no Install; while undecided every runner keeps its column', () => {

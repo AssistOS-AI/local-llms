@@ -1,6 +1,5 @@
 // Pure HTML builders for the Local LLMs dashboard. They take plain data and
-// return markup, so the layout rules (no Run button in the table, one in the
-// detail panel) can be tested without a browser.
+// return markup, so layout and action rules can be tested without a browser.
 import {
     admissionLabel,
     contextLabel,
@@ -13,6 +12,10 @@ import {
     runnerLabel,
     stripBidi,
 } from '../../../local-llm-settings/local-llm-settings-model.js';
+
+import { helpHtml } from './local-llm-dashboard-help.js';
+
+import { iconHtml } from './local-llm-icons.js';
 
 export const ACTIVE_PHASES = new Set(['downloading', 'copying', 'verifying', 'pulling', 'starting', 'loading', 'ready', 'stopping']);
 export function measurementHtml(status) {
@@ -60,18 +63,53 @@ function meter({ label, value, max, text }) {
                    aria-label="${escapeHtml(label)}" title="${escapeHtml(text)}">${escapeHtml(text)}</meter>`;
 }
 
-function statCard(name, title, value, meta = '', extra = '') {
+function capacityPair(available, total) {
+    const valid = bytes => Number.isFinite(bytes) && bytes >= 0;
+    const scale = Math.max(valid(available) ? available : 0, valid(total) ? total : 0);
+    if (!valid(available) && !valid(total)) return '— / —';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let unit = 0;
+    while (scale >= 1000 ** (unit + 1) && unit < units.length - 1) unit += 1;
+    const number = bytes => valid(bytes) ? (bytes / 1000 ** unit).toFixed(unit >= 3 ? 1 : 0) : '—';
+    return `${number(available)} / ${number(total)} ${units[unit]}`;
+}
+
+function statCard(name, title, value, meta = '', extra = '', compact = false, summary = {}) {
+    const descriptions = {
+        compute: 'The device used by this workspace runner, not necessarily all hardware on the host.',
+        memory: 'Available memory is the pool visible to this agent, including applicable container limits and workspace reserves.',
+        ram: 'Memory visible to this agent. Model admission also accounts for the workspace reserve.',
+        disk: 'Storage used for model weights. Adding a model records its source; weights download only on Run.',
+        gpu: 'The GPU selected by the runtime and its reported memory. Unknown values are not estimated.',
+        unified: 'CPU and GPU share this one memory pool; do not add their memory together.',
+        budget: 'Limits supplied by Ploinky are distinct from physical hardware capacity.',
+    };
+    if (compact) {
+        const id = `localLlmResource-${name}`;
+        const icon = name === 'disk' ? 'disk' : ['compute', 'gpu'].includes(name) ? 'cpu' : 'memory';
+        return `<span class="local-llm-resource-value" data-llm-resource="${escapeHtml(name)}">${iconHtml(icon)}${summary.label ? `<span class="settings-card-meta">${escapeHtml(summary.label)}</span>` : ''}<strong>${escapeHtml(summary.value ?? value)}</strong>
+            <button type="button" class="gray-button local-llm-info" popovertarget="${id}" aria-label="About ${escapeHtml(title)}">${iconHtml('info')}</button>
+            <span id="${id}" popover class="settings-card settings-card-static local-llm-help">
+                <strong>${escapeHtml(title)} · ${escapeHtml(value)}</strong>
+                ${summary.note ? `<span>${escapeHtml(summary.note)}</span>` : ''}
+                ${descriptions[name] ? `<span>${escapeHtml(descriptions[name])}</span>` : ''}
+                ${extra}
+                ${meta ? `<span>${escapeHtml(meta)}</span>` : ''}
+            </span></span>`;
+    }
+    const auxiliary = name !== 'apu-warning' && meta.length > 110;
+    const help = auxiliary ? meta : descriptions[name];
     return `
         <div class="settings-card settings-card-static local-llm-stat" data-llm-card="${escapeHtml(name)}">
-            <div class="settings-card-meta local-llm-stat-title">${escapeHtml(title)}</div>
+            <div class="settings-card-meta local-llm-stat-title local-llm-field-heading">${escapeHtml(title)}${help ? helpHtml(`localLlmHardware-${name}`, `About ${title}`, help) : ''}</div>
             <div class="settings-card-title local-llm-stat-value">${escapeHtml(value)}</div>
             ${extra}
-            ${meta ? `<div class="settings-card-meta">${escapeHtml(meta)}</div>` : ''}
+            ${meta && !auxiliary ? `<div class="settings-card-meta">${escapeHtml(meta)}</div>` : ''}
         </div>`;
 }
 
 // The cpu profile: the compute device and why it is the CPU, the memory pool with the floor kept free, and the disk.
-function cpuCardsHtml(hardware, decision, limits) {
+function cpuCardsHtml(hardware, decision, limits, card) {
     const memory = hardware.memory || {};
     const disk = hardware.disk || {};
     const cores = Number.isFinite(hardware.cores) ? hardware.cores : (Number.isFinite(hardware.cpus) ? hardware.cpus : null);
@@ -81,25 +119,25 @@ function cpuCardsHtml(hardware, decision, limits) {
     const available = Number.isFinite(limits?.availableBytes) ? limits.availableBytes : memory.availableBytes;
     const used = Number.isFinite(pool) && Number.isFinite(available) ? pool - available : null;
     return [
-        statCard('compute', 'Compute', cores === null ? 'CPU' : `CPU · ${cores} ${cores === 1 ? 'core' : 'cores'}`,
+        card('compute', 'Compute', cores === null ? 'CPU' : `CPU · ${cores} ${cores === 1 ? 'core' : 'cores'}`,
             explanation ? [explanation.summary, explanation.restartHint].filter(Boolean).join(' ') : 'Runs on the CPU. No GPU is used.'),
-        statCard('memory', 'Memory available', `${formatMiB(available)} of ${formatMiB(pool)}`,
+        card('memory', 'Memory available', `${formatMiB(available)} of ${formatMiB(pool)}`,
             Number.isFinite(limits?.floorBytes) ? `keeps ${formatMiB(limits.floorBytes)} free for the workspace` : '',
             meter({ label: 'Memory in use', value: used, max: pool, text: `${formatMiB(used)} in use` })),
-        statCard('disk', 'Disk free', formatBytes(disk.freeBytes),
+        card('disk', 'Disk free', formatBytes(disk.freeBytes),
             Number.isFinite(disk.totalBytes) ? `of ${formatBytes(disk.totalBytes)}, for model weights` : 'for model weights'),
     ].join('');
 }
 
 // The container budget Ploinky set, shown only when the overview carries one.
-function budgetCardHtml(budget) {
+function budgetCardHtml(budget, card) {
     if (!budget || typeof budget !== 'object') return '';
     const parts = [];
     if (Number.isFinite(budget.cpus) && budget.cpus > 0) parts.push(`${budget.cpus} ${budget.cpus === 1 ? 'CPU' : 'CPUs'}`);
     if (Number.isFinite(budget.memoryBytes)) parts.push(`${formatMiB(budget.memoryBytes)} RAM`);
     if (budget.gpuShare?.assurance === 'best-effort') parts.push(`${budget.gpuShare.smPercent}% GPU SM, ${formatMiB(budget.gpuShare.vramBytes)} per CUDA process (best-effort)`);
     if (!parts.length) return '';
-    return statCard('budget', 'Limits from Ploinky', parts.join(' · '),
+    return card('budget', 'Limits from Ploinky', parts.join(' · '),
         'Models are sized against this container budget; a temporary shortage clears when memory is released.');
 }
 
@@ -108,32 +146,54 @@ function budgetCardHtml(budget) {
  * cpu profile (`profile`, with the controller's `decision` and pool `limits`), the Compute, Memory and disk
  * cards. `gpu` may come from a fresher status poll.
  */
-export function hardwareCardsHtml(hardware = {}, gpuOverride = null, { profile = null, decision = null, limits = null } = {}) {
-    const budget = budgetCardHtml(limits?.budget);
-    if (profile === 'cpu') return cpuCardsHtml(hardware, decision, limits) + budget;
+export function hardwareCardsHtml(hardware = {}, gpuOverride = null, { profile = null, decision = null, limits = null, compact = false } = {}) {
     const gpu = gpuOverride?.available ? { ...(hardware.gpu || {}), ...gpuOverride } : (hardware.gpu || {});
-    const cards = [];
     const memory = hardware.memory || {};
+    const card = (name, title, value, meta = '', extra = '') => {
+        const labels = { compute: 'CPU', gpu: 'GPU', memory: 'Memory', ram: 'Memory', unified: 'Memory', disk: 'Disk', budget: 'Limits', offload: 'Offload' };
+        const summary = { label: labels[name] ?? title, value };
+        if (name === 'compute') {
+            const cores = Number.isFinite(hardware.cores) ? hardware.cores : hardware.cpus;
+            summary.value = Number.isFinite(cores) ? `${cores} ${cores === 1 ? 'core' : 'cores'}` : '—';
+        } else if (['memory', 'ram', 'unified'].includes(name)) {
+            const limited = ['cpu', 'apu', 'vulkan', 'venus'].includes(profile);
+            summary.value = capacityPair(limited ? limits?.availableBytes ?? memory.availableBytes : memory.availableBytes,
+                limited ? limits?.poolBytes ?? memory.totalBytes : memory.totalBytes);
+            summary.note = 'Summary: available / total memory. GB uses decimal units (1 GB = 1,000,000,000 bytes); MiB below uses binary units (1 MiB = 1,048,576 bytes).';
+        } else if (name === 'gpu' && title === 'GPU memory') {
+            summary.label = 'VRAM';
+            const available = Number.isFinite(gpu.totalBytes) && Number.isFinite(gpu.usedBytes) ? gpu.totalBytes - gpu.usedBytes : null;
+            summary.value = capacityPair(available, gpu.totalBytes);
+            summary.note = 'Summary: available / total dedicated GPU memory in decimal units. The meter below shows memory in use.';
+        } else if (name === 'disk') {
+            summary.value = capacityPair(hardware.disk?.freeBytes, hardware.disk?.totalBytes);
+            summary.note = 'Summary: free / total storage available to this agent for model weights, in decimal units.';
+        }
+        return statCard(name, title, value, meta, extra, compact, summary);
+    };
+    const budget = budgetCardHtml(limits?.budget, card);
+    if (profile === 'cpu') return cpuCardsHtml(hardware, decision, limits, card) + budget;
+    const cards = [];
     if (profile === 'apu') {
         const ratio = limits?.offloadReport?.modelBufferRatio;
         const basis = limits?.offloadReport?.modelBufferDenominatorBasis;
-        cards.push(statCard('gpu', 'AMD integrated GPU · Vulkan APU', gpu.name || 'Not available',
+        cards.push(card('gpu', 'AMD integrated GPU · Vulkan APU', gpu.name || 'Not available',
             'Experimental, unqualified · shares system RAM'));
-        cards.push(statCard('memory', 'Shared memory available', `${formatMiB(limits?.availableBytes ?? memory.availableBytes)} of ${formatMiB(limits?.poolBytes ?? memory.totalBytes)}`,
+        cards.push(card('memory', 'Shared memory available', `${formatMiB(limits?.availableBytes ?? memory.availableBytes)} of ${formatMiB(limits?.poolBytes ?? memory.totalBytes)}`,
             Number.isFinite(limits?.floorBytes) ? `keeps ${formatMiB(limits.floorBytes)} free` : ''));
-        if (Number.isFinite(ratio)) cards.push(statCard('offload', 'Observed model buffer ratio', ratio.toFixed(3), basis || 'full pinned weights'));
-        for (const warning of limits?.warnings || []) cards.push(statCard('apu-warning', 'APU guard warning', warning));
-        cards.push(statCard('disk', 'Disk free', formatBytes(hardware.disk?.freeBytes), 'for model weights'));
+        if (Number.isFinite(ratio)) cards.push(card('offload', 'Observed model buffer ratio', ratio.toFixed(3), basis || 'full pinned weights'));
+        if (!compact) for (const warning of limits?.warnings || []) cards.push(card('apu-warning', 'APU guard warning', warning));
+        cards.push(card('disk', 'Disk free', formatBytes(hardware.disk?.freeBytes), 'for model weights'));
         return cards.join('') + budget;
     }
     if (profile === 'vulkan' || profile === 'venus') {
-        cards.push(statCard('gpu', profile === 'venus' ? 'Apple GPU · Venus' : 'AMD GPU · Vulkan', gpu.name || 'Not available',
+        cards.push(card('gpu', profile === 'venus' ? 'Apple GPU · Venus' : 'AMD GPU · Vulkan', gpu.name || 'Not available',
             profile === 'venus' ? `Headroom unknown · provisional cap ${formatMiB(limits?.deviceCapBytes)}`
                 : 'Unit-tested, unverified on AMD hardware'));
-        cards.push(statCard('ram', 'VM memory available', formatMiB(limits?.availableBytes ?? memory.availableBytes),
+        cards.push(card('ram', 'VM memory available', formatMiB(limits?.availableBytes ?? memory.availableBytes),
             Number.isFinite(limits?.floorBytes) ? `keeps ${formatMiB(limits.floorBytes)} free` : ''));
         const disk = hardware.disk || {};
-        cards.push(statCard('disk', 'Disk free', formatBytes(disk.freeBytes), 'for model weights'));
+        cards.push(card('disk', 'Disk free', formatBytes(disk.freeBytes), 'for model weights'));
         return cards.join('') + budget;
     }
     if (gpu.available && gpu.memoryModel === 'unified') {
@@ -144,11 +204,11 @@ export function hardwareCardsHtml(hardware = {}, gpuOverride = null, { profile =
         const used = Number.isFinite(memory.totalBytes) && Number.isFinite(memory.availableBytes)
             ? memory.totalBytes - memory.availableBytes : null;
         const cache = Number.isFinite(memory.cachedBytes) ? ` · page cache ${formatMiB(memory.cachedBytes)}` : '';
-        cards.push(statCard('unified', 'Unified memory available', `${formatMiB(memory.availableBytes)} of ${formatMiB(memory.totalBytes)}`,
+        cards.push(card('unified', 'Unified memory available', `${formatMiB(memory.availableBytes)} of ${formatMiB(memory.totalBytes)}`,
             `${gpu.name || 'GPU'} shares system memory · ${users}${cache}`,
             meter({ label: 'Unified memory in use', value: used, max: memory.totalBytes, text: `${formatMiB(used)} in use` })));
         const disk = hardware.disk || {};
-        cards.push(statCard('disk', 'Disk free', formatBytes(disk.freeBytes),
+        cards.push(card('disk', 'Disk free', formatBytes(disk.freeBytes),
             Number.isFinite(disk.totalBytes) ? `of ${formatBytes(disk.totalBytes)}, for model weights` : 'for model weights'));
         return cards.join('') + budget;
     }
@@ -156,24 +216,25 @@ export function hardwareCardsHtml(hardware = {}, gpuOverride = null, { profile =
         const users = Array.isArray(gpu.processes) && gpu.processes.length
             ? `in use by ${gpu.processes.map((process) => process.name).join(', ')}`
             : 'no process is using it';
-        cards.push(statCard('gpu', 'GPU memory', `${formatMiB(gpu.usedBytes)} of ${formatMiB(gpu.totalBytes)}`,
+        cards.push(card('gpu', 'GPU memory', `${formatMiB(gpu.usedBytes)} of ${formatMiB(gpu.totalBytes)}`,
             `${gpu.name || 'GPU'} · ${users}`,
             meter({ label: 'GPU memory used', value: gpu.usedBytes, max: gpu.totalBytes, text: `${formatMiB(gpu.usedBytes)} used` })));
     } else {
-        cards.push(statCard('gpu', 'GPU', 'Not available', gpu.reason || 'No GPU is attached to this agent.'));
+        cards.push(card('gpu', 'GPU', 'Not available', gpu.reason || 'No GPU is attached to this agent.'));
     }
-    cards.push(statCard('ram', 'RAM available', formatMiB(memory.availableBytes),
+    cards.push(card('ram', 'RAM available', formatMiB(memory.availableBytes),
         Number.isFinite(memory.totalBytes) ? `of ${formatMiB(memory.totalBytes)}` : ''));
     const disk = hardware.disk || {};
-    cards.push(statCard('disk', 'Disk free', formatBytes(disk.freeBytes),
+    cards.push(card('disk', 'Disk free', formatBytes(disk.freeBytes),
         Number.isFinite(disk.totalBytes) ? `of ${formatBytes(disk.totalBytes)}, for model weights` : 'for model weights'));
     return cards.join('') + budget;
 }
 
 /** The deployment card: what runs, how it is doing, and its actions. */
-export function statusCardHtml(status = {}) {
+export function statusCardHtml(status = {}, { models = [] } = {}) {
     const deployment = status.deployment || null;
     const phase = status.phase || deployment?.phase || 'idle';
+    const modelName = models.find(model => model.id === deployment?.modelId)?.displayName || deployment?.modelId;
     const actions = `
         <div class="settings-card-actions local-llm-stat-actions">
             <button type="button" class="general-button secondary" data-llm-cancel data-local-action="cancelDownload">Cancel download</button>
@@ -182,7 +243,7 @@ export function statusCardHtml(status = {}) {
     if (!deployment || phase === 'idle') {
         const last = deployment ? `Last run: ${deployment.modelId} on ${runnerLabel(deployment.runnerId)}` : 'Select a model below, then Run';
         return `
-            <div class="settings-card settings-card-static local-llm-stat local-llm-stat-status" data-llm-card="status">
+            <div class="local-llm-stat-status" data-llm-card="status">${iconHtml('cpu')}
                 <div class="settings-card-meta local-llm-stat-title">Running model</div>
                 <div class="settings-card-title local-llm-stat-value">None</div>
                 <div class="settings-card-meta">${escapeHtml(last)}</div>
@@ -199,39 +260,31 @@ export function statusCardHtml(status = {}) {
         lines.push(`<progress class="local-llm-progress" max="100" value="${percent}" aria-label="Download progress">${percent}%</progress>`);
         lines.push(`<div class="settings-card-meta">${escapeHtml([`${formatBytes(download.bytes)} of ${formatBytes(download.total)}`, rate, eta].filter(Boolean).join(' · '))}</div>`);
     }
+    const technical = [];
     const report = status.runnerReport || {};
     const reportParts = [
         report.device ? `device ${report.device}` : '',
         report.offloaded?.layers > 0 ? `${report.offloaded.layers}/${report.offloaded.of} layers on the GPU` : '',
         Number.isFinite(report.totalMiB) ? `buffers ${report.totalMiB.toLocaleString('en-US')} MiB` : '',
     ].filter(Boolean);
-    if (reportParts.length) lines.push(`<div class="settings-card-meta">${escapeHtml(reportParts.join(' · '))}</div>`);
-    if (status.context) lines.push(`<div class="settings-card-meta">Context: ${escapeHtml(contextLabel(status.context))}</div>`);
+    if (reportParts.length) technical.push(reportParts.join(' · '));
+    if (status.context) technical.push(`Context: ${contextLabel(status.context)}`);
     const last = status.lastCompletion;
     if (last && Number.isFinite(last.generationTokensPerSecond)) {
-        lines.push(`<div class="settings-card-meta">Last completion: ${escapeHtml(String(last.completionTokens ?? '?'))} tokens at ${escapeHtml(last.generationTokensPerSecond.toFixed(1))} tokens/s (${escapeHtml(last.source || 'runner')})</div>`);
+        technical.push(`Last completion: ${String(last.completionTokens ?? '?')} tokens at ${last.generationTokensPerSecond.toFixed(1)} tokens/s (${last.source || 'runner'})`);
     }
     if (deployment.error) lines.push(`<div class="settings-status error">${escapeHtml(deployment.error)}</div>`);
     if (deployment.pausedReason && phase === 'paused') lines.push(`<div class="settings-card-meta">${escapeHtml(deployment.pausedReason)}</div>`);
     return `
-        <div class="settings-card settings-card-static local-llm-stat local-llm-stat-status" data-llm-card="status">
-            <div class="settings-card-meta local-llm-stat-title">Running model</div>
+        <div class="local-llm-stat-status" data-llm-card="status">${iconHtml('cpu')}
+            <div class="settings-card-meta local-llm-stat-title local-llm-field-heading">Running model${technical.length ? helpHtml('localLlmRuntimeHelp', 'Runtime details', technical.join(' · ')) : ''}</div>
             <div class="local-llm-stat-line">
-                <span class="settings-card-title local-llm-stat-value">${escapeHtml(deployment.modelId)} on ${escapeHtml(runnerLabel(deployment.runnerId))}</span>
+                <span class="settings-card-title local-llm-stat-value">${escapeHtml(modelName)} on ${escapeHtml(runnerLabel(deployment.runnerId))}</span>
                 <span class="status-badge ${badge}">${escapeHtml(phase)}</span>
             </div>
             ${lines.join('')}
             ${actions}
         </div>`;
-}
-
-function runnerCell(entry) {
-    if (!entry) return '<td class="settings-card-meta">—</td>';
-    return `
-        <td>
-            <div>${escapeHtml(downloadLabel(entry.download, entry.size))}</div>
-            <div class="settings-card-meta">${escapeHtml(admissionLabel(entry.admission))}</div>
-        </td>`;
 }
 
 function modelChips(model, activeModelId) {
@@ -243,46 +296,26 @@ function modelChips(model, activeModelId) {
 }
 
 function modelSizes(model) {
-    return [model.totalParams, model.activeParams ? `${model.activeParams} active` : '']
+    return [model.totalParams, model.activeParams && model.activeParams !== model.totalParams ? `${model.activeParams} active` : '']
         .filter(Boolean).join(' · ');
 }
 
-/**
- * The models table. It has no buttons: a row selects its model, and the
- * detail panel holds the model's actions and its one Run button.
- */
-export function modelsTableHtml(models = [], { selectedId = '', activeModelId = '', runners = [] } = {}) {
+/** Compact native model selectors; runner compatibility stays in the detail panel. */
+export function modelsListHtml(models = [], { selectedId = '', activeModelId = '' } = {}) {
     if (!models.length) return '<div class="settings-empty-state">No models in the catalog.</div>';
-    const columns = tableRunners(runners);
-    const rows = models.map((model) => {
-        const selected = model.id === selectedId;
-        return `
-            <tr class="local-llm-model-row${selected ? ' active' : ''}" data-local-action="selectModel ${escapeHtml(model.id)}"
-                data-model-id="${escapeHtml(model.id)}" tabindex="0" aria-selected="${selected ? 'true' : 'false'}">
-                <td>
-                    <div class="local-llm-model-name">
-                        <span class="settings-card-title">${escapeHtml(model.displayName || model.id)}</span>
-                        ${modelChips(model, activeModelId)}
-                    </div>
-                    <div class="settings-card-meta">${escapeHtml(modelSizes(model) || model.id)}</div>
-                </td>
-                <td>${escapeHtml(model.license || '—')}</td>
-                ${columns.map((runner) => runnerCell(model.runners?.[runner.id])).join('')}
-            </tr>`;
-    }).join('');
-    return `
-        <div class="local-llm-table-scroll">
-            <table class="local-llm-table" aria-label="Models">
-                <thead>
-                    <tr>
-                        <th scope="col">Model</th>
-                        <th scope="col">Licence</th>
-                        ${columns.map((runner) => `<th scope="col">${escapeHtml(labelOf(runner.id, runners))}</th>`).join('')}
-                    </tr>
-                </thead>
-                <tbody>${rows}</tbody>
-            </table>
-        </div>`;
+    return '<ul class="local-llm-model-list" aria-label="Models">' + models.map(model => {
+        const formats = model.weights || Object.fromEntries(Object.entries(model.runners || {}).map(([runnerId, entry]) => [entry.format || runnerId, entry]));
+        const entries = Object.entries(formats);
+        const first = entries[0];
+        const description = [modelSizes(model), entries.map(([format]) => format.toUpperCase()).join(' / ')].filter(Boolean).join(' · ');
+        const size = first ? formatBytes(first[1].size) : '—';
+        const sizeLabel = first ? `${first[1].label || first[0]} · ${downloadLabel(first[1].download, first[1].size)}` : 'Download size unavailable';
+        return `<li><button type="button" class="local-llm-model-row" data-local-action="selectModel ${escapeHtml(model.id)}"
+            data-model-id="${escapeHtml(model.id)}" aria-pressed="${model.id === selectedId}">
+            ${iconHtml('box')}<span class="local-llm-model-info"><span class="local-llm-model-name"><span class="settings-card-title">${escapeHtml(model.displayName || model.id)}</span>${model.id === activeModelId ? '<span class="status-badge success">in use</span>' : ''}</span>
+            <span class="settings-card-meta">${escapeHtml(description)}</span></span>
+            <span class="settings-card-meta local-llm-model-size" title="${escapeHtml(sizeLabel)}">${entries.length > 1 ? escapeHtml(first[1].label || first[0]) + ' · ' : ''}${escapeHtml(size)}</span></button></li>`;
+    }).join('') + '</ul>';
 }
 
 /** Whether any of this model's weights are on disk (downloaded or partial). */
@@ -304,7 +337,7 @@ export function detailInfoHtml(model, { runners = [], activeModelId = '' } = {})
         const readers = (entry.runners || []).filter((runnerId) => supported.has(runnerId))
             .map((runnerId) => labelOf(runnerId, runners));
         return `
-                <li class="local-llm-runner-item">
+                <li class="local-llm-runner-item local-llm-weight-item">${iconHtml('download')}
                     <div>
                         <div class="settings-card-title">${escapeHtml(entry.label || format)}</div>
                         <div class="settings-card-meta">${escapeHtml(downloadLabel(entry.download, entry.size))}${readers.length ? ` · used by ${escapeHtml(readers.join(', '))}` : ''}</div>
@@ -340,7 +373,7 @@ export function detailInfoHtml(model, { runners = [], activeModelId = '' } = {})
             ${remove}
         </div>
         <ul class="local-llm-runner-list" aria-label="Weights">${weights}</ul>
-        <ul class="local-llm-runner-list" aria-label="Runners">${fits || '<li class="settings-card-meta">No runner can run this model.</li>'}</ul>`;
+        <details class="local-llm-advanced local-llm-compatibility"><summary class="form-label">Runner compatibility</summary><ul class="local-llm-runner-list" aria-label="Runners">${fits || '<li class="settings-card-meta">No runner can run this model.</li>'}</ul></details>`;
 }
 
 function licenceLine(licence = {}, accepted = null) {
@@ -495,11 +528,15 @@ export function estimateHtml({ admission = null, context = null, error = '', mea
             </div>`);
     }
     const warnings = Array.isArray(admission?.warnings) ? admission.warnings : [];
-    const summary = [admissionLabel(admission), estimate.basis ? `estimate from ${estimate.basis}` : '', ...warnings].filter(Boolean).join(' · ');
+    const informational = admission?.status === 'ok';
+    const summary = [admissionLabel(admission), ...(informational ? [] : warnings)].filter(Boolean).join(' · ');
+    const basis = estimate.basis ? helpHtml('localLlmEstimateHelp', 'About this memory estimate', `Estimate from ${estimate.basis}`) : '';
+    const notices = informational && warnings.length
+        ? `<span class="settings-card-meta">${warnings.length} ${warnings.length === 1 ? 'notice' : 'notices'}</span>${helpHtml('localLlmNoticesHelp', 'Runtime notices', warnings.join(' · '))}` : '';
     return `
         ${parts.join('')}${measurementHtml(measurementStatus)}
         ${context ? `<div class="settings-card-meta">Context: ${escapeHtml(contextLabel(context))}</div>` : ''}
-        ${summary ? `<div class="settings-card-meta">${escapeHtml(summary)}</div>` : ''}`;
+        ${summary ? `<div class="settings-card-meta local-llm-field-heading">${escapeHtml(summary)}${basis}${notices}</div>` : ''}`;
 }
 
 const GATED_LABELS = Object.freeze({

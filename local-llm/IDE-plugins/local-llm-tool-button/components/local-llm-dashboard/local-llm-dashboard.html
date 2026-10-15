@@ -1,16 +1,13 @@
 <div class="local-llm-dashboard">
-    <div class="local-llm-intro">
-        <p class="settings-section-description">Run open-weight models on this workspace's GPU, or on its CPU when it has no usable NVIDIA GPU. Weights download only when you press Run.</p>
-        <div class="settings-status" id="localLlmStatus" role="status" aria-live="polite"></div>
-    </div>
+    <div class="settings-status" id="localLlmStatus" role="status" aria-live="polite"></div>
 
     <section class="local-llm-summary" aria-label="Hardware and running model">
-        <div class="local-llm-summary-hardware" data-llm-hardware>
-            <div class="settings-card settings-card-static local-llm-stat">
-                <div class="settings-card-meta">Reading hardware…</div>
-            </div>
-        </div>
+        <section class="local-llm-resources" aria-labelledby="localLlmResourcesTitle">
+            <div id="localLlmResourcesTitle" class="local-llm-resource-label" data-llm-resource-label>Hardware &amp; resources</div>
+            <div class="local-llm-resource-peek" data-llm-hardware-summary>Reading hardware…</div>
+        </section>
         <div class="local-llm-summary-status" data-llm-deployment></div>
+        <div data-llm-hardware-warnings role="status"></div>
     </section>
 
     <div class="settings-tabs" id="localLlmTabs" role="tablist" aria-label="Local LLMs sections">
@@ -57,27 +54,25 @@
              data-llm-panel="models"
              role="tabpanel"
              aria-labelledby="localLlmTabModels">
-        <div class="local-llm-models-list">
-            <div class="local-llm-section-heading">
-                <div>
-                    <h3 class="settings-section-title">Models</h3>
-                    <p class="settings-section-description">Select a model to see its runners and run it. Sizes are the download per runner.</p>
-                </div>
+        <div class="local-llm-section-heading">
+                <p class="settings-section-description">Choose a model, configure its runner and check memory requirements before starting it with Run.</p>
                 <div class="settings-card-actions" aria-label="Model actions">
-                    <button type="button" class="general-button secondary" data-local-action="refreshOverview">Refresh</button>
+                    <button type="button" class="local-llm-quiet local-llm-refresh" data-local-action="refreshOverview" aria-label="Refresh models" title="Refresh models"></button>
                     <button type="button"
-                            class="general-button secondary"
+                            class="local-llm-quiet"
                             data-llm-add
                             data-local-action="openAddModel"
-                            aria-controls="localLlmAddForm"
-                            aria-expanded="false">Add model</button>
+                            aria-haspopup="dialog"
+                            aria-controls="localLlmAddDialog"
+                            aria-expanded="false"><span data-llm-add-icon aria-hidden="true"></span>Add model</button>
                 </div>
             </div>
-            <div class="local-llm-table-region settings-busy-region" data-llm-models aria-busy="false"></div>
+        <div class="local-llm-models-list local-llm-surface">
+            <div class="settings-busy-region" data-llm-models aria-busy="false"></div>
         </div>
 
-        <aside class="settings-card settings-card-static local-llm-detail" data-llm-detail aria-label="Selected model">
-            <div class="settings-empty-state" data-llm-detail-empty>Select a model to see its runners, settings and estimate.</div>
+        <aside class="local-llm-detail local-llm-surface" data-llm-detail aria-label="Selected model">
+            <div class="settings-empty-state" data-llm-detail-empty hidden>No models available. Add a model to configure its runner.</div>
             <div class="local-llm-detail-info" data-llm-detail-info hidden></div>
 
             <form class="local-llm-run-form" id="localLlmRunForm" data-llm-form="run" hidden>
@@ -96,37 +91,82 @@
                     <div class="local-llm-params" data-run-params-advanced></div>
                 </details>
                 <div class="local-llm-estimate" data-run-estimate aria-live="polite"></div>
-                <div class="modal-actions local-llm-form-actions">
-                    <button type="submit" class="general-button" data-run-submit>Run</button>
+                <div class="modal-actions local-llm-form-actions local-llm-run-footer">
+                    <span class="settings-card-meta">Weights download only when you run.</span>
+                    <button type="submit" class="general-button" data-run-submit><span data-llm-run-icon aria-hidden="true"></span>Run</button>
                 </div>
             </form>
+        </aside>
+    </section>
 
-            <form class="local-llm-add-form" id="localLlmAddForm" data-llm-form="add" hidden>
+    <section class="local-llm-panel local-llm-playground-layout"
+             id="localLlmPanelPlayground"
+             data-llm-panel="playground"
+             role="tabpanel"
+             aria-labelledby="localLlmTabPlayground"
+             hidden>
+        <div class="local-llm-section-heading">
+            <div>
+                <p class="settings-section-description" data-llm-gateway>Sends one prompt to the running model inside this agent and shows the runner's speed. Other agents use the running model through Soul Gateway.</p>
+            </div>
+        </div>
+        <form class="settings-card settings-card-static local-llm-prompt-form local-llm-surface" data-llm-form="prompt">
+            <div class="settings-card-meta" data-llm-prompt-note></div>
+            <label class="local-llm-field">
+                <span class="form-label">Prompt</span>
+                <textarea class="form-input local-llm-prompt" name="prompt" rows="4" maxlength="4000" required>Reply with exactly: PONG</textarea>
+            </label>
+            <div class="local-llm-prompt-actions">
+                <label class="local-llm-field local-llm-field-narrow">
+                    <span class="form-label">Maximum tokens</span>
+                    <input class="form-input" name="maxTokens" type="number" min="1" max="1024" step="1" value="256">
+                </label>
+                <button type="submit" class="general-button" data-llm-send>Send</button>
+            </div>
+        </form>
+        <section class="local-llm-surface local-llm-response" aria-labelledby="localLlmResponseTitle">
+            <h3 id="localLlmResponseTitle" class="settings-section-title">Response</h3>
+            <div data-llm-prompt-result aria-live="polite"><p class="settings-section-description">Send a prompt to see the model’s response.</p></div>
+        </section>
+    </section>
+
+    <section class="local-llm-panel local-llm-surface local-llm-logs-panel"
+             id="localLlmPanelLogs"
+             data-llm-panel="logs"
+             role="tabpanel"
+             aria-labelledby="localLlmTabLogs"
+             hidden>
+        <div class="local-llm-section-heading">
+            <div>
+                <p class="settings-section-description">The last 200 lines from the runner and the controller.</p>
+            </div>
+            <label class="local-llm-follow">
+                <input type="checkbox" data-llm-follow checked>
+                <span class="settings-card-meta">Follow new lines</span>
+            </label>
+        </div>
+        <pre class="local-llm-log" data-llm-log tabindex="0" aria-label="Runner log">No runner output yet.</pre>
+    </section>
+
+    <section class="local-llm-panel local-llm-runners-panel"
+             id="localLlmPanelRunners"
+             data-llm-panel="runners"
+             role="tabpanel"
+             aria-labelledby="localLlmTabRunners"
+             hidden>
+        <div class="local-llm-section-heading">
+            <div>
+                <p class="settings-section-description" data-llm-runners-intro></p>
+            </div>
+        </div>
+        <div class="settings-busy-region" data-llm-runners aria-busy="false"></div>
+    </section>
+    <dialog class="modal local-llm-add-dialog" id="localLlmAddDialog" aria-labelledby="localLlmAddTitle">
+        <header class="local-llm-section-heading"><h2 class="settings-section-title" id="localLlmAddTitle">Add model</h2><button class="gray-button" type="button" data-local-action="cancelAddModel">Close</button></header>
+            <form class="local-llm-add-form" id="localLlmAddForm" data-llm-form="add">
                 <div>
-                    <h3 class="settings-section-title">Add model</h3>
-                    <p class="settings-section-description">A model from Hugging Face (one GGUF file, read by every GGUF runner such as llama.cpp; a safetensors snapshot for vLLM; or an EXL3 snapshot for TabbyAPI) or one Ollama library tag. Look up a repository to pick a file and fill in its sizing. The source is pinned to a commit when you add it; nothing is downloaded until you press Run.</p>
+                    <p class="settings-section-description">Look up a source to select its files and read sizing data. Nothing downloads until Run.</p>
                 </div>
-                <label class="local-llm-field">
-                    <span class="form-label">Id</span>
-                    <input class="form-input" name="id" required pattern="[a-z0-9][a-z0-9._\-]{1,63}" placeholder="qwen3.6-35b-a3b">
-                </label>
-                <label class="local-llm-field">
-                    <span class="form-label">Display name</span>
-                    <input class="form-input" name="displayName" maxlength="120" placeholder="Qwen3.6 35B A3B">
-                </label>
-                <label class="local-llm-field">
-                    <span class="form-label">Architecture</span>
-                    <custom-select id="localLlmArchitecture"
-                                   data-presenter="custom-select"
-                                   aria-label="Architecture"
-                                   data-name="architecture"
-                                   data-selected="dense"
-                                   data-options="%5B%7B%22value%22%3A%22dense%22%2C%22label%22%3A%22Dense%22%7D%2C%7B%22value%22%3A%22moe%22%2C%22label%22%3A%22Mixture%20of%20experts%22%7D%5D"></custom-select>
-                </label>
-                <label class="local-llm-field">
-                    <span class="form-label">Licence</span>
-                    <input class="form-input" name="license" maxlength="80" placeholder="Apache-2.0">
-                </label>
                 <label class="local-llm-field">
                     <span class="form-label">Source</span>
                     <custom-select id="localLlmSourceKind"
@@ -140,25 +180,51 @@
                     <span class="form-label">Repository</span>
                     <input class="form-input" name="repo" placeholder="unsloth/Qwen3.6-35B-A3B-GGUF">
                 </label>
-                <label class="local-llm-field" data-source-field="huggingface hf exl3">
+                <div class="local-llm-field-pair" data-source-field="huggingface hf exl3">
+                    <label class="local-llm-field" data-source-field="huggingface hf exl3">
                     <span class="form-label">Revision</span>
                     <input class="form-input" name="revision" placeholder="main">
                 </label>
-                <div class="local-llm-field" data-source-field="huggingface hf exl3">
-                    <button type="button" class="gray-button" data-llm-lookup-button data-local-action="lookupModel">Look up</button>
-                    <div class="local-llm-lookup" data-llm-lookup aria-live="polite"></div>
+                    <div class="local-llm-lookup-action" data-source-field="huggingface hf exl3"><button type="button" class="gray-button" data-llm-lookup-button data-local-action="lookupModel">Look up</button></div>
                 </div>
+                <div class="local-llm-lookup" data-llm-lookup aria-live="polite"></div>
                 <label class="local-llm-field" data-source-field="huggingface">
                     <span class="form-label">GGUF file</span>
                     <input class="form-input" name="file" placeholder="Qwen3.6-35B-A3B-UD-Q3_K_M.gguf">
                 </label>
-                <label class="local-llm-field" data-source-field="huggingface">
-                    <span class="form-label">Quantization</span>
-                    <input class="form-input" name="quantization" maxlength="64" placeholder="UD-Q3_K_M">
-                </label>
+
                 <label class="local-llm-field" data-source-field="ollama" hidden>
                     <span class="form-label">Ollama tag</span>
                     <input class="form-input" name="tag" placeholder="granite4:tiny-h">
+                </label>
+                <div class="local-llm-field-pair"><label class="local-llm-field">
+                    <span class="form-label">Id</span>
+                    <input class="form-input" name="id" required pattern="[a-z0-9][a-z0-9._\-]{1,63}" placeholder="qwen3.6-35b-a3b">
+                </label><label class="local-llm-field">
+                    <span class="form-label">Display name</span>
+                    <input class="form-input" name="displayName" maxlength="120" placeholder="Qwen3.6 35B A3B">
+                </label></div>
+                <details class="local-llm-advanced" data-add-metadata>
+                    <summary class="form-label">Model metadata &amp; sizing</summary>
+                    <div class="local-llm-params">
+<label class="local-llm-field" data-source-field="huggingface">
+                    <span class="form-label">Quantization</span>
+                    <input class="form-input" name="quantization" maxlength="64" placeholder="UD-Q3_K_M">
+                </label>
+
+
+                <label class="local-llm-field">
+                    <span class="form-label">Architecture</span>
+                    <custom-select id="localLlmArchitecture"
+                                   data-presenter="custom-select"
+                                   aria-label="Architecture"
+                                   data-name="architecture"
+                                   data-selected="dense"
+                                   data-options="%5B%7B%22value%22%3A%22dense%22%2C%22label%22%3A%22Dense%22%7D%2C%7B%22value%22%3A%22moe%22%2C%22label%22%3A%22Mixture%20of%20experts%22%7D%5D"></custom-select>
+                </label>
+                <label class="local-llm-field">
+                    <span class="form-label">Licence</span>
+                    <input class="form-input" name="license" maxlength="80" placeholder="Apache-2.0">
                 </label>
                 <p class="settings-card-meta">Sizing data for the memory estimate. A lookup fills it in; without it the estimate uses defaults and says which.</p>
                 <p class="settings-card-meta" data-llm-sizing-label hidden></p>
@@ -178,74 +244,14 @@
                     <span class="form-label">Multi-token-prediction head</span>
                     <input type="checkbox" name="mtp" value="true">
                 </label>
-                <div class="modal-actions local-llm-form-actions">
-                    <button type="button" class="gray-button" data-local-action="cancelAddModel">Cancel</button>
+
+                    </div>
+                </details>
+                <div class="modal-actions local-llm-form-actions local-llm-add-footer">
+                    <span class="settings-card-meta">Source is pinned on add. Weights download on Run.</span>
+                    <div class="settings-status" data-llm-add-status role="status" aria-live="polite"></div>
                     <button type="submit" class="general-button">Add model</button>
                 </div>
             </form>
-        </aside>
-    </section>
-
-    <section class="local-llm-panel"
-             id="localLlmPanelPlayground"
-             data-llm-panel="playground"
-             role="tabpanel"
-             aria-labelledby="localLlmTabPlayground"
-             hidden>
-        <div class="local-llm-section-heading">
-            <div>
-                <h3 class="settings-section-title">Playground</h3>
-                <p class="settings-section-description" data-llm-gateway>Sends one prompt to the running model inside this agent and shows the runner's speed. Other agents use the running model through Soul Gateway.</p>
-            </div>
-        </div>
-        <form class="settings-card settings-card-static local-llm-prompt-form" data-llm-form="prompt">
-            <div class="settings-card-meta" data-llm-prompt-note></div>
-            <label class="local-llm-field">
-                <span class="form-label">Prompt</span>
-                <textarea class="form-input local-llm-prompt" name="prompt" rows="4" maxlength="4000" required>Reply with exactly: PONG</textarea>
-            </label>
-            <div class="local-llm-prompt-actions">
-                <label class="local-llm-field local-llm-field-narrow">
-                    <span class="form-label">Maximum tokens</span>
-                    <input class="form-input" name="maxTokens" type="number" min="1" max="1024" step="1" value="256">
-                </label>
-                <button type="submit" class="general-button" data-llm-send>Send</button>
-            </div>
-            <div data-llm-prompt-result aria-live="polite"></div>
-        </form>
-    </section>
-
-    <section class="local-llm-panel"
-             id="localLlmPanelLogs"
-             data-llm-panel="logs"
-             role="tabpanel"
-             aria-labelledby="localLlmTabLogs"
-             hidden>
-        <div class="local-llm-section-heading">
-            <div>
-                <h3 class="settings-section-title">Runner log</h3>
-                <p class="settings-section-description">The last 200 lines from the runner and the controller.</p>
-            </div>
-            <label class="local-llm-follow">
-                <input type="checkbox" data-llm-follow checked>
-                <span class="settings-card-meta">Follow new lines</span>
-            </label>
-        </div>
-        <pre class="local-llm-log" data-llm-log tabindex="0" aria-label="Runner log">No runner output yet.</pre>
-    </section>
-
-    <section class="local-llm-panel"
-             id="localLlmPanelRunners"
-             data-llm-panel="runners"
-             role="tabpanel"
-             aria-labelledby="localLlmTabRunners"
-             hidden>
-        <div class="local-llm-section-heading">
-            <div>
-                <h3 class="settings-section-title">Runners</h3>
-                <p class="settings-section-description" data-llm-runners-intro></p>
-            </div>
-        </div>
-        <div class="settings-busy-region" data-llm-runners aria-busy="false"></div>
-    </section>
+    </dialog>
 </div>
