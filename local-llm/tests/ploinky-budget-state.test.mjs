@@ -2,6 +2,8 @@
 // memory.max never turns it into unlimited. At base one process-wide map, keyed by the file system reader, served the snapshot
 // reader and the memory guard alike. Now a limits value holds it, and its snapshot hooks and its guard sample share it.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import test from 'node:test';
 
 import { readSnapshot } from 'pworker/local-llm';
@@ -102,4 +104,27 @@ test('under a finite limit a shared-memory GPU is replaced in place: the key kee
     const decorated = limits.decorateSnapshot({ snapshot, fsApi, env: {}, observation: limits.observeSnapshot({ fsApi }) });
     assert.deepEqual(Object.keys(decorated), ['at', 'gpu', 'memory', 'disk', 'cpus', 'cores', 'cgroupMemory']);
     assert.deepEqual([decorated.gpu.available, decorated.gpu.state, decorated.gpu.backend], [false, 'unusable', 'vulkan']);
+});
+
+test('in production no file system is given to either side, and the engine\'s default and the limits\' default are the same key', async (t) => {
+    // createAgentController() passes no fsApi: the engine reads through the `fs` its hardware module imports, the guard through the
+    // `fs` this agent imports. If they were two objects (a default import against a namespace import, say) the guard would never
+    // see a limit the snapshot established. The real `fs` is stood in for here, in the one place both read it.
+    const { files } = world();
+    const original = fs.readFileSync;
+    fs.readFileSync = function readFileSync(file, ...rest) {
+        if (typeof file === 'string' && (file.startsWith('/sys/fs/cgroup/') || file.startsWith('/proc/'))) {
+            if (!Object.hasOwn(files, file)) throw enoent(file);
+            return files[file];
+        }
+        return original.call(this, file, ...rest);
+    };
+    syncBuiltinESMExports();
+    t.after(() => { fs.readFileSync = original; syncBuiltinESMExports(); });
+    const limits = createAgentLimits();
+    const snapshot = await readSnapshot({ dataDir: '/tmp', execFileImpl, env: {}, limits, statfs: async () => ({ bsize: 4096, blocks: 1000, bavail: 900 }) });
+    assert.deepEqual(snapshot.cgroupMemory, { maxBytes: 2 * GIB, currentBytes: GIB }, 'the stand-in is what the snapshot read');
+    delete files[MAX];
+    const sample = limits.guardSample();
+    assert.deepEqual([sample.memoryReadState, sample.finiteMemoryBytes, sample.watched], ['unknown', 2 * GIB, true]);
 });
