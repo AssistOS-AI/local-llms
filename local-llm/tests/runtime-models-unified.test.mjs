@@ -13,11 +13,9 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
-import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
+import { createStateStore, validateModel } from 'pworker/local-llm';
 
 import { createAgentController as createController, loadSeedCatalog } from '../src/engineOptions.mjs';
-
 import { controllerHandlers } from '../src/controlHandlers.mjs';
 import { TOOL_OPERATIONS, handleTool } from '../tools/local_llm_tool.mjs';
 import { modelEntryFromForm } from '../IDE-plugins/local-llm-settings/local-llm-settings-model.js';

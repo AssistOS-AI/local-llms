@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
+import { createStateStore } from 'pworker/local-llm';
 import { DRAIN_RUNNER_GRACE_MS } from 'pworker/local-llm/internal/drainBudget.mjs';
 
 import { createAgentController as createController, loadSeedCatalog } from '../src/engineOptions.mjs';

@@ -4,14 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { createStateStore } from 'pworker/local-llm';
 import { APU, decideProfile } from 'pworker/local-llm/internal/controller/profiles.mjs';
 import { parseRunnerReport } from 'pworker/local-llm/internal/controller/runnerProcess.mjs';
-import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
 import { catalogProfileOf } from 'pworker/local-llm/internal/controller/vulkan.mjs';
 
 import { createAgentController as createController, getRunner, loadSeedCatalog, vulkanContractOf } from '../src/engineOptions.mjs';
 import { admit, readSnapshot } from '../src/hardwareLimits.mjs';
-
 import { attachMemoryBudget, mpsRunnerEnvironment } from '../src/controller/ploinkyBudget.mjs';
 import { hardwareCardsHtml } from '../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-view.js';
 import { cpuFs, VULKAN_KEYS } from './overview-cpu-scenarios.mjs';

@@ -12,14 +12,12 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { createStateStore, validateModel } from 'pworker/local-llm';
 import { RAM_MARGIN_BYTES } from 'pworker/local-llm/internal/controller/admission.mjs';
-import { validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
 import { readMemory } from 'pworker/local-llm/internal/controller/hardware.mjs';
-import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
 
 import { RUNNERS, createAgentController as createController, loadSeedCatalog } from '../src/engineOptions.mjs';
 import { readCgroupMemory, readCgroupMemoryObservation } from '../src/hardwareLimits.mjs';
-
 import { attachMemoryBudget } from '../src/controller/ploinkyBudget.mjs';
 
 const MIB = 1024 * 1024;

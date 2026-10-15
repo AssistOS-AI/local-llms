@@ -4,8 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
-import { createObservationClock } from 'pworker/local-llm/internal/controller/startupObservations.mjs';
+import { createObservationClock, validateModel } from 'pworker/local-llm';
 import { createPromptObservations } from 'pworker/local-llm/internal/promptObservations.mjs';
 
 import { createAgentController as createController, loadSeedCatalog } from '../src/engineOptions.mjs';

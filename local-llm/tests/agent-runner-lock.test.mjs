@@ -11,17 +11,13 @@ import path from 'node:path';
 import test from 'node:test';
 import zlib from 'node:zlib';
 
-import { validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
+import { createStateStore, loadRunnerLocks, validateModel } from 'pworker/local-llm';
 import { DownloadError, downloadFile } from 'pworker/local-llm/internal/controller/downloader.mjs';
 import { fetchOllamaRegistryManifest, manifestPath, readOllamaManifest } from 'pworker/local-llm/internal/controller/ollamaStore.mjs';
-import {
-    archiveCompression, loadRunnerLock, loadRunnerLocks, validateRunnerLock,
-} from 'pworker/local-llm/internal/controller/runnerLock.mjs';
-import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
+import { archiveCompression, loadRunnerLock, validateRunnerLock } from 'pworker/local-llm/internal/controller/runnerLock.mjs';
 
 import { agentRunnerLockFile } from '../src/agentHost.mjs';
 import { createAgentController as createController, createRunnerInstaller, RUNNERS } from '../src/engineOptions.mjs';
-
 import { installMessage, runnersPanelHtml } from '../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-view.js';
 import { manifestBytes, registry, sha256 } from './ollama-fixture.mjs';
 

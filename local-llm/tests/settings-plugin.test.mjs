@@ -2,10 +2,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 
-import { validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
+import { validateModel } from 'pworker/local-llm';
 
 import { RUNNERS } from '../src/engineOptions.mjs';
-
 import * as presenterModule from '../IDE-plugins/local-llm-settings/local-llm-settings.js';
 import {
     confirmMessage,

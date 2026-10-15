@@ -8,15 +8,12 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
-import { loadRunnerLocks } from 'pworker/local-llm/internal/controller/runnerLock.mjs';
-import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
+import { createStateStore, loadRunnerLocks, validateModel } from 'pworker/local-llm';
 
 import { createAgentController as createController, createRunnerInstaller, getRunner, loadSeedCatalog } from '../src/engineOptions.mjs';
 import {
     admit, cpuPool, physicalCoreCount, readCgroupMemory, readCgroupMemoryObservation, readCpuQuota, readSnapshot,
 } from '../src/hardwareLimits.mjs';
-
 import { GPU_TEST_LOCK, MPS_ENV, TEST_GPU, gpuHarness, testQualification, waitForLaunch } from './ploinkyGpuFixture.mjs';
 import { createVllmMpsQualificationResolver, resolveVllmMpsQualification, vllmRunnerLockDigest } from '../src/controller/vllmMpsQualification.mjs';
 import { attachGpuBudget, effectiveGpu, parseMpsBudget } from '../src/controller/ploinkyBudget.mjs';

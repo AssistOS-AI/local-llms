@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { computeDiagnostic } from 'pworker/local-llm/internal/controller/computeDiagnostics.mjs';
+import { computeDiagnostic } from 'pworker/local-llm';
 
 import { cpuFallbackExplanation } from '../src/engineOptions.mjs';
 import { hardwareCardsHtml, measurementHtml } from '../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-view.js';

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
+import { createStateStore } from 'pworker/local-llm';
 
 import { RUNNERS, createAgentController as createController, loadSeedCatalog } from '../src/engineOptions.mjs';
 import { admit, readSnapshot } from '../src/hardwareLimits.mjs';

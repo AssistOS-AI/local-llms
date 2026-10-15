@@ -8,15 +8,14 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { createStateStore, validateModel } from 'pworker/local-llm';
 import { chatLimits, cpuCompletionBudget } from 'pworker/local-llm/chat';
 import { admissionResult } from 'pworker/local-llm/internal/controller/admission.mjs';
-import { validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
 import { DEVICE_QUERY_FIELDS, cpuDefaultThreads } from 'pworker/local-llm/internal/controller/hardware.mjs';
 import {
     UNIFIED, UNREADABLE_COMMIT_MS, cpuFloorBytes, cpuHostReserveBytes, decideProfile, estimateCpuLlamaServer,
 } from 'pworker/local-llm/internal/controller/profiles.mjs';
 import { createLogBuffer, parseRunnerReport } from 'pworker/local-llm/internal/controller/runnerProcess.mjs';
-import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
 import { runnerSummary } from 'pworker/local-llm/internal/runners/index.mjs';
 import { ParamError } from 'pworker/local-llm/internal/runners/params.mjs';
 

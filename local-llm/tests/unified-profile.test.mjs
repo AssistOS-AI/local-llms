@@ -8,11 +8,10 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
+import { createStateStore, validateModel } from 'pworker/local-llm';
 import { dropPageCache } from 'pworker/local-llm/internal/controller/deployments.mjs';
 import { UNIFIED, envelopeFor, profileOf } from 'pworker/local-llm/internal/controller/profiles.mjs';
 import { createLogBuffer, startRunnerProcess } from 'pworker/local-llm/internal/controller/runnerProcess.mjs';
-import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
 
 import {
     createAgentController as createController, getRunner, llamaCppRunner, loadSeedCatalog, readImageContract,

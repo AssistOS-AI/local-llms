@@ -13,12 +13,11 @@ import test from 'node:test';
 import { Duplex, Transform } from 'node:stream';
 import zlib from 'node:zlib';
 
-import { loadRunnerLock, loadRunnerLocks } from 'pworker/local-llm/internal/controller/runnerLock.mjs';
-import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
+import { createStateStore, loadRunnerLocks } from 'pworker/local-llm';
+import { loadRunnerLock } from 'pworker/local-llm/internal/controller/runnerLock.mjs';
 
 import { agentRunnerLockFile } from '../src/agentHost.mjs';
 import { RUNNERS, createAgentController as createController } from '../src/engineOptions.mjs';
-
 import { IMAGE_LOCK } from './overview-scenarios.mjs';
 
 function tempDir(t, name) {

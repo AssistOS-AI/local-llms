@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { mergeCatalog, validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
+import { validateModel } from 'pworker/local-llm';
+import { mergeCatalog } from 'pworker/local-llm/internal/controller/catalog.mjs';
 
 import { getRunner, loadSeedCatalog } from '../src/engineOptions.mjs';
 import { admit } from '../src/hardwareLimits.mjs';

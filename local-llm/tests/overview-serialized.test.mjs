@@ -6,9 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
-import { validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
-import { loadRunnerLocks } from 'pworker/local-llm/internal/controller/runnerLock.mjs';
-import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
+import { createStateStore, loadRunnerLocks, validateModel } from 'pworker/local-llm';
 
 import { agentRunnerLockFile } from '../src/agentHost.mjs';
 import { createAgentController, createRunnerInstaller, loadSeedCatalog } from '../src/engineOptions.mjs';

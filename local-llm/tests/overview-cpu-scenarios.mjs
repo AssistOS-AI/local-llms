@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { loadRunnerLocks } from 'pworker/local-llm/internal/controller/runnerLock.mjs';
+import { loadRunnerLocks } from 'pworker/local-llm';
 
 import { agentRunnerLockFile } from '../src/agentHost.mjs';
 

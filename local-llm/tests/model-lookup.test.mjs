@@ -11,12 +11,11 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { createStateStore } from 'pworker/local-llm';
 import { HF_FILE_SEGMENT_RE, HF_REPO_RE, HF_REVISION_RE } from 'pworker/local-llm/internal/controller/catalog.mjs';
 import { lookupHuggingFaceModel, normalizeLookupInput } from 'pworker/local-llm/internal/controller/modelLookup.mjs';
-import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
 
 import { createAgentController as createController } from '../src/engineOptions.mjs';
-
 import { controllerHandlers } from '../src/controlHandlers.mjs';
 import { modelEntryFromForm } from '../IDE-plugins/local-llm-settings/local-llm-settings-model.js';
 import { TOOL_OPERATIONS, handleTool } from '../tools/local_llm_tool.mjs';

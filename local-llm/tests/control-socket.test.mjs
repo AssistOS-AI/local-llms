@@ -9,8 +9,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import test from 'node:test';
 
-import { createObservationClock } from 'pworker/local-llm/internal/controller/startupObservations.mjs';
-import { LocalLlmError } from 'pworker/local-llm/internal/errors.mjs';
+import { createObservationClock, LocalLlmError } from 'pworker/local-llm';
 import { createPromptObservations } from 'pworker/local-llm/internal/promptObservations.mjs';
 
 import { callController, newControlChannel, startControlServer } from '../src/controlSocket.mjs';

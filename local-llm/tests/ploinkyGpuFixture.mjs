@@ -3,9 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
+import { createStateStore, validateModel } from 'pworker/local-llm';
 import { validateRunnerLock } from 'pworker/local-llm/internal/controller/runnerLock.mjs';
-import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
 
 import { RUNNERS, createAgentController as createController, loadSeedCatalog } from '../src/engineOptions.mjs';
 import { vllmRunnerLockDigest } from '../src/controller/vllmMpsQualification.mjs';

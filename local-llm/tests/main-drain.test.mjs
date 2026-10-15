@@ -7,8 +7,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { createStateStore } from 'pworker/local-llm';
 import { startRunnerProcess } from 'pworker/local-llm/internal/controller/runnerProcess.mjs';
-import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
 
 import { callController } from '../src/controlSocket.mjs';
 import { RUNNERS, createAgentController as createController } from '../src/engineOptions.mjs';
