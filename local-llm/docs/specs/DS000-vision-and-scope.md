@@ -1,13 +1,13 @@
 ---
 title: DS000-vision-and-scope
-summary: What local-llm is, the retired shared-image agents and the services that went with them, its runners (LM Studio for internal use only), and what it deliberately leaves out.
+summary: What local-llm is, how its Ploinky glue and hardware limits split from the pworker engine, the retired shared-image agents and the services that went with them, its runners (LM Studio for internal use only), and what it deliberately leaves out.
 ---
 
 # DS000 Vision and Scope
 
 ## Introduction
 
-`local-llm` runs open-weight language models on the workspace's own hardware. NVIDIA GPUs use CUDA. Discrete AMD Radeon GPUs use Vulkan RADV, and Apple GPUs use Vulkan Venus inside a libkrun Podman machine. AMD integrated GPUs have an experimental, default-off APU profile with shared-RAM admission and no hardware qualification yet. When no usable GPU is attached it runs on the CPU, as defined in DS005. A workspace administrator opens Local LLMs from Explorer's toolbar or Settings, picks a model and a runner, and presses Run. The agent downloads the weights, starts the runner, and exposes the running model to other agents through the workspace-local Soul Gateway.
+`local-llm` runs open-weight language models on the workspace's own hardware. NVIDIA GPUs use CUDA. Discrete AMD Radeon GPUs use Vulkan RADV, and Apple GPUs use Vulkan Venus inside a libkrun Podman machine. AMD integrated GPUs have an experimental, default-off APU profile with shared-RAM admission and no hardware qualification yet. When no usable GPU is attached it runs on the CPU, as defined in DS005. A workspace administrator opens Local LLMs from Explorer's toolbar or Settings, picks a model and a runner, and presses Run. The agent downloads the weights, starts the runner, and exposes the running model to other agents through the workspace-local Soul Gateway. The agent is the Ploinky glue and the container's hardware limits around an engine that runs in the Ploinky-Worker repository (below).
 
 ## Core Content
 
@@ -25,6 +25,18 @@ What disappears with them:
 | Model and profile management | `local-llms-manager`'s registration, startup-script and profile tools | local-llm's own catalog, registry and tools (DS001, DS002) |
 
 A workspace that enabled a legacy agent loses it at its next repository update: Ploinky can no longer find the agent's manifest. No stored data is deleted by this: models the legacy agents downloaded stay under the workspace's `.ploinky/data/local-llms/`, and local-llm's own models and state under its `/data` are untouched. The `assistos/local-llms` image is no longer built from this repository; already published tags are not removed.
+
+### The engine and the agent
+
+The engine that runs the models lives in the Ploinky-Worker repository (pworker) under `lib/local-llm`: the controller and its state, the hardware snapshot, admission, the runner adapters, the downloader and weight stores, the runner installer and lock reader, the catalog schema and validator, and the install-check module. This repository holds the Ploinky glue of the one agent and all of its hardware-limits code, and pins the engine at one full commit (DS001; currently `4668a3f0e2cae0c85463945def068741dc8c2b68`). The engine knows no container, no gateway and no limit. It takes a host (paths), messages (wording) and limits (hooks) from the agent and calls the limits at fixed points; pworker contains no container-budget code, because the owner decided that everything related to hardware limits stays with Ploinky and local-llms (the pworker engine move, decision U7). The engine's specifications at the pinned commit are the source of truth for engine behavior, and DS002 to DS005 point at them instead of repeating them: [DS000](https://github.com/AssistOS-AI/Ploinky-Worker/blob/4668a3f0e2cae0c85463945def068741dc8c2b68/docs/specs/DS000-engine-scope.md), [DS002](https://github.com/AssistOS-AI/Ploinky-Worker/blob/4668a3f0e2cae0c85463945def068741dc8c2b68/docs/specs/DS002-model-lifecycle.md), [DS003](https://github.com/AssistOS-AI/Ploinky-Worker/blob/4668a3f0e2cae0c85463945def068741dc8c2b68/docs/specs/DS003-gpu-and-resources.md), [DS004](https://github.com/AssistOS-AI/Ploinky-Worker/blob/4668a3f0e2cae0c85463945def068741dc8c2b68/docs/specs/DS004-on-demand-runners.md), [DS005](https://github.com/AssistOS-AI/Ploinky-Worker/blob/4668a3f0e2cae0c85463945def068741dc8c2b68/docs/specs/DS005-hardware-profiles.md), [DS006](https://github.com/AssistOS-AI/Ploinky-Worker/blob/4668a3f0e2cae0c85463945def068741dc8c2b68/docs/specs/DS006-engine-coding-style.md) and [DS007](https://github.com/AssistOS-AI/Ploinky-Worker/blob/4668a3f0e2cae0c85463945def068741dc8c2b68/docs/specs/DS007-host-limits-and-messages.md), the last on the host, messages and limits.
+
+| Group | Files here | Specification |
+| --- | --- | --- |
+| Ploinky glue | `manifest.json`, `mcp-config.json`, `IDE-plugins/`, `tools/local_llm_tool.mjs`, `src/main.mjs`, `src/controlSocket.mjs`, `src/controlHandlers.mjs`, `src/chatResponder.mjs`, `src/testPrompt.mjs`, `src/promptStream.mjs`, `src/drainBudget.mjs` | DS001 |
+| Hardware limits | `src/hardwareLimits.mjs`, `src/controller/ploinkyBudget.mjs`, `src/controller/vllmMpsQualification.mjs`, `tools/vllm_mps_calibration.mjs` | DS003, DS005 |
+| Image supply chain | `tools/runner_install_check.mjs`, `catalog/runners.lock.linux-{amd64,arm64}.json`, `.github/workflows/runner-lock-check.yml` | DS004 |
+| Agent data | `catalog/models.json` | DS002 |
+| Binding to the engine | `src/agentHost.mjs`, `src/ploinkyMessages.mjs`, `src/engineOptions.mjs`, `package.json`, `package-lock.json`, `.npmrc` | DS001 |
 
 ### Goals
 
@@ -52,7 +64,7 @@ A workspace that enabled a legacy agent loses it at its next repository update: 
 
 The image decides which runners exist (DS005): the amd64 image has all of them; the arm64 image, for NVIDIA GB10 in DGX Spark, has llama.cpp and a runner lock with vLLM (its aarch64 wheels, installed on demand and experimental there), so ik_llama.cpp, Ollama, TabbyAPI and LM Studio are reported "not available on this platform" and refused before anything downloads. The agent's own runner lock (DS004) adds runners to the `cpu` profile alone: there Ollama becomes installable on arm64, and so does llama.cpp's CPU build on both architectures. In the `cpu` profile only the runners with a CPU policy run (llama.cpp, Ollama, and llama.cpp's CPU build installed on demand, DS004); every other runner is refused before anything downloads (ik_llama.cpp links the CUDA driver library directly).
 
-Every runner is an adapter in `src/runners/`: its identity, the weight format it reads, its loopback port and per-start key, its parameter schema and basic form fields, detection, its start-up pipeline (launch and readiness), the model name for chat requests, its admission policy and its log parser. The controller, the tools and the dashboard have no per-runner branches, so a new runner is an adapter plus data.
+Every runner is an adapter in the engine (`lib/local-llm/runners/` in the pinned pworker package): its identity, the weight format it reads, its loopback port and per-start key, its parameter schema and basic form fields, detection, its start-up pipeline (launch and readiness), the model name for chat requests, its admission policy and its log parser. The controller, the tools and the dashboard have no per-runner branches, so a new runner is an adapter plus data.
 
 ### LM Studio (internal use only)
 
@@ -77,6 +89,10 @@ Translation and reranking services, a shared host model cache, ROCm/HIP, AMD Ins
 #### Controller ownership
 
 The shared image was CPU-only and arm64-first, started one fixed model per agent, and its dispatcher was shell. GPU runners, on-demand weights, admission and a Settings UI need a long-running controller with state, so local-llm began as a separate agent beside the legacy ones, and the legacy agents were later retired (above).
+
+#### Engine in pworker
+
+The owner wanted one implementation of local LLM execution, so the general engine moved into pworker, which also serves it standalone, and the agent kept what only a Ploinky container needs: its tools, its control socket and chat endpoint, its manifest and dashboard, the container's cgroup and MPS limits, and its own catalog and runner locks. Keeping the limits here means pworker never carries a container budget, and the engine reaches them only through hooks that this repository supplies. The price is a new start-up dependency: the agent now fetches pworker from GitHub when its dependency cache is cold (DS001).
 
 #### Automatic CPU fallback
 
