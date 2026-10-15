@@ -130,6 +130,7 @@ async function calibrate(t, options = {}) {
         env: { ...MPS_ENV, ...(options.env || {}) }, runRoot: root, readGpuImpl: async () => structuredClone(options.gpu || RTX), readMemoryImpl: () => ({ totalBytes: 31 * GIB, availableBytes: 24 * GIB }),
         locksImpl: () => LOCK, run: fakeRun({ views: options.views || physicalViews, torch: options.torch, ctypes: options.ctypes, fail: options.fail, calls, ...(options.distributions ? { distributions: options.distributions } : {}) }),
         hostNvmlBytes: options.hostNvmlBytes ?? 6144 * MIB, now: () => new Date('2026-10-03T10:00:00Z'), ...(options.fsApi ? { fsApi: options.fsApi } : {}),
+        ...(options.catalog ? { catalog: options.catalog } : {}),
     });
     return { report, root, calls };
 }
@@ -333,6 +334,21 @@ test('CAL.a-share-denominator-or-a-failed-check-is-not-qualifiable-and-renders-n
     const small = await calibrate(t, { env: { CUDA_MPS_PINNED_DEVICE_MEM_LIMIT: '0=1024M' } });
     assert.equal(small.report.evidence.admission.status, 'incompatible'); assert.ok(small.report.evidence.verdict.failed.includes('admissionFits'));
     assert.ok(small.report.evidence.verdict.failed.includes('argvBuilt') && small.report.evidence.argv.error, 'no valid launch exists for an unfit share');
+});
+
+test('CAL.the-share-refusal-of-the-agent-limits-reaches-the-tool-through-admission', async (t) => {
+    // A model that asks vLLM for 90 % of the device. Under a share of 5529 MiB of a 6144 MiB device that is more than the share holds, and
+    // only the agent's limits know to say so (admission.mjs:271 at 34f8f498): the tool passes them to admitVllm, and the verdict it
+    // records is that refusal, not the engine's own arithmetic.
+    const model = loadSeedCatalog().find((entry) => entry.id === 'qwen3-4b-awq');
+    const asksForMost = { ...model, recommended: { dedicated: { vllm: { maxModelLen: 8192, gpuMemoryUtilization: 0.9 } } } };
+    const { report } = await calibrate(t, { catalog: [asksForMost] });
+    const { admission } = report.evidence;
+    assert.equal(admission.status, 'incompatible');
+    assert.match(admission.reason, /^gpuMemoryUtilization 0\.9 allocates \d+\.\d+ GiB against physical GPU memory, exceeding the \d+\.\d+ GiB Ploinky GPU share\. Lower gpuMemoryUtilization or clear the share\.$/);
+    assert.ok(report.evidence.verdict.failed.includes('admissionFits'));
+    // The same model with the agent's own catalog entry asks for nothing and the share holds it (the earlier test, in short).
+    assert.equal((await calibrate(t)).report.evidence.admission.status, 'ok');
 });
 
 test('CAL.stage-one-blocks-without-a-share-a-gpu-an-install-or-a-query-and-never-invents-a-document', async (t) => {
