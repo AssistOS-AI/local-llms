@@ -10,7 +10,8 @@
 // container, with the runner's per-start key. Other agents still reach the
 // model only through AchillesAgentLib and Soul Gateway (GATEWAY_MODEL).
 
-import { LocalLlmError, OBSERVATION_ID_RE } from 'pworker/local-llm';
+import { LocalLlmError } from 'pworker/local-llm/internal/errors.mjs';
+import { OBSERVATION_ID_RE } from 'pworker/local-llm/internal/promptObservations.mjs';
 import { buildRunnerRequest, completionStats } from 'pworker/local-llm/chat';
 
 import { callController } from './controlSocket.mjs';

@@ -18,7 +18,7 @@
 import crypto from 'node:crypto';
 import net from 'node:net';
 
-import { LocalLlmError, serializeError } from 'pworker/local-llm';
+import { LocalLlmError, serializeError } from 'pworker/local-llm/internal/errors.mjs';
 
 const MAX_REQUEST_BYTES = 256 * 1024;
 const ABSTRACT_NAME_RE = /^@[A-Za-z0-9._-]{1,100}$/;

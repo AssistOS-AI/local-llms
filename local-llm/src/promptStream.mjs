@@ -1,4 +1,4 @@
-import { LocalLlmError } from 'pworker/local-llm';
+import { LocalLlmError } from 'pworker/local-llm/internal/errors.mjs';
 
 function readWithSignal(reader, signal, failed) {
     const stopped = () => signal?.reason instanceof LocalLlmError ? signal.reason : new LocalLlmError('prompt_timeout', 'The prompt deadline expired.');

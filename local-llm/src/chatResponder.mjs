@@ -6,7 +6,7 @@
 
 import { stdin, stdout, exit } from 'node:process';
 
-import { serializeError } from 'pworker/local-llm';
+import { serializeError } from 'pworker/local-llm/internal/errors.mjs';
 import {
     buildRunnerRequest, chatLimits, completionStats, cpuCompletionBudget, createStreamStatsReader, requestLimitProblem,
 } from 'pworker/local-llm/chat';

@@ -8,7 +8,7 @@
 
 import { stdin, stdout, env, exit } from 'node:process';
 
-import { LocalLlmError, serializeError } from 'pworker/local-llm';
+import { LocalLlmError, serializeError } from 'pworker/local-llm/internal/errors.mjs';
 
 import { callController } from '../src/controlSocket.mjs';
 
