@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadSeedCatalog, validateModel } from '../src/controller/catalog.mjs';
-import { createController } from '../src/controller/deployments.mjs';
-import { createStateStore } from '../src/controller/stateStore.mjs';
-import { validateRunnerLock } from '../src/controller/runnerLock.mjs';
+
+import { validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
+import { validateRunnerLock } from 'pworker/local-llm/internal/controller/runnerLock.mjs';
+import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
+
+import { RUNNERS, createAgentController as createController, loadSeedCatalog } from '../src/engineOptions.mjs';
 import { vllmRunnerLockDigest } from '../src/controller/vllmMpsQualification.mjs';
 import { observeMemoryBudget } from '../src/controller/ploinkyBudget.mjs';
-import { RUNNERS } from '../src/runners/index.mjs';
 import { IMAGE_LOCK } from './overview-scenarios.mjs';
 
 export const GIB = 1024 ** 3;

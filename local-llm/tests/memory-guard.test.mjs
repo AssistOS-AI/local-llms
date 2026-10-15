@@ -7,10 +7,10 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createController } from '../src/controller/deployments.mjs';
-import { loadSeedCatalog } from '../src/controller/catalog.mjs';
-import { createStateStore } from '../src/controller/stateStore.mjs';
-import { DRAIN_RUNNER_GRACE_MS } from '../src/drainBudget.mjs';
+import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
+import { DRAIN_RUNNER_GRACE_MS } from 'pworker/local-llm/internal/drainBudget.mjs';
+
+import { createAgentController as createController, loadSeedCatalog } from '../src/engineOptions.mjs';
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;

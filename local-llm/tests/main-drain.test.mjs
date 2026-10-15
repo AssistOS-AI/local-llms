@@ -7,11 +7,11 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { startRunnerProcess } from 'pworker/local-llm/internal/controller/runnerProcess.mjs';
+import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
+
 import { callController } from '../src/controlSocket.mjs';
-import { createController } from '../src/controller/deployments.mjs';
-import { startRunnerProcess } from '../src/controller/runnerProcess.mjs';
-import { createStateStore } from '../src/controller/stateStore.mjs';
-import { RUNNERS } from '../src/runners/index.mjs';
+import { RUNNERS, createAgentController as createController } from '../src/engineOptions.mjs';
 
 const MAIN = new URL('../src/main.mjs', import.meta.url).pathname;
 const MIB = 1024 * 1024;

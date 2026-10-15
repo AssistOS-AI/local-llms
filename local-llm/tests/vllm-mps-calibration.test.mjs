@@ -14,10 +14,11 @@ import test from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
-import { loadSeedCatalog } from '../src/controller/catalog.mjs';
-import { validateRunnerLock } from '../src/controller/runnerLock.mjs';
-import { createVllmMpsQualificationResolver, resolveVllmMpsQualification, vllmRunnerLockDigest } from '../src/controller/vllmMpsQualification.mjs';
-import { vllmMpsTuple, vllmRunner } from '../src/runners/vllm.mjs';
+import { validateRunnerLock } from 'pworker/local-llm/internal/controller/runnerLock.mjs';
+
+import { createVllmMpsQualificationResolver, resolveVllmMpsQualification, vllmMpsTuple, vllmRunnerLockDigest } from '../src/controller/vllmMpsQualification.mjs';
+import { loadSeedCatalog, vllmRunner } from '../src/engineOptions.mjs';
+import { createAgentLimits } from '../src/hardwareLimits.mjs';
 import {
     CALIBRATION_SCHEMA, CTYPES_QUERY, DIST_QUERY, TORCH_QUERY, TUPLE_FIELDS, applyQualificationEntry, calibrationReport, canonicalJson, classifyDenominator, compareIdentities, evidenceDigest,
     REVIEWED_SIZING, enclosingPythonScope, main, prerequisiteReport, renderQualificationEntry, scanSizingSource, sizingVerdict, stripPythonNonCode, wheelPythonTag,
@@ -234,13 +235,14 @@ test('CAL.tuple-comes-from-the-production-functions-over-the-real-readings', asy
     assert.equal(evidence.tuple.runnerLockDigest, vllmRunnerLockDigest(ENTRY));
     assert.deepEqual(Object.keys(evidence.tuple), [...TUPLE_FIELDS].sort((a, b) => Object.keys(vllmMpsTuple({ gpu: RTX, runnerLockEntry: ENTRY })).indexOf(a) - Object.keys(vllmMpsTuple({ gpu: RTX, runnerLockEntry: ENTRY })).indexOf(b)));
     assert.deepEqual(evidence.tuple, { runnerLockDigest: vllmRunnerLockDigest(ENTRY), driverVersion: '595.91.07', gpuPciDeviceId: '0x252010DE', computeCapability: '8.6', deviceTotalBytes: 6144 * MIB });
-    // The production qualification path accepts the rendered entry for this very tuple, and the adapter's own qualifyMps agrees.
+    // The production qualification path accepts the rendered entry for this very tuple, and the limits' qualification hook agrees.
     const rendered = renderQualificationEntry(evidence);
-    assert.deepEqual(vllmRunner.qualifyMps({ gpu: RTX, runnerLockEntry: ENTRY, qualificationDataProvider: () => [rendered.entry] }),
+    const qualifier = createAgentLimits({ qualificationDataProvider: () => [rendered.entry] }).vllmQualification;
+    assert.deepEqual(qualifier({ gpu: RTX, runnerLockEntry: ENTRY }),
         { qualified: true, denominator: 'physical-device', evidenceDigest: rendered.digest });
     // Another digest function would not match: the lock digest is not a digest of the file list or of the entry's own `digest` field.
     assert.notEqual(evidence.tuple.runnerLockDigest, ENTRY.digest);
-    assert.equal(vllmRunner.qualifyMps({ gpu: RTX, runnerLockEntry: { ...ENTRY, files: ENTRY.files.slice(1) }, qualificationDataProvider: () => [rendered.entry] }).qualified, false);
+    assert.equal(qualifier({ gpu: RTX, runnerLockEntry: { ...ENTRY, files: ENTRY.files.slice(1) } }).qualified, false);
     assert.equal(resolveVllmMpsQualification(evidence.tuple).qualified, false, 'the packaged data holds no entry yet');
 });
 

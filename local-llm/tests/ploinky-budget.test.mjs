@@ -8,24 +8,20 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { admit } from '../src/controller/admission.mjs';
+import { validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
+import { loadRunnerLocks } from 'pworker/local-llm/internal/controller/runnerLock.mjs';
+import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
+
+import { createAgentController as createController, createRunnerInstaller, getRunner, loadSeedCatalog } from '../src/engineOptions.mjs';
+import {
+    admit, cpuPool, physicalCoreCount, readCgroupMemory, readCgroupMemoryObservation, readCpuQuota, readSnapshot,
+} from '../src/hardwareLimits.mjs';
+
 import { GPU_TEST_LOCK, MPS_ENV, TEST_GPU, gpuHarness, testQualification, waitForLaunch } from './ploinkyGpuFixture.mjs';
 import { createVllmMpsQualificationResolver, resolveVllmMpsQualification, vllmRunnerLockDigest } from '../src/controller/vllmMpsQualification.mjs';
 import { attachGpuBudget, effectiveGpu, parseMpsBudget } from '../src/controller/ploinkyBudget.mjs';
-import { validateModel } from '../src/controller/catalog.mjs';
-import { createRunnerInstaller } from '../src/controller/runnerInstaller.mjs';
-import { loadRunnerLocks } from '../src/controller/runnerLock.mjs';
 import { collectOverviews, collectOllamaRuns } from './overview-scenarios.mjs';
 import { QUALIFICATION_MISMATCHES, GPU_ADAPTERS, CPU_ADAPTERS, INVALID_MPS_VALUES, checkQualificationMismatch, checkGpuAdapter, checkCpuAdapter, checkInvalidMps } from './ploinkyGpuCases.mjs';
-import { loadSeedCatalog } from '../src/controller/catalog.mjs';
-import { createController } from '../src/controller/deployments.mjs';
-import {
-    physicalCoreCount,
-    readCgroupMemory,
-    readCgroupMemoryObservation,
-    readCpuQuota,
-    readSnapshot,
-} from '../src/controller/hardware.mjs';
 import {
     attachCpuQuota,
     attachMemoryBudget,
@@ -36,9 +32,6 @@ import {
     parseCgroupBytes,
     parseCpuQuota,
 } from '../src/controller/ploinkyBudget.mjs';
-import { cpuPool } from '../src/controller/profiles.mjs';
-import { createStateStore } from '../src/controller/stateStore.mjs';
-import { getRunner } from '../src/runners/index.mjs';
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;

@@ -1,19 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { admit } from '../src/controller/admission.mjs';
-import { loadSeedCatalog } from '../src/controller/catalog.mjs';
 import {
-    DEVICE_QUERY_FIELDS,
-    defaultThreads,
-    memoryModelOf,
-    performanceCoreCount,
-    physicalCoreCount,
-    readGpu,
-    readMemory,
-    readMemoryPressure,
-} from '../src/controller/hardware.mjs';
-import { getRunner } from '../src/runners/index.mjs';
+    DEVICE_QUERY_FIELDS, defaultThreads, memoryModelOf, readMemory, readMemoryPressure,
+} from 'pworker/local-llm/internal/controller/hardware.mjs';
+
+import { getRunner, loadSeedCatalog, readGpu } from '../src/engineOptions.mjs';
+import { admit, performanceCoreCount, physicalCoreCount } from '../src/hardwareLimits.mjs';
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;

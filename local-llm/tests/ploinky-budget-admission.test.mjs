@@ -12,13 +12,15 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { RAM_MARGIN_BYTES } from '../src/controller/admission.mjs';
-import { loadSeedCatalog, validateModel } from '../src/controller/catalog.mjs';
-import { createController } from '../src/controller/deployments.mjs';
-import { readCgroupMemory, readCgroupMemoryObservation, readMemory } from '../src/controller/hardware.mjs';
+import { RAM_MARGIN_BYTES } from 'pworker/local-llm/internal/controller/admission.mjs';
+import { validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
+import { readMemory } from 'pworker/local-llm/internal/controller/hardware.mjs';
+import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
+
+import { RUNNERS, createAgentController as createController, loadSeedCatalog } from '../src/engineOptions.mjs';
+import { readCgroupMemory, readCgroupMemoryObservation } from '../src/hardwareLimits.mjs';
+
 import { attachMemoryBudget } from '../src/controller/ploinkyBudget.mjs';
-import { createStateStore } from '../src/controller/stateStore.mjs';
-import { RUNNERS } from '../src/runners/index.mjs';
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;

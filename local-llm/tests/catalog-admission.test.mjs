@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { admit } from '../src/controller/admission.mjs';
-import { loadSeedCatalog, mergeCatalog, validateModel } from '../src/controller/catalog.mjs';
-import { getRunner } from '../src/runners/index.mjs';
+import { mergeCatalog, validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
+
+import { getRunner, loadSeedCatalog } from '../src/engineOptions.mjs';
+import { admit } from '../src/hardwareLimits.mjs';
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;

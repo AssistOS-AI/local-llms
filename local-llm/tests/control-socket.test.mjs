@@ -9,10 +9,11 @@ import fs from 'node:fs';
 import net from 'node:net';
 import test from 'node:test';
 
+import { createObservationClock } from 'pworker/local-llm/internal/controller/startupObservations.mjs';
+import { LocalLlmError } from 'pworker/local-llm/internal/errors.mjs';
+import { createPromptObservations } from 'pworker/local-llm/internal/promptObservations.mjs';
+
 import { callController, newControlChannel, startControlServer } from '../src/controlSocket.mjs';
-import { LocalLlmError } from '../src/errors.mjs';
-import { createPromptObservations } from '../src/promptObservations.mjs';
-import { createObservationClock } from '../src/controller/startupObservations.mjs';
 import { controllerHandlers } from '../src/controlHandlers.mjs';
 
 const RESPONDER = new URL('../src/chatResponder.mjs', import.meta.url).pathname;

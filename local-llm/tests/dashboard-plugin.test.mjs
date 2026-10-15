@@ -1,7 +1,8 @@
-import { cpuFallbackExplanation } from '../src/controller/computeDiagnostics.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
+
+import { RUNNERS, cpuFallbackExplanation } from '../src/engineOptions.mjs';
 
 import * as dashboardModule from '../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard.js';
 import {
@@ -18,7 +19,6 @@ import {
     tableRunners,
 } from '../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-view.js';
 import { fieldsFromSchema, rememberRunners, runnerOptions, stripBidi } from '../IDE-plugins/local-llm-settings/local-llm-settings-model.js';
-import { RUNNERS } from '../src/runners/index.mjs';
 
 const ROOT = new URL('..', import.meta.url);
 const BUTTON = new URL('IDE-plugins/local-llm-tool-button/', ROOT);
@@ -1145,7 +1145,6 @@ test('the source fields follow the four kinds, and the lookup is forgotten when 
     presenter.resetLookup({ forget: true });
     assert.equal(presenter.lookupSizing, null);
 });
-
 
 test('the optional Ploinky GPU budget card names best-effort per-process scope without replacing physical telemetry', () => {
     const hardware = { gpu: { available: true, name: 'Physical GPU', totalBytes: 6 * 1024 ** 3, usedBytes: 1024 ** 3, freeBytes: 5 * 1024 ** 3 }, memory: {}, disk: {} };

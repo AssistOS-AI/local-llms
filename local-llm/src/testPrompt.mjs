@@ -10,10 +10,10 @@
 // container, with the runner's per-start key. Other agents still reach the
 // model only through AchillesAgentLib and Soul Gateway (GATEWAY_MODEL).
 
-import { buildRunnerRequest, completionStats } from './chatResponder.mjs';
+import { LocalLlmError, OBSERVATION_ID_RE } from 'pworker/local-llm';
+import { buildRunnerRequest, completionStats } from 'pworker/local-llm/chat';
+
 import { callController } from './controlSocket.mjs';
-import { LocalLlmError } from './errors.mjs';
-import { OBSERVATION_ID_RE } from './promptObservations.mjs';
 import { readPromptStream } from './promptStream.mjs';
 
 // Soul Gateway names a discovered agent's model <repo>/<agent>/<model id>;

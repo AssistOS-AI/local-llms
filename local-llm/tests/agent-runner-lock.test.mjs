@@ -11,15 +11,18 @@ import path from 'node:path';
 import test from 'node:test';
 import zlib from 'node:zlib';
 
+import { validateModel } from 'pworker/local-llm/internal/controller/catalog.mjs';
+import { DownloadError, downloadFile } from 'pworker/local-llm/internal/controller/downloader.mjs';
+import { fetchOllamaRegistryManifest, manifestPath, readOllamaManifest } from 'pworker/local-llm/internal/controller/ollamaStore.mjs';
+import {
+    archiveCompression, loadRunnerLock, loadRunnerLocks, validateRunnerLock,
+} from 'pworker/local-llm/internal/controller/runnerLock.mjs';
+import { createStateStore } from 'pworker/local-llm/internal/controller/stateStore.mjs';
+
+import { agentRunnerLockFile } from '../src/agentHost.mjs';
+import { createAgentController as createController, createRunnerInstaller, RUNNERS } from '../src/engineOptions.mjs';
+
 import { installMessage, runnersPanelHtml } from '../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-view.js';
-import { validateModel } from '../src/controller/catalog.mjs';
-import { createController } from '../src/controller/deployments.mjs';
-import { DownloadError, downloadFile } from '../src/controller/downloader.mjs';
-import { fetchOllamaRegistryManifest, manifestPath, readOllamaManifest } from '../src/controller/ollamaStore.mjs';
-import { createRunnerInstaller } from '../src/controller/runnerInstaller.mjs';
-import { agentRunnerLockFile, archiveCompression, loadRunnerLock, loadRunnerLocks, validateRunnerLock } from '../src/controller/runnerLock.mjs';
-import { createStateStore } from '../src/controller/stateStore.mjs';
-import { RUNNERS } from '../src/runners/index.mjs';
 import { manifestBytes, registry, sha256 } from './ollama-fixture.mjs';
 
 const SHA = (buffer) => crypto.createHash('sha256').update(buffer).digest('hex');
@@ -205,20 +208,32 @@ test('every file the install check loads is one whose change runs it', {
     // The static import closure of the tool, in the agent's own source.
     const root = new URL('../', import.meta.url).pathname;
     const seen = new Set();
+    // The packages it imports by name: the engine is one, pinned by the package files and installed under the control of .npmrc.
+    const packages = new Set();
     const visit = (file) => {
         if (seen.has(file)) return;
         seen.add(file);
-        for (const match of fs.readFileSync(file, 'utf8').matchAll(/(?:import|export)[^'"]*?from\s+['"](\.[^'"]+)['"]|import\(\s*['"](\.[^'"]+)['"]\s*\)/g)) {
+        const text = fs.readFileSync(file, 'utf8');
+        for (const match of text.matchAll(/(?:import|export)[^'"]*?from\s+['"](\.[^'"]+)['"]|import\(\s*['"](\.[^'"]+)['"]\s*\)/g)) {
             visit(path.resolve(path.dirname(file), match[1] ?? match[2]));
+        }
+        for (const match of text.matchAll(/(?:import|export)[^'"]*?from\s+['"]([^.'"][^'"]*)['"]|import\(\s*['"]([^.'"][^'"]*)['"]\s*\)/g)) {
+            const specifier = match[1] ?? match[2];
+            if (!specifier.startsWith('node:')) packages.add(specifier.split('/')[0]);
         }
     };
     visit(path.join(root, 'tools', 'runner_install_check.mjs'));
-    assert.ok(seen.size >= 8, [...seen].join());
+    assert.ok(seen.size >= 2, [...seen].join());
     for (const file of seen) {
         assert.ok(pattern.test(`local-llm/${path.relative(root, file)}`), `${path.relative(root, file)} is loaded by the install check and must run it`);
     }
-    // And what the locks name as launch files is launched by the adapters.
-    for (const file of ['local-llm/src/runners/ollama.mjs', 'local-llm/src/runners/llamaServer.mjs', 'local-llm/src/runners/llamaCpp.mjs']) assert.ok(pattern.test(file), file);
+    // A package the check imports is pinned by the package files, and .npmrc decides how it is installed: a change to any of them runs the check.
+    assert.ok(packages.has('pworker'), [...packages].join());
+    for (const file of ['local-llm/package.json', 'local-llm/package-lock.json', 'local-llm/.npmrc']) assert.ok(pattern.test(file), `${file} pins or installs ${[...packages].join()} and must run the check`);
+    // And what the locks name as launch files is launched by the adapters, which are in the pinned package.
+    for (const adapter of ['ollama', 'llamaServer', 'llamaCpp']) {
+        assert.ok(fs.existsSync(new URL(import.meta.resolve(`pworker/local-llm/internal/runners/${adapter}.mjs`))), adapter);
+    }
 });
 
 test('a change list far bigger than a pipe buffer still runs the check when the name that matters sorts first', {
@@ -234,7 +249,6 @@ test('a change list far bigger than a pipe buffer still runs the check when the 
     // A list that big with nothing in it that matters is, correctly, not needed.
     assert.equal(needed(t, { event: 'pull_request', changed: ['README.md'], filler }), 'needed=false', 'nothing that matters');
 });
-
 
 // ---------------------------------------------------------------- the two locks
 

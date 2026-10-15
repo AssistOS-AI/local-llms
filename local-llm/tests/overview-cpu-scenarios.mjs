@@ -3,7 +3,10 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { agentRunnerLockFile, loadRunnerLocks } from '../src/controller/runnerLock.mjs';
+
+import { loadRunnerLocks } from 'pworker/local-llm/internal/controller/runnerLock.mjs';
+
+import { agentRunnerLockFile } from '../src/agentHost.mjs';
 
 export const VULKAN_KEYS = Object.freeze({
     vulkan_contract: '1', vulkan_llama_cpp: 'b11159',

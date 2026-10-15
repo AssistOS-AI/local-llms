@@ -65,3 +65,18 @@ const productionResolver = createVllmMpsQualificationResolver(() => REVIEWED_QUA
 export function resolveVllmMpsQualification(tuple) {
     return productionResolver(tuple);
 }
+
+/**
+ * The tuple a qualification entry must match: the selected lock entry's digest
+ * and the physical GPU's driver, PCI device id, compute capability and total
+ * memory. Admission asks for it through the limits' `vllmQualification` hook
+ * (src/hardwareLimits.mjs); the calibration probe (tools/vllm_mps_calibration.mjs)
+ * reads the very same tuple, so a proposed entry is computed by production's own code.
+ */
+export function vllmMpsTuple({ gpu, runnerLockEntry } = {}) {
+    return {
+        runnerLockDigest: vllmRunnerLockDigest(runnerLockEntry), driverVersion: gpu?.driverVersion,
+        gpuPciDeviceId: gpu?.device?.pciDeviceId, computeCapability: gpu?.device?.computeCapability,
+        deviceTotalBytes: gpu?.totalBytes,
+    };
+}
