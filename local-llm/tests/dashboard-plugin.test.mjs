@@ -98,7 +98,7 @@ test('the dashboard follows Explorer style rules and works in both themes throug
     for (const css of [styles, buttonStyles]) {
         assert.doesNotMatch(css, /#[0-9a-f]{3,8}\b/i);
         for (const [, value] of css.matchAll(/(?:color|background|border-color):\s*([^;}\n]+)/g)) {
-            assert.match(value, /^(?:var\(--[\w-]+\)|transparent|none)$/, 'colors must use existing Explorer tokens');
+            assert.match(value, /^(?:var\(--[\w-]+\)|transparent|none|color-mix\(in srgb, var\(--[\w-]+\) \d+%, var\(--[\w-]+\)\))$/, 'colors must use existing Explorer tokens');
         }
         assert.doesNotMatch(css, /min-width:\s*(?:[1-9]\d*px|min\()/);
         assert.doesNotMatch(css, /\/\*/, 'WebSkel mis-scopes the rule after a CSS comment');
@@ -106,7 +106,7 @@ test('the dashboard follows Explorer style rules and works in both themes throug
     assert.match(styles, /var\(--(?:space|font)-/);
     assert.match(styles, /@media \(max-width: 720px\)/);
     const scoped = (css, pattern) => {
-        for (const rule of css.replace(/@media[^{]*\{/g, '').split('}')) {
+        for (const rule of css.replace(/@(?:media|container)[^{]*\{/g, '').split('}')) {
             const selector = rule.split('{')[0].trim();
             if (!selector) continue;
             for (const part of selector.split(',')) assert.match(part.trim(), pattern, part.trim());
@@ -208,7 +208,7 @@ test('the Runners tab shows the platform reason for a runner this image lacks, n
     assert.deepEqual(statuses, ['error']);
 });
 
-test('the Runners intro lists the runners this image contains', () => {
+test('the Runners intro stays short; availability and provenance belong to each card', () => {
     const amd64 = [
         { id: 'llama.cpp', displayName: 'llama.cpp', supported: true, installed: true },
         { id: 'ik_llama.cpp', displayName: 'ik_llama.cpp', supported: true, installed: true },
@@ -216,14 +216,14 @@ test('the Runners intro lists the runners this image contains', () => {
         { id: 'vllm', displayName: 'vLLM', supported: true, installed: false, install: { version: '0.30.0', totalBytes: 4.2e9 } },
     ];
     const withInstall = runnersIntroText(amd64);
-    assert.match(withInstall, /^In this image: llama\.cpp, ik_llama\.cpp, Ollama\. Other runners are installed here, only when you press Install/);
+    assert.equal(withInstall, 'Runners execute your local models. Availability depends on this workspace’s hardware.');
     assert.doesNotMatch(withInstall, /vLLM/);
-    // A runner the image lacks is not "in this image", and with nothing installable the second sentence says so.
+    // The intro does not promise an installation on an unsupported platform.
     const arm64 = [
         { id: 'llama.cpp', displayName: 'llama.cpp', supported: true, installed: true },
         { id: 'ik_llama.cpp', displayName: 'ik_llama.cpp', supported: false, installed: false, unsupportedReason: 'not available on this platform' },
     ];
-    assert.equal(runnersIntroText(arm64), 'In this image: llama.cpp. No other runner can be installed on this image.');
+    assert.equal(runnersIntroText(arm64), withInstall);
     assert.equal(runnersIntroText([]), '');
     assert.equal(runnersIntroText(undefined), '');
     // The static paragraph is gone; the presenter fills the placeholder from the overview.
@@ -235,7 +235,7 @@ test('the Runners intro lists the runners this image contains', () => {
     presenter.runnersRegion = { innerHTML: '' };
     presenter.overview = { runners: arm64 };
     presenter.renderRunners();
-    assert.equal(presenter.runnersIntro.textContent, 'In this image: llama.cpp. No other runner can be installed on this image.');
+    assert.equal(presenter.runnersIntro.textContent, withInstall);
     assert.match(presenter.runnersRegion.innerHTML, /not available on this platform/);
 });
 
@@ -625,26 +625,8 @@ test('a runner with no policy for the profile gets no column and no Install; whi
     const lacking = runnersPanelHtml([{ ...cpuRunners[1], supported: false, unsupportedReason: 'Ollama is not available on this platform: this image does not include it.' }]);
     assert.match(lacking, /not available on this platform/);
     assert.doesNotMatch(lacking, /needs an NVIDIA GPU/);
-    // The Runners intro names the runners that run models on the CPU.
-    // (Tabby and vLLM are installed on demand, so they are not "in this image".)
-    // Install is offered only for a runner with a policy for the profile, and the intro promises it only then: here
-    // both on-demand runners are refused on the CPU, so it says nothing can be installed.
-    assert.equal(runnersIntroText(cpuRunners, { profile: 'cpu' }),
-        'In this image: llama.cpp, Ollama. On this machine models run on the CPU, with: llama.cpp. No other runner can be installed while models run on the CPU.');
-    assert.doesNotMatch(runnersIntroText(cpuRunners, { profile: 'cpu' }), /press Install/);
-    // The arm64 image on the CPU: llama.cpp in the image, the rest absent or refused.
-    const arm64 = [cpuRunners[0], { id: 'ik_llama.cpp', displayName: 'ik_llama.cpp', supported: false, unsupportedReason: 'not available on this platform', paramSchema: null }, cpuRunners[2]];
-    assert.equal(runnersIntroText(arm64, { profile: 'cpu' }),
-        'In this image: llama.cpp. On this machine models run on the CPU, with: llama.cpp. No other runner can be installed while models run on the CPU.');
-    // A runner that is installable and has a policy keeps the promise.
-    const { profileUnsupportedReason: _refused, ...installable } = cpuRunners[2];
-    assert.match(runnersIntroText([cpuRunners[0], installable], { profile: 'cpu' }), /^In this image: llama\.cpp\. On this machine models run on the CPU, with: llama\.cpp\. Other runners are installed here, only when you press Install/);
-    // With no on-demand runner at all, the SPEC's wording stands.
-    assert.match(runnersIntroText([cpuRunners[0]], { profile: 'cpu' }), /No other runner can be installed on this image\.$/);
-    // Other profiles carry no refusal, so their intro is what it was.
-    const noReasons = cpuRunners.map(({ profileUnsupportedReason: _reason, ...runner }) => runner);
-    assert.match(runnersIntroText(noReasons, { profile: 'dedicated' }), /Other runners are installed here, only when you press Install/);
-    assert.doesNotMatch(runnersIntroText(noReasons, { profile: 'dedicated' }), /run models on the CPU/);
+    // Short introductory copy makes no hardware-specific promise; the cards above carry the restrictions.
+    assert.doesNotMatch(runnersIntroText(cpuRunners), /press Install/);
     // The run form says why such a runner cannot run.
     const presenter = new dashboardModule.LocalLlmDashboard({ isConnected: true, querySelector: () => null, querySelectorAll: () => [] }, () => {});
     const noteFor = (runner) => {

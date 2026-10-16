@@ -33,14 +33,14 @@ import {
     runnersPanelHtml,
     splitRunFields,
     statusCardHtml,
-} from './local-llm-dashboard-view.js?v=compact-capacities-2';
+} from './local-llm-dashboard-view.js?v=runners-grid-1';
 
 import { hardwareSummaryHtml, hardwareWarningsHtml } from './local-llm-resources-view.js?v=compact-capacities-2';
 import { helpHtml, initHelp, initAddModelDialog } from './local-llm-dashboard-help.js';
 
 import { iconHtml } from './local-llm-icons.js';
 
-const TABS = Object.freeze(['models', 'playground', 'logs', 'runners']);
+const TABS = Object.freeze(['models', 'runners', 'playground', 'logs']);
 const PREVIEW_DELAY_MS = 400;
 // While the dashboard is open and visible, hardware and download states are
 // re-read on this interval, so the GPU card never shows a stale value.
@@ -320,12 +320,24 @@ export class LocalLlmDashboard {
 
     renderRunners() {
         const runners = this.overview?.runners || [];
-        const intro = runnersIntroText(runners, { profile: this.overview?.profile });
+        const intro = runnersIntroText(runners);
         if (this.runnersIntro && this.rendered.runnersIntro !== intro) {
             this.rendered.runnersIntro = intro;
             this.runnersIntro.textContent = intro;
         }
-        this.setHtml('runners', this.runnersRegion, runnersPanelHtml(runners));
+        const openHelp = this.runnersRegion?.querySelector?.('[data-llm-runner-help]:popover-open');
+        const helpId = openHelp?.id;
+        const focusedId = this.runnersRegion?.contains?.(globalThis.document?.activeElement) ? globalThis.document.activeElement.id : null;
+        const deployment = this.status?.deployment || this.overview?.deployment;
+        const current = deployment ? { ...deployment, phase: this.status?.phase || deployment.phase } : null;
+        if (this.setHtml('runners', this.runnersRegion, runnersPanelHtml(runners, { deployment: current }))) {
+            if (helpId) {
+                const help = this.runnersRegion.querySelector(`#${helpId}`);
+                const source = this.runnersRegion.querySelector(`#${helpId}-button`);
+                if (help && source) help.showPopover({ source });
+            }
+            if (focusedId) this.runnersRegion.querySelector(`#${focusedId}`)?.focus();
+        }
     }
 
     async installRunner(_target, runnerId) {
@@ -951,6 +963,7 @@ export class LocalLlmDashboard {
             this.pollFailures = 0;
             this.renderDeployment();
             this.renderHardware();
+            this.renderRunners();
             if (wasActive !== this.activeModelId()) {
                 this.renderModels();
                 this.renderDetailInfo();

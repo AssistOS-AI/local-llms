@@ -17,6 +17,8 @@ import { helpHtml } from './local-llm-dashboard-help.js';
 
 import { iconHtml } from './local-llm-icons.js';
 
+export { runnersIntroText, runnersPanelHtml } from './local-llm-runners-view.js';
+
 export const ACTIVE_PHASES = new Set(['downloading', 'copying', 'verifying', 'pulling', 'starting', 'loading', 'ready', 'stopping']);
 export function measurementHtml(status) {
     if (!status) return '';
@@ -374,101 +376,6 @@ export function detailInfoHtml(model, { runners = [], activeModelId = '' } = {})
         </div>
         <ul class="local-llm-runner-list" aria-label="Weights">${weights}</ul>
         <details class="local-llm-advanced local-llm-compatibility"><summary class="form-label">Runner compatibility</summary><ul class="local-llm-runner-list" aria-label="Runners">${fits || '<li class="settings-card-meta">No runner can run this model.</li>'}</ul></details>`;
-}
-
-function licenceLine(licence = {}, accepted = null) {
-    const links = [
-        licence.url ? `<a href="${escapeHtml(licence.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(licence.name || 'Licence')}</a>` : escapeHtml(licence.name || ''),
-        licence.source ? `<a href="${escapeHtml(licence.source)}" target="_blank" rel="noopener noreferrer">source</a>` : '',
-    ].filter(Boolean).join(' · ');
-    const acceptance = accepted?.acceptedBy
-        ? ` · accepted by ${escapeHtml(accepted.acceptedBy)} on ${escapeHtml(String(accepted.acceptedAt || '').slice(0, 10))}` : '';
-    return `<div class="settings-card-meta">Licence: ${links}${acceptance}</div>`;
-}
-
-function installProgress(state) {
-    const download = state?.download;
-    if (!download?.total || !['downloading', 'installing'].includes(state.phase)) return '';
-    const percent = progressPercent(download) ?? 0;
-    const rate = download.rate ? ` · ${formatBytes(download.rate)}/s` : '';
-    return `
-        <progress class="local-llm-progress" max="100" value="${percent}" aria-label="Install progress">${percent}%</progress>
-        <div class="settings-card-meta">${escapeHtml(`${formatBytes(download.bytes)} of ${formatBytes(download.total)}${rate}`)}</div>`;
-}
-
-/**
- * The Runners tab's intro, from the overview: the runners the image itself
- * contains, and whether any other runner can be installed here. Plain text.
- */
-export function runnersIntroText(runners = [], { profile = null } = {}) {
-    const list = (Array.isArray(runners) ? runners : []).filter(Boolean);
-    if (!list.length) return '';
-    const inImage = list.filter((runner) => runner.supported !== false && !runner.install)
-        .map((runner) => runner.displayName || runner.id);
-    const inImageText = inImage.length ? `In this image: ${inImage.join(', ')}.` : 'No runner is part of this image.';
-    // On the cpu profile only the runners with a CPU policy (a parameter schema for it) run models.
-    const onCpu = list.filter((runner) => runner.supported !== false && runner.paramSchema).map((runner) => runner.displayName || runner.id);
-    const first = profile === 'cpu' && onCpu.length ? `${inImageText} On this machine models run on the CPU, with: ${onCpu.join(', ')}.` : inImageText;
-    // Install is offered only for a runner with a policy for the profile, so the intro says so only then.
-    const onDemand = list.filter((runner) => runner.install);
-    const second = onDemand.some((runner) => !runner.profileUnsupportedReason)
-        ? 'Other runners are installed here, only when you press Install: their pinned files are downloaded, checked and set up on this workspace\'s disk.'
-        : onDemand.length
-            ? 'No other runner can be installed while models run on the CPU.'
-            : 'No other runner can be installed on this image.';
-    return `${first} ${second}`;
-}
-
-/**
- * The Runners tab: every runner with its state. Runners in the image have no
- * actions; on-demand runners show their size, licence and install progress,
- * with Install or Uninstall (never a second Install while one runs).
- */
-export function runnersPanelHtml(runners = []) {
-    const busy = runners.some((runner) => runner.install?.installing);
-    const cards = runners.map((runner) => {
-        const install = runner.install;
-        const off = runner.enabled === false;
-        // A runner the image lacks says so in the platform's words, never through
-        // the version probe's "Executable not found" (that is `reason`).
-        const lacking = (runner.supported === false ? runner.unsupportedReason : '') || runner.profileUnsupportedReason || '';
-        const status = lacking || (off
-            ? `${runner.installed ? 'installed · ' : ''}not enabled on this deployment`
-            : runner.installed
-                ? `${runner.version || install?.version || ''} · installed`
-                : (install ? 'not installed' : (runner.reason || 'not available')));
-        let body = '';
-        let actions = '';
-        if (install) {
-            const state = install.state || {};
-            const phase = install.installing ? state.phase : null;
-            body = `
-                <div class="settings-card-meta">${escapeHtml(`Version ${install.version} · ${formatBytes(install.totalBytes)} to download`)}${
-    state.rebuild?.seconds ? escapeHtml(` · set up in ${Math.round(state.rebuild.seconds)} s`) : ''}</div>
-                ${licenceLine(install.licence, state.licence)}
-                ${install.licence?.notice ? `<div class="settings-card-meta">${escapeHtml(install.licence.notice)}</div>` : ''}
-                ${phase ? `<div class="settings-card-meta">${escapeHtml(phase === 'installing' ? 'Setting up the runner…' : 'Downloading…')}</div>` : ''}
-                ${installProgress(install.installing ? state : null)}
-                ${state.phase === 'paused' && state.pausedReason ? `<div class="settings-card-meta">${escapeHtml(state.pausedReason)}</div>` : ''}
-                ${state.phase === 'error' && state.error ? `<div class="settings-status error">${escapeHtml(state.error)}</div>` : ''}`;
-            if (install.installed && !install.installing) {
-                actions = `<button type="button" class="gray-button" data-local-action="uninstallRunner ${escapeHtml(runner.id)}">Uninstall</button>`;
-            } else if (!install.installing && !busy && !off && !runner.profileUnsupportedReason) {
-                actions = `<button type="button" class="general-button" data-local-action="installRunner ${escapeHtml(runner.id)}">Install</button>`;
-            }
-        }
-        return `
-            <li class="local-llm-runner-item">
-                <div>
-                    <div class="settings-card-title">${escapeHtml(runner.displayName || runner.id)}</div>
-                    <div class="settings-card-meta">${escapeHtml(status)}</div>
-                    ${off && runner.disabledReason ? `<div class="settings-card-meta">${escapeHtml(runner.disabledReason)}</div>` : ''}
-                    ${body}
-                </div>
-                ${actions}
-            </li>`;
-    }).join('');
-    return `<ul class="local-llm-runner-list" aria-label="Runners">${cards || '<li class="settings-card-meta">No runners.</li>'}</ul>`;
 }
 
 /**

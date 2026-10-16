@@ -458,7 +458,6 @@ local-llm-dashboard .settings-card-meta { margin: 0; font-size: 12px; font-weigh
 local-llm-dashboard .settings-section-description:empty { display: none; }
 local-llm-dashboard .settings-card-title { font-size: 14px; font-weight: var(--font-semibold); }
 local-llm-dashboard .settings-card { background: transparent; box-shadow: none; border: 0; border-radius: 0; }
-local-llm-dashboard .general-button,
 local-llm-dashboard .gray-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 8px 12px; font: inherit; font-weight: var(--font-regular); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: none; }
 local-llm-dashboard .gray-button,
 local-llm-dashboard .general-button.secondary { background: var(--surface); color: var(--text); }
@@ -506,6 +505,7 @@ local-llm-dashboard .local-llm-weight-item > .gray-button { padding: 6px 8px; fo
 local-llm-dashboard .local-llm-field { gap: 6px; }
 local-llm-dashboard .local-llm-field .form-label,
 local-llm-dashboard .local-llm-advanced > summary { font-size: 12px; font-weight: var(--font-regular); color: var(--text-soft); }
+local-llm-dashboard .local-llm-field .form-label.local-llm-runner-label { font-size: 15px; font-weight: var(--font-bold); color: var(--text); }
 local-llm-dashboard .local-llm-field .form-input,
 local-llm-dashboard custom-select .custom-select { width: 100%; box-sizing: border-box; margin-top: 0; padding: 9px 10px; font: inherit; font-size: 14px; font-weight: var(--font-regular); line-height: 1.5; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 7px; box-shadow: none; }
 local-llm-dashboard .local-llm-field-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: end; }
@@ -657,22 +657,130 @@ local-llm-dashboard .local-llm-logs-panel > .local-llm-log {
 }
 
 local-llm-dashboard .local-llm-runners-panel .local-llm-runner-item {
-    align-items: flex-start;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto auto auto;
+    grid-template-rows: subgrid;
+    grid-row: span 6;
+    justify-content: stretch;
+    align-items: stretch;
+    gap: 6px;
+    min-width: 0;
     padding: 16px;
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     background: var(--surface-soft);
 }
 
-local-llm-dashboard .local-llm-runners-panel .local-llm-runner-item > div {
-    display: grid;
-    gap: 4px;
-    min-width: 0;
+local-llm-dashboard [data-llm-runners] {
+    container: local-llm-runners / inline-size;
+}
+
+local-llm-dashboard .local-llm-runner-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    align-items: stretch;
+}
+
+local-llm-dashboard .local-llm-runner-item[data-runner-state="installed"] {
+    background: color-mix(in srgb, var(--success) 5%, var(--surface));
+    border-color: color-mix(in srgb, var(--success) 25%, var(--border));
+}
+
+local-llm-dashboard .local-llm-runner-item[data-runner-state="busy"] {
+    background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+    border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+
+local-llm-dashboard .local-llm-runner-item[data-runner-state="error"] {
+    background: color-mix(in srgb, var(--file-exp-error) 5%, var(--surface));
+    border-color: color-mix(in srgb, var(--file-exp-error) 30%, var(--border));
+}
+
+local-llm-dashboard .local-llm-runner-heading,
+local-llm-dashboard .local-llm-runner-state {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+local-llm-dashboard .local-llm-runner-heading {
+    position: relative;
+    justify-content: space-between;
+    padding: 0px 8px 2px;
+    margin: -11px -4px 0px;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    text-align: left;
+    box-shadow: none;
+}
+
+local-llm-dashboard .local-llm-runner-heading::after {
+    content: "";
+    position: absolute;
+    left: 0px; right: 0px; bottom: 0; height: 12px;
+    border-radius: 50%;
+    box-shadow: var(--shadow-sm);
+    clip-path: inset(100% -8px -10px -8px);
+    pointer-events: none;
+}
+
+local-llm-dashboard .local-llm-runner-heading h3 {
+    margin: 0;
     overflow-wrap: anywhere;
 }
 
-local-llm-dashboard .local-llm-runners-panel .local-llm-runner-item > button {
+local-llm-dashboard .local-llm-runner-heading .local-llm-info {
+    min-width: 2rem;
+    min-height: 32px;
     flex-shrink: 0;
+}
+
+local-llm-dashboard .local-llm-runner-state {
+    flex-wrap: wrap;
+    font-size: var(--font-sm);
+    color: var(--text-soft);
+}
+
+local-llm-dashboard [data-runner-state="installed"] .local-llm-runner-state { color: var(--success); }
+local-llm-dashboard [data-runner-state="busy"] .local-llm-runner-state { color: var(--accent); }
+local-llm-dashboard [data-runner-state="error"] .local-llm-runner-state { color: var(--file-exp-error); }
+local-llm-dashboard .local-llm-runner-state-actions { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+local-llm-dashboard .local-llm-runner-state-actions:empty { display: none; }
+local-llm-dashboard .local-llm-runner-state-actions > button { box-sizing: border-box; min-height: 2rem; padding: 4px 10px; }
+
+local-llm-dashboard .local-llm-runner-facts { display: contents; }
+local-llm-dashboard .local-llm-runner-fact { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: 12px; align-items: baseline; min-width: 0; }
+local-llm-dashboard .local-llm-runner-fact dt { color: var(--text-soft); }
+local-llm-dashboard .local-llm-runner-fact dd { margin: 0; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+local-llm-dashboard .local-llm-runner-fact a { color: var(--accent); }
+local-llm-dashboard .local-llm-runner-notes { display: grid; align-content: start; gap: 8px; min-width: 0; }
+
+local-llm-dashboard .local-llm-runner-reason,
+local-llm-dashboard .local-llm-runner-notice { margin: 0; overflow-wrap: anywhere; }
+
+local-llm-dashboard .local-llm-runner-reason:not(.error) {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+}
+
+local-llm-dashboard .local-llm-runner-progress,
+local-llm-dashboard .local-llm-runner-details { display: grid; gap: 8px; }
+
+local-llm-dashboard [data-llm-runner-help] { max-height: min(32rem, calc(100dvh - 40px)); overflow: auto; }
+
+local-llm-dashboard .local-llm-runner-spinner { position: relative; width: 18px; height: 18px; flex-shrink: 0; }
+local-llm-dashboard .local-llm-runner-spinner .spinner-orbit { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%) scale(.28); }
+
+@container local-llm-runners (min-width: 36rem) {
+    local-llm-dashboard .local-llm-runner-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@container local-llm-runners (min-width: 58rem) {
+    local-llm-dashboard .local-llm-runner-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 900px) {
