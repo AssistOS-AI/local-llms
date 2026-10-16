@@ -38,7 +38,7 @@ test('the seed catalog is schema v4: sources by weight format, parameters and me
     const schema = JSON.parse(fs.readFileSync(new URL(import.meta.resolve('pworker/local-llm/internal/catalog/schema.json')), 'utf8'));
     assert.equal(schema.$id, 'local-llm.catalog/v4');
     assert.deepEqual(Object.keys(schema.$defs.model.properties.sources.properties), Object.keys(WEIGHT_FORMATS));
-    assert.deepEqual(Object.keys(schema.$defs.model.properties.recommended.properties), ['dedicated', 'unified', 'cpu', 'venus']);
+    assert.deepEqual(Object.keys(schema.$defs.model.properties.recommended.properties), ['dedicated', 'unified', 'cpu', 'venus', 'metal']);
 });
 
 test('the unified seed lists the models measured or to be measured on DGX Spark, every source pinned', () => {

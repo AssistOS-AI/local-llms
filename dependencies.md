@@ -8,7 +8,7 @@ Ploinky continues to supply the shared AchillesAgentLib runtime. Existing GPU qu
 
 # Engine runtime dependency
 
-The agent depends on one package, `pworker` (the Ploinky-Worker repository), which holds the engine that runs the models (`lib/local-llm`; local-llm/docs/specs/DS000-vision-and-scope.md). It is the only entry in `local-llm/package.json` `dependencies`, a runtime dependency of the agent, declared as `git+https://github.com/AssistOS-AI/Ploinky-Worker.git#4668a3f0e2cae0c85463945def068741dc8c2b68`: the HTTPS form with a full 40-hex commit SHA, never a branch, a tag or an abbreviated SHA. `local-llm/package-lock.json` records the same URL as `resolved`; npm writes `git+ssh://` there when it installs, and the lock is kept at the `git+https` form by hand. Its engine requirement is Node.js 22.13 or later, and the agent image runs Node.js 24.
+The agent depends on one package, `pworker` (the Ploinky-Worker repository), which holds the engine that runs the models (`lib/local-llm`; local-llm/docs/specs/DS000-vision-and-scope.md). It is the only entry in `local-llm/package.json` `dependencies`, a runtime dependency of the agent, declared as `git+https://github.com/AssistOS-AI/Ploinky-Worker.git#64aa8a0c0e4e918c05f3f0264b45438652f67a6c`: the HTTPS form with a full 40-hex commit SHA, never a branch, a tag or an abbreviated SHA. `local-llm/package-lock.json` records the same URL as `resolved`; npm writes `git+ssh://` there when it installs, and the lock is kept at the `git+https` form by hand. Its engine requirement is Node.js 22.13 or later, and the agent image runs Node.js 24.
 
 The package is licensed GPL-3.0 (its `LICENSE` file; its `package.json` has no `license` field), which the owner accepted for the code that moved there from this repository.
 
