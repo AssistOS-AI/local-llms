@@ -8,8 +8,9 @@
 
 import { stdin, stdout, env, exit } from 'node:process';
 
+import { LocalLlmError, serializeError } from 'pworker/local-llm/internal/errors.mjs';
+
 import { callController } from '../src/controlSocket.mjs';
-import { LocalLlmError, serializeError } from '../src/errors.mjs';
 
 export const TOOL_OPERATIONS = Object.freeze({
     local_llm_overview: { op: 'overview', args: (input) => (input.preview ? { preview: input.preview } : {}) },

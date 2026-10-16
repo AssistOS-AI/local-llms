@@ -12,9 +12,11 @@
 # a branch starts nothing. It has no workflow-level path filter, so it can be a
 # required status check without blocking pull requests that touch none of this:
 # the first job looks at what the pull request changes and, when it touches no
-# lock, not this workflow and nothing the install check loads or launches (all of
-# local-llm/src/controller/, local-llm/src/runners/, local-llm/src/errors.mjs, local-llm/src/drainBudget.mjs and
-# local-llm/tools/), the per-architecture jobs are skipped and the
+# lock, not this workflow and nothing the install check loads or launches (the
+# engine package pinned by local-llm/package.json and local-llm/package-lock.json, with local-llm/.npmrc that
+# controls its install, local-llm/src/agentHost.mjs and local-llm/tools/; the older
+# local-llm/src/controller/, local-llm/src/runners/, local-llm/src/errors.mjs and local-llm/src/drainBudget.mjs
+# stay in the list, which only over-triggers now that the engine lives in the package), the per-architecture jobs are skipped and the
 # `runner-lock-check` job at the end still reports success. THE GATE HOLDS ONLY
 # ONCE `runner-lock-check` IS A REQUIRED STATUS CHECK ON `main` (a repository
 # setting, not something this file can turn on); until then an entry is held back
@@ -50,8 +52,10 @@ jobs:
         id: detect
         # On demand, the check always runs. For a pull request it runs when the diff against the base touches a lock, the
         # workflow itself, or any file the install check loads or launches: everything under src/controller/ (the
-        # installer, the lock reader, the downloader and what they import), src/runners/ (the adapters whose launch
-        # paths the locks name), src/errors.mjs, src/drainBudget.mjs and tools/. If the diff cannot be read, or grep fails, it runs: the
+        # installer, the lock reader, the downloader and what they import, until the engine moved to the pworker
+        # package), src/runners/ (the adapters whose launch paths the locks name), src/errors.mjs, src/drainBudget.mjs and tools/;
+        # now also the package files that pin the engine the check loads (package.json, package-lock.json, .npmrc) and the
+        # binding the tool loads (src/agentHost.mjs). If the diff cannot be read, or grep fails, it runs: the
         # only way to "not needed" is a diff that was read and had no such file.
         # The names go to a file, never through a pipe: `grep -q` leaves at its first match, and a writer still
         # feeding it dies of SIGPIPE, which `pipefail` turns into "no match" once the list is bigger than a pipe's
@@ -66,7 +70,7 @@ jobs:
             trap 'rm -f "$list"' EXIT
             if git -c core.quotePath=false diff --name-only -z HEAD^1 HEAD > "$list"; then
               found=0
-              LC_ALL=C grep -z -E '^(local-llm/src/(controller|runners)/.+|local-llm/src/(errors|drainBudget)\.mjs|local-llm/tools/.+|local-llm/catalog/runners\.lock\.linux-[a-z0-9]+\.json|\.github/workflows/runner-lock-check\.yml)$' "$list" > /dev/null || found=$?
+              LC_ALL=C grep -z -E '^(local-llm/src/(controller|runners)/.+|local-llm/src/(errors|drainBudget)\.mjs|local-llm/tools/.+|local-llm/package\.json|local-llm/package-lock\.json|local-llm/\.npmrc|local-llm/src/agentHost\.mjs|local-llm/catalog/runners\.lock\.linux-[a-z0-9]+\.json|\.github/workflows/runner-lock-check\.yml)$' "$list" > /dev/null || found=$?
               case "$found" in
                 1) needed=false ;;
                 *) needed=true ;;
@@ -112,9 +116,19 @@ jobs:
           mkdir -p "$RUNNER_TEMP/runner-lock-check"
           docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE" | tee "$RUNNER_TEMP/runner-lock-check/image.txt"
 
+      - name: Install the engine package the check imports
+        # local-llm/package-lock.json pins pworker; local-llm/.npmrc (bin-links=false, ignore-scripts=true) keeps the
+        # install free of links and scripts, so the mounted /code/node_modules is plain files. The package is a git
+        # dependency, so this step needs the network and git, as the agent's own first start does.
+        run: |
+          set -euo pipefail
+          npm --prefix local-llm ci
+          test -f local-llm/node_modules/pworker/lib/local-llm/tools/runnerInstallCheck.mjs
+          test -z "$(find local-llm/node_modules -type l)"
+
       - name: Install each lock entry, one at a time
         # Each runner is installed in its own container, removed afterwards,
-        # with the repository's local-llm directory mounted read-only as /code:
+        # with the repository's local-llm directory (and its installed node_modules) mounted read-only as /code:
         # the same installer code, lock and tool the agent runs. The check
         # requires every archive entry to name the file its adapter launches
         # (check.executable), and proves it: the file is there and executable,

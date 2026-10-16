@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 
-import { TOOL_NAMES, TOOL_OPERATIONS, assertAdmin, authInfoFromEnvelope, handleTool } from '../tools/local_llm_tool.mjs';
-import { buildRunnerRequest, completionStats, respond } from '../src/chatResponder.mjs';
+import { LMSTUDIO_SWITCH, VLLM_UNIFIED_SWITCH } from 'pworker/local-llm';
+import { buildRunnerRequest, completionStats } from 'pworker/local-llm/chat';
+
+import { respond } from '../src/chatResponder.mjs';
 import { GATEWAY_MODEL, runTestPrompt } from '../src/testPrompt.mjs';
-import { LMSTUDIO_SWITCH } from '../src/runners/lmStudio.mjs';
-import { VLLM_UNIFIED_SWITCH } from '../src/runners/vllm.mjs';
+import { TOOL_NAMES, TOOL_OPERATIONS, assertAdmin, authInfoFromEnvelope, handleTool } from '../tools/local_llm_tool.mjs';
 
 const ROOT = new URL('..', import.meta.url);
 const read = (file) => JSON.parse(fs.readFileSync(new URL(file, ROOT), 'utf8'));
@@ -312,7 +313,7 @@ test('the chat responder caps completions, allows one choice and bounds the runn
 });
 
 test('the completion budget and runner deadline come from the environment, within their bounds', async () => {
-    const { chatLimits, MAX_COMPLETION_TOKENS_LIMIT, RUNNER_TIMEOUT_MS } = await import('../src/chatResponder.mjs');
+    const { chatLimits, MAX_COMPLETION_TOKENS_LIMIT, RUNNER_TIMEOUT_MS } = await import('pworker/local-llm/chat');
     assert.deepEqual(chatLimits({}), { maxCompletionTokens: 8192, runnerTimeoutMs: 570_000 });
     assert.deepEqual(chatLimits({ LOCAL_LLM_MAX_COMPLETION_TOKENS: '32000', LOCAL_LLM_RUNNER_TIMEOUT_MS: '110000' }),
         { maxCompletionTokens: 32000, runnerTimeoutMs: 110_000 });
@@ -352,7 +353,7 @@ test('a chat request without a token limit gets the documented default cap', asy
 });
 
 test('with no GPU in the container, the reason says what to run on the host', async () => {
-    const { readGpu } = await import('../src/controller/hardware.mjs');
+    const { readGpu } = await import('../src/engineOptions.mjs');
     const missing = (command, args, options, callback) => callback(Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }), '', '');
     const gpu = await readGpu({ execFileImpl: missing, nvidiaSmi: '/usr/local/nvidia/bin/nvidia-smi', env: {} });
     assert.equal(gpu.available, false);

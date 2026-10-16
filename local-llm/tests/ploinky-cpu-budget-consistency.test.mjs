@@ -3,13 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { readSnapshot } from '../src/controller/hardware.mjs';
-import { admit } from '../src/controller/admission.mjs';
+
+import { createStateStore } from 'pworker/local-llm';
+
+import { RUNNERS, createAgentController as createController, loadSeedCatalog } from '../src/engineOptions.mjs';
+import { admit, readSnapshot } from '../src/hardwareLimits.mjs';
 import { observeMemoryBudget } from '../src/controller/ploinkyBudget.mjs';
-import { createController } from '../src/controller/deployments.mjs';
-import { createStateStore } from '../src/controller/stateStore.mjs';
-import { loadSeedCatalog } from '../src/controller/catalog.mjs';
-import { RUNNERS } from '../src/runners/index.mjs';
 import { GPU_TEST_LOCK } from './ploinkyGpuFixture.mjs';
 const GIB = 1024 ** 3;
 const CAP = 16 * GIB;

@@ -8,34 +8,22 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { admissionResult, admit } from '../src/controller/admission.mjs';
-import { loadSeedCatalog, validateModel } from '../src/controller/catalog.mjs';
-import { chatLimits, cpuCompletionBudget, respond } from '../src/chatResponder.mjs';
-import { createController } from '../src/controller/deployments.mjs';
+import { createStateStore, validateModel } from 'pworker/local-llm';
+import { chatLimits, cpuCompletionBudget } from 'pworker/local-llm/chat';
+import { admissionResult } from 'pworker/local-llm/internal/controller/admission.mjs';
+import { DEVICE_QUERY_FIELDS, cpuDefaultThreads } from 'pworker/local-llm/internal/controller/hardware.mjs';
 import {
-    DEVICE_QUERY_FIELDS,
-    cpuDefaultThreads,
-    readCgroupMemory,
-    readGpu,
-    readSnapshot,
-} from '../src/controller/hardware.mjs';
+    UNIFIED, UNREADABLE_COMMIT_MS, cpuFloorBytes, cpuHostReserveBytes, decideProfile, estimateCpuLlamaServer,
+} from 'pworker/local-llm/internal/controller/profiles.mjs';
+import { createLogBuffer, parseRunnerReport } from 'pworker/local-llm/internal/controller/runnerProcess.mjs';
+import { runnerSummary } from 'pworker/local-llm/internal/runners/index.mjs';
+import { ParamError } from 'pworker/local-llm/internal/runners/params.mjs';
+
+import { respond } from '../src/chatResponder.mjs';
 import {
-    UNIFIED,
-    UNREADABLE_COMMIT_MS,
-    admitCpuLlamaServer,
-    cpuFloorBytes,
-    cpuHostReserveBytes,
-    cpuPool,
-    decideProfile,
-    estimateCpuLlamaServer,
-} from '../src/controller/profiles.mjs';
-import { ikLlamaCppRunner } from '../src/runners/ikLlamaCpp.mjs';
-import { RUNNERS, getRunner, runnerSummary } from '../src/runners/index.mjs';
-import { llamaCppRunner } from '../src/runners/llamaCpp.mjs';
-import { createLlamaServerRunner } from '../src/runners/llamaServer.mjs';
-import { ParamError } from '../src/runners/params.mjs';
-import { createLogBuffer, parseRunnerReport } from '../src/controller/runnerProcess.mjs';
-import { createStateStore } from '../src/controller/stateStore.mjs';
+    createAgentController as createController, createLlamaServerRunner, getRunner, ikLlamaCppRunner, llamaCppRunner, loadSeedCatalog, readGpu, RUNNERS,
+} from '../src/engineOptions.mjs';
+import { admit, admitCpuLlamaServer, cpuPool, readCgroupMemory, readSnapshot } from '../src/hardwareLimits.mjs';
 
 const MIB = 1024 * 1024;
 const SMI = '/usr/local/nvidia/bin/nvidia-smi';
@@ -399,8 +387,8 @@ test('admit(): the cpu profile calls the runner\'s CPU policy before any GPU che
     const decision = { cause: 'absent' };
     const ok = admit({ runner: withCpu, model, source: cpuSource(380), params: CPU_PARAMS, snapshot, profile: 'cpu', decision, remainingDownloadBytes: 7 });
     assert.equal(ok.status, 'ok');
-    assert.deepEqual(Object.keys(calls[0]).sort(), ['cgroupMemory', 'decision', 'disk', 'gpu', 'memory', 'model', 'params', 'remainingDownloadBytes', 'source']);
-    assert.deepEqual([calls[0].decision, calls[0].remainingDownloadBytes, calls[0].cgroupMemory.maxBytes, calls[0].gpu], [decision, 7, 4 * GIB, absentGpu]);
+    assert.deepEqual(Object.keys(calls[0]).sort(), ['decision', 'disk', 'gpu', 'limits', 'memory', 'messages', 'model', 'params', 'remainingDownloadBytes', 'snapshot', 'source']);
+    assert.deepEqual([calls[0].decision, calls[0].remainingDownloadBytes, calls[0].snapshot.cgroupMemory.maxBytes, calls[0].gpu], [decision, 7, 4 * GIB, absentGpu]);
     // A snapshot without any GPU is not a reason to refuse on cpu.
     assert.equal(admit({ runner: withCpu, model, source: cpuSource(380), params: CPU_PARAMS, snapshot: { memory: M1_MEMORY }, profile: 'cpu' }).status, 'ok');
     const withoutCpu = { supported: true, displayName: 'Gpu Runner', admit() { throw new Error('the GPU policy must not run on cpu'); } };

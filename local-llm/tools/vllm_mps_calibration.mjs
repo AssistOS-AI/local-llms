@@ -22,13 +22,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { VLLM_USABLE_SHARE, admitVllm } from '../src/controller/admission.mjs';
-import { loadSeedCatalog } from '../src/controller/catalog.mjs';
-import { readGpu, readMemory } from '../src/controller/hardware.mjs';
+import { loadRunnerLocks, loadSeedCatalog } from 'pworker/local-llm';
+import { VLLM_USABLE_SHARE } from 'pworker/local-llm/internal/controller/admission.mjs';
+import { readMemory } from 'pworker/local-llm/internal/controller/hardware.mjs';
+import { createVllmRunner } from 'pworker/local-llm/internal/runners/vllm.mjs';
+
+import { agentHost, agentRunnerLockFile, agentSeedCatalogFile } from '../src/agentHost.mjs';
+import { readGpu } from '../src/engineOptions.mjs';
+import { admitVllm } from '../src/hardwareLimits.mjs';
 import { effectiveGpu, parseMpsBudget } from '../src/controller/ploinkyBudget.mjs';
-import { DEFAULT_RUNNER_LOCK, loadRunnerLocks } from '../src/controller/runnerLock.mjs';
-import { createVllmMpsQualificationResolver, vllmRunnerLockDigest } from '../src/controller/vllmMpsQualification.mjs';
-import { vllmMpsTuple, vllmRunner } from '../src/runners/vllm.mjs';
+import { createVllmMpsQualificationResolver, vllmMpsTuple, vllmRunnerLockDigest } from '../src/controller/vllmMpsQualification.mjs';
+import { PLOINKY_MESSAGES } from '../src/ploinkyMessages.mjs';
 
 export const PREREQUISITE_SCHEMA = 'local-llm.vllm-prerequisites/v1';
 export const CALIBRATION_SCHEMA = 'local-llm.vllm-mps-calibration/v1';
@@ -38,9 +42,14 @@ const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
 const MODEL_ID = 'qwen3-4b-awq';
 const NVIDIA_LIB_DIR = '/usr/local/nvidia/lib64';
-const RUN_ROOT = '/opt/runners';
-const UV = '/usr/local/bin/uv';
-const PYTHON = '/usr/bin/python3';
+// The container's own paths, the catalog and the locks the engine is given explicitly: it has no default of its own.
+const HOST = agentHost({});
+const RUN_ROOT = HOST.runRoot;
+const UV = HOST.uv;
+const PYTHON = HOST.python;
+const vllmRunner = createVllmRunner({ host: HOST, messages: PLOINKY_MESSAGES });
+// The runner locks of this container: the image's, and the agent's own for the CPU architecture this process runs on.
+const locksOfThisContainer = ({ fsApi, image = HOST.imageRunnerLockFile, agent = agentRunnerLockFile(process.arch) } = {}) => loadRunnerLocks({ image, agent, fsApi });
 // The lowest NVIDIA driver (major) that runs a CUDA runtime of this major version.
 const MIN_DRIVER_MAJOR = Object.freeze({ 12: 525, 13: 580 });
 // Estimates, named as such in the evidence: the verified cache holds the wheels
@@ -190,7 +199,7 @@ function diskFacts(fsApi, statfs, target) {
 
 export async function prerequisiteReport({
     pins = null, env = process.env, arch = process.arch, fsApi = fs, statfs = (target) => fs.statfsSync(target), run = runBounded,
-    imageLockFile = DEFAULT_RUNNER_LOCK, agentLockFile = undefined, dataDir = '/data', runRoot = RUN_ROOT,
+    imageLockFile = HOST.imageRunnerLockFile, agentLockFile = undefined, dataDir = '/data', runRoot = RUN_ROOT,
     readGpuImpl = readGpu, catalog = null, uv = UV, python = PYTHON,
 } = {}) {
     const blockers = [];
@@ -202,7 +211,7 @@ export async function prerequisiteReport({
     let lockBytes = null;
     try {
         lockBytes = fsApi.readFileSync(imageLockFile);
-        locks = loadRunnerLocks({ image: imageLockFile, ...(agentLockFile === undefined ? {} : { agent: agentLockFile }), fsApi });
+        locks = locksOfThisContainer({ image: imageLockFile, ...(agentLockFile === undefined ? {} : { agent: agentLockFile }), fsApi });
     } catch (error) {
         block('lock_unreadable', `The image's runner lock ${imageLockFile} cannot be read or is invalid: ${String(error?.message || error).slice(0, 200)}`);
     }
@@ -300,7 +309,7 @@ export async function prerequisiteReport({
 }
 
 function safeCatalog() {
-    try { return loadSeedCatalog(); } catch { return null; }
+    try { return loadSeedCatalog(agentSeedCatalogFile()); } catch { return null; }
 }
 
 // ---------------------------------------------------------------------------
@@ -569,7 +578,7 @@ const envOf = (launchEnv, budget, extra = {}) => {
 };
 
 export async function calibrationReport({
-    env = process.env, fsApi = fs, run = runBounded, readGpuImpl = readGpu, readMemoryImpl = readMemory, locksImpl = loadRunnerLocks,
+    env = process.env, fsApi = fs, run = runBounded, readGpuImpl = readGpu, readMemoryImpl = readMemory, locksImpl = locksOfThisContainer,
     hostNvmlBytes = null, runRoot = RUN_ROOT, now = () => new Date(), catalog = null,
 } = {}) {
     const blockers = [];
@@ -605,7 +614,7 @@ export async function calibrationReport({
     try { ready = JSON.parse(String(fsApi.readFileSync(path.join(runnerDir, '.ready.json'), 'utf8')).slice(0, 4000)); } catch { ready = null; }
 
     // The model and the intended budget: production's admission over the share.
-    const models = catalog || loadSeedCatalog();
+    const models = catalog || loadSeedCatalog(agentSeedCatalogFile());
     const model = models.find((value) => value.id === MODEL_ID);
     const source = model?.sources?.hf;
     if (!model || !source) { block('model_unpinned', `The catalog has no pinned ${MODEL_ID} snapshot.`); return result(); }

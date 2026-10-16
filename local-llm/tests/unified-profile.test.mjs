@@ -8,14 +8,15 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { admit } from '../src/controller/admission.mjs';
-import { loadSeedCatalog, validateModel } from '../src/controller/catalog.mjs';
-import { createController, dropPageCache, readImageContract } from '../src/controller/deployments.mjs';
-import { UNIFIED, envelopeFor, profileOf } from '../src/controller/profiles.mjs';
-import { createLogBuffer, startRunnerProcess } from '../src/controller/runnerProcess.mjs';
-import { createStateStore } from '../src/controller/stateStore.mjs';
-import { llamaCppRunner } from '../src/runners/llamaCpp.mjs';
-import { getRunner } from '../src/runners/index.mjs';
+import { createStateStore, validateModel } from 'pworker/local-llm';
+import { dropPageCache } from 'pworker/local-llm/internal/controller/deployments.mjs';
+import { UNIFIED, envelopeFor, profileOf } from 'pworker/local-llm/internal/controller/profiles.mjs';
+import { createLogBuffer, startRunnerProcess } from 'pworker/local-llm/internal/controller/runnerProcess.mjs';
+
+import {
+    createAgentController as createController, getRunner, llamaCppRunner, loadSeedCatalog, readImageContract,
+} from '../src/engineOptions.mjs';
+import { admit } from '../src/hardwareLimits.mjs';
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
@@ -91,7 +92,8 @@ test('llama.cpp on unified memory: the envelope flags are fixed, the admin choos
 });
 
 test('unified threads default to the high-performance cores, else physical cores minus 2', async () => {
-    const { createLlamaServerRunner, LOAD_MODES } = await import('../src/runners/llamaServer.mjs');
+    const { createLlamaServerRunner } = await import('../src/engineOptions.mjs');
+    const { LOAD_MODES } = await import('pworker/local-llm/internal/runners/llamaServer.mjs');
     const make = (perf) => createLlamaServerRunner({
         id: 'llama.cpp', displayName: 'llama.cpp', executable: '/x', pinnedVersion: 'b1', port: 18080,
         dialect: { quietArgs: [], unifiedKv: true, loadModes: LOAD_MODES, loadArgs: () => [], jinja: () => false, parseVersion: () => null, unified: true },

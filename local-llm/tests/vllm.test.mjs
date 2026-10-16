@@ -5,11 +5,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { admit } from '../src/controller/admission.mjs';
-import { loadSeedCatalog } from '../src/controller/catalog.mjs';
-import { defaultPorts } from '../src/runners/index.mjs';
-import { ParamError } from '../src/runners/params.mjs';
-import { vllmRunner } from '../src/runners/vllm.mjs';
+import { ParamError } from 'pworker/local-llm/internal/runners/params.mjs';
+
+import { defaultPorts, loadSeedCatalog, vllmRunner } from '../src/engineOptions.mjs';
+import { admit } from '../src/hardwareLimits.mjs';
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
@@ -224,8 +223,8 @@ test('admission: an admin-set GPU share that can never fit is incompatible, not 
 });
 
 test('a vLLM Run reaches ready through the controller, launched with the GPU share admission computed', async (t) => {
-    const { createController } = await import('../src/controller/deployments.mjs');
-    const { createStateStore } = await import('../src/controller/stateStore.mjs');
+    const { createAgentController: createController } = await import('../src/engineOptions.mjs');
+    const { createStateStore } = await import('pworker/local-llm');
     const fs = await import('node:fs');
     const os = await import('node:os');
     const path = await import('node:path');

@@ -17,10 +17,11 @@ The specifications are the source of truth: [`local-llm/docs/specs/matrix.md`](l
 ## Tests
 
 ```sh
+npm --prefix local-llm ci
 node --test 'local-llm/tests/*.test.mjs'
 ```
 
-No Docker, GPU or network is required.
+The install fetches the pinned `pworker` engine package from GitHub, so it needs the network and `git`. The tests after it need no Docker, GPU or network.
 
 ## Retired agents
 

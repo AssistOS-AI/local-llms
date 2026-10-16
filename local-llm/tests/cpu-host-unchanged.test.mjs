@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
-import { createController } from '../src/controller/deployments.mjs';
-import { loadSeedCatalog } from '../src/controller/catalog.mjs';
-import { readGpu, readSnapshot } from '../src/controller/hardware.mjs';
+
+import { createAgentController as createController, loadSeedCatalog, readGpu, vulkanContractOf } from '../src/engineOptions.mjs';
+import { readSnapshot } from '../src/hardwareLimits.mjs';
 import { collectCpuOverview, cpuFs, VULKAN_KEYS } from './overview-cpu-scenarios.mjs';
-import { vulkanContractOf } from '../src/controller/vulkan.mjs';
 
 const golden = JSON.parse(fs.readFileSync(new URL('./overview-cpu-golden-b2b387f.json', import.meta.url), 'utf8'));
 for (const arch of ['x64', 'arm64']) for (const vulkanKeys of [false, true]) {

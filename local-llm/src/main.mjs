@@ -11,8 +11,8 @@ import { join } from 'node:path';
 
 import { controllerHandlers } from './controlHandlers.mjs';
 import { newControlChannel, startControlServer } from './controlSocket.mjs';
-import { createController } from './controller/deployments.mjs';
 import { AGENT_SERVER_KILL_MS, DRAIN_DEADLINE_MS } from './drainBudget.mjs';
+import { createAgentController } from './engineOptions.mjs';
 
 
 // The control channel is new on every start: an abstract socket name (tests
@@ -78,7 +78,8 @@ for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
 }
 
 const startup = (async () => {
-    controller = createController({ dataDir: process.env.LOCAL_LLM_DATA_DIR || '/data' });
+    // The host reads LOCAL_LLM_DATA_DIR (default /data) and the other path overrides from the environment.
+    controller = createAgentController();
     control = await startControlServer({
         socketPath,
         token: channel.token,

@@ -11,15 +11,14 @@ import path from 'node:path';
 import test from 'node:test';
 import zlib from 'node:zlib';
 
+import { createStateStore, loadRunnerLocks, validateModel } from 'pworker/local-llm';
+import { DownloadError, downloadFile } from 'pworker/local-llm/internal/controller/downloader.mjs';
+import { fetchOllamaRegistryManifest, manifestPath, readOllamaManifest } from 'pworker/local-llm/internal/controller/ollamaStore.mjs';
+import { archiveCompression, loadRunnerLock, validateRunnerLock } from 'pworker/local-llm/internal/controller/runnerLock.mjs';
+
+import { agentRunnerLockFile } from '../src/agentHost.mjs';
+import { createAgentController as createController, createRunnerInstaller, RUNNERS } from '../src/engineOptions.mjs';
 import { installMessage, runnersPanelHtml } from '../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-view.js';
-import { validateModel } from '../src/controller/catalog.mjs';
-import { createController } from '../src/controller/deployments.mjs';
-import { DownloadError, downloadFile } from '../src/controller/downloader.mjs';
-import { fetchOllamaRegistryManifest, manifestPath, readOllamaManifest } from '../src/controller/ollamaStore.mjs';
-import { createRunnerInstaller } from '../src/controller/runnerInstaller.mjs';
-import { agentRunnerLockFile, archiveCompression, loadRunnerLock, loadRunnerLocks, validateRunnerLock } from '../src/controller/runnerLock.mjs';
-import { createStateStore } from '../src/controller/stateStore.mjs';
-import { RUNNERS } from '../src/runners/index.mjs';
 import { manifestBytes, registry, sha256 } from './ollama-fixture.mjs';
 
 const SHA = (buffer) => crypto.createHash('sha256').update(buffer).digest('hex');
@@ -149,6 +148,8 @@ test('the runner-lock check is needed for a change to a lock, the workflow, or a
         'local-llm/src/controller/deployments.mjs', 'local-llm/src/controller/sub/deeper.mjs',
         'local-llm/src/runners/ollama.mjs', 'local-llm/src/runners/llamaServer.mjs', 'local-llm/src/errors.mjs',
         'local-llm/tools/runner_install_check.mjs', 'local-llm/tools/local_llm_tool.mjs', '.github/workflows/runner-lock-check.yml',
+        // The engine package the check imports: its pin, the lock of its resolution, the file that controls its install and the binding the tool loads.
+        'local-llm/package.json', 'local-llm/package-lock.json', 'local-llm/.npmrc', 'local-llm/src/agentHost.mjs',
     ]) {
         assert.equal(needed(t, { event: 'pull_request', changed: [file] }), 'needed=true', file);
     }
@@ -166,6 +167,28 @@ test('the runner-lock check is needed for a change to a lock, the workflow, or a
     assert.equal(needed(t, { event: 'pull_request', changed: ['README.md', 'local-llm/src/controller/downloader.mjs'] }), 'needed=true');
     assert.equal(needed(t, { event: 'workflow_dispatch', changed: ['README.md'] }), 'needed=true');
     assert.equal(needed(t, { event: 'pull_request', changed: [], commits: 1 }), 'needed=true');
+});
+
+test('a change to only the engine pin or its install settings runs the check, which the pattern from before the engine moved would not', {
+    skip: !repositoryRoot && 'the repository root is not mounted, so its .github directory is not here',
+}, () => {
+    // The Detect pattern of 34f8f498, when the engine was part of this tree.
+    const before = new RegExp('^(local-llm/src/(controller|runners)/.+|local-llm/src/(errors|drainBudget)\\.mjs|local-llm/tools/.+|local-llm/catalog/runners\\.lock\\.linux-[a-z0-9]+\\.json|\\.github/workflows/runner-lock-check\\.yml)$');
+    const now = new RegExp(/grep -z -E '([^']+)' "\$list"/.exec(fs.readFileSync(WORKFLOW, 'utf8'))[1]);
+    for (const file of ['local-llm/package.json', 'local-llm/package-lock.json', 'local-llm/.npmrc', 'local-llm/src/agentHost.mjs']) {
+        assert.equal(before.test(file), false, `${file} did not run the check before`);
+        assert.equal(now.test(file), true, `${file} runs the check now`);
+    }
+});
+
+test('the workflow installs the engine package on the runner from the committed lock before the tree is mounted into the container', {
+    skip: !repositoryRoot && 'the repository root is not mounted, so its .github directory is not here',
+}, () => {
+    const text = fs.readFileSync(WORKFLOW, 'utf8');
+    const install = text.indexOf('npm --prefix local-llm ci');
+    assert.ok(install > 0 && install < text.indexOf('docker run --rm'), 'npm ci comes before the container that mounts local-llm');
+    assert.doesNotMatch(text, /npm --prefix local-llm install/, 'the lock decides what is installed, never a resolution of the day');
+    assert.match(text, /test -z "\$\(find local-llm\/node_modules -type l\)"/, 'the mounted tree holds no link');
 });
 
 test('a grep or a git that fails runs the check: the only way to "not needed" is a diff that was read with no such file in it', {
@@ -205,20 +228,32 @@ test('every file the install check loads is one whose change runs it', {
     // The static import closure of the tool, in the agent's own source.
     const root = new URL('../', import.meta.url).pathname;
     const seen = new Set();
+    // The packages it imports by name: the engine is one, pinned by the package files and installed under the control of .npmrc.
+    const packages = new Set();
     const visit = (file) => {
         if (seen.has(file)) return;
         seen.add(file);
-        for (const match of fs.readFileSync(file, 'utf8').matchAll(/(?:import|export)[^'"]*?from\s+['"](\.[^'"]+)['"]|import\(\s*['"](\.[^'"]+)['"]\s*\)/g)) {
+        const text = fs.readFileSync(file, 'utf8');
+        for (const match of text.matchAll(/(?:import|export)[^'"]*?from\s+['"](\.[^'"]+)['"]|import\(\s*['"](\.[^'"]+)['"]\s*\)/g)) {
             visit(path.resolve(path.dirname(file), match[1] ?? match[2]));
+        }
+        for (const match of text.matchAll(/(?:import|export)[^'"]*?from\s+['"]([^.'"][^'"]*)['"]|import\(\s*['"]([^.'"][^'"]*)['"]\s*\)/g)) {
+            const specifier = match[1] ?? match[2];
+            if (!specifier.startsWith('node:')) packages.add(specifier.split('/')[0]);
         }
     };
     visit(path.join(root, 'tools', 'runner_install_check.mjs'));
-    assert.ok(seen.size >= 8, [...seen].join());
+    assert.ok(seen.size >= 2, [...seen].join());
     for (const file of seen) {
         assert.ok(pattern.test(`local-llm/${path.relative(root, file)}`), `${path.relative(root, file)} is loaded by the install check and must run it`);
     }
-    // And what the locks name as launch files is launched by the adapters.
-    for (const file of ['local-llm/src/runners/ollama.mjs', 'local-llm/src/runners/llamaServer.mjs', 'local-llm/src/runners/llamaCpp.mjs']) assert.ok(pattern.test(file), file);
+    // A package the check imports is pinned by the package files, and .npmrc decides how it is installed: a change to any of them runs the check.
+    assert.ok(packages.has('pworker'), [...packages].join());
+    for (const file of ['local-llm/package.json', 'local-llm/package-lock.json', 'local-llm/.npmrc']) assert.ok(pattern.test(file), `${file} pins or installs ${[...packages].join()} and must run the check`);
+    // And what the locks name as launch files is launched by the adapters, which are in the pinned package.
+    for (const adapter of ['ollama', 'llamaServer', 'llamaCpp']) {
+        assert.ok(fs.existsSync(new URL(import.meta.resolve(`pworker/local-llm/internal/runners/${adapter}.mjs`))), adapter);
+    }
 });
 
 test('a change list far bigger than a pipe buffer still runs the check when the name that matters sorts first', {
@@ -234,7 +269,6 @@ test('a change list far bigger than a pipe buffer still runs the check when the 
     // A list that big with nothing in it that matters is, correctly, not needed.
     assert.equal(needed(t, { event: 'pull_request', changed: ['README.md'], filler }), 'needed=false', 'nothing that matters');
 });
-
 
 // ---------------------------------------------------------------- the two locks
 

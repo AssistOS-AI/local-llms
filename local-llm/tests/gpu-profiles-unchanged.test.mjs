@@ -9,11 +9,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
-import { validateModel } from '../src/controller/catalog.mjs';
-import { createController } from '../src/controller/deployments.mjs';
-import { createRunnerInstaller } from '../src/controller/runnerInstaller.mjs';
-import { agentRunnerLockFile, loadRunnerLocks } from '../src/controller/runnerLock.mjs';
-import { createStateStore } from '../src/controller/stateStore.mjs';
+import { createStateStore, loadRunnerLocks, validateModel } from 'pworker/local-llm';
+
+import { agentRunnerLockFile } from '../src/agentHost.mjs';
+import { createAgentController as createController, createRunnerInstaller } from '../src/engineOptions.mjs';
 import { OLLAMA_RUN_SCENARIOS, SCENARIOS, collectOllamaRuns, collectOverviews } from './overview-scenarios.mjs';
 
 const golden = JSON.parse(fs.readFileSync(new URL('./overview-golden-a84617d.json', import.meta.url), 'utf8'));

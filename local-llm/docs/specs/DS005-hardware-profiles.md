@@ -1,13 +1,13 @@
 ---
 title: DS005-hardware-profiles
-summary: NVIDIA dedicated and unified memory, CPU fallback, discrete AMD Vulkan, experimental shared-memory AMD APU and Apple Venus profiles, their detection, admission and memory guards.
+summary: The hardware profiles the agent runs (NVIDIA dedicated and unified, CPU, discrete AMD Vulkan, experimental shared-memory APU, Apple Venus), how the container's limits narrow them, the memory guard, the GPU share and its vLLM qualification, and the dashboard; the engine's detection, admission and estimates are in the pinned pworker specification.
 ---
 
 # DS005 Hardware Profiles
 
 ## Introduction
 
-One agent, `local-llms/local-llm`, chooses a hardware profile from the attached GPU and runtime contract. NVIDIA GPUs keep the dedicated or unified CUDA policy. A discrete AMD Radeon GPU uses Vulkan RADV. An AMD integrated GPU can use the experimental APU policy behind an operator switch. An Apple GPU uses Vulkan Venus inside a libkrun Podman machine. A host with no usable GPU uses the CPU. Each policy has its own memory accounting and safety rules. The JavaScript is the same on every architecture; only the image's binaries and runner lock differ.
+One agent, `local-llms/local-llm`, chooses a hardware profile from the attached GPU and runtime contract. NVIDIA GPUs keep the dedicated or unified CUDA policy. A discrete AMD Radeon GPU uses Vulkan RADV. An AMD integrated GPU can use the experimental APU policy behind an operator switch. An Apple GPU uses Vulkan Venus inside a libkrun Podman machine. A host with no usable GPU uses the CPU. Each policy has its own memory accounting and safety rules. The JavaScript is the same on every architecture; only the image's binaries and runner lock differ. The profiles themselves (detection, the choice of profile, each policy's parameters, estimates and admission, and the memory guard's engine) belong to the engine in the Ploinky-Worker repository (pworker), which this repository pins (DS001), and are specified in [pworker DS005](https://github.com/AssistOS-AI/Ploinky-Worker/blob/64aa8a0c0e4e918c05f3f0264b45438652f67a6c/docs/specs/DS005-hardware-profiles.md) at commit `64aa8a0c0e4e918c05f3f0264b45438652f67a6c`. This specification keeps what is the agent's: the profile table, what the container's limits change in each profile, the memory guard as the agent runs it, the Ploinky GPU share and its vLLM qualification, the operator switches and the dashboard.
 
 ## Core Content
 
@@ -22,248 +22,42 @@ One agent, `local-llms/local-llm`, chooses a hardware profile from the attached 
 | `venus` | Apple GPU reached through Venus, outside the VM's memory accounting | Provisional device cap plus a conservative VM staging pool |
 | `apu` | Integrated RADV, `memoryModel: shared`, default off and unqualified | One physical RAM pool for device and host bytes, with separate mapping ceilings and no finite or unknown container budget |
 
-The dedicated profile keeps DS003's admission and defaults. Some changes made for the unified profile apply to both (catalog v3, `loadMode`, the runner's OOM priority and JIT cache location, runner availability from the image); they are marked where they are described. The `cpu` profile is chosen automatically; no operator switch, catalog entry or parameter turns it on or off.
+The dedicated profile keeps the engine's admission and defaults (pworker DS003 and DS005), narrowed by the container's limits (DS003 here). The `cpu` profile is chosen automatically; no operator switch, catalog entry or parameter turns it on or off.
 
-### Detecting the memory model
+### Where the engine specifies the profiles
 
-Vulkan detection runs only after NVIDIA is absent and a character render node is present. The image's source contract must have `vulkan_contract=1`, a pinned llama.cpp version, the exact Vulkan server and vulkaninfo paths, a bounded Mesa version, and normalized absolute JSON ICD paths under `/opt/local-llm/vulkan/icd.d/`. Missing or invalid keys make the render node unusable. Only `DRIVER_ID_MESA_RADV` and `DRIVER_ID_MESA_VENUS` are accepted; CPU and software devices and multiple accepted devices are refused. Integrated RADV remains unusable until the exact APU switch is enabled. A usable snapshot chooses `vulkan` for dedicated RADV, `apu` for shared RADV and `venus` for Venus before the CUDA compute-capability check. Venus is identified by its driver, even though its device type is integrated. The NVIDIA success path and ordinary CPU overviews and profile log lines retain their previous behavior.
-
-### Vulkan and Venus admission
-
-Only `llama.cpp-vulkan` has policies for these profiles. Other runners return a reason directing the administrator to the Vulkan build. A configured GPU share is refused with `gpu_share_unsupported`; Vulkan runners receive no MPS environment. If the device disappears after the profile is committed, Run is refused with a restart hint. A restart can then select the CPU.
-
-RADV reuses the dedicated CUDA estimates, with a warning that AMD support is unit-tested only and has not been measured on Vulkan. Its launch adds `--device Vulkan0` to dedicated tuning. The Vulkan catalog uses models declared for the dedicated profile; Venus uses CPU models. Stored catalog profile declarations remain unchanged.
-
-Venus exposes `ctxSize` 512 to 131072, default 4096, `parallel` 1 to 4, default 1, and load mode `auto` or `none`. Its launch fixes Vulkan0, all GPU layers, automatic flash attention, f16 K and V caches, high-performance CPU threads, batch and micro-batch 512, and cache RAM 256 MiB. Above one slot it uses a unified KV cache.
-
-Venus device need is the pinned weights plus f16 KV for context times parallel slots, the existing compute estimate with flash attention assumed off, and 256 MiB device overhead. It must fit the smaller of 2 GiB and 25 percent of the reported heap total. Above this provisional cap it is incompatible. Above reported free bytes it is insufficient-now. Reported free memory is an upper bound only: the VM cannot see the Mac's free memory, so device headroom remains unknown. Admission separately reserves VM RAM for a possible weights staging copy, 512 MiB runtime and 256 MiB prompt cache, applying the CPU pool's host reserve and floor and any finite container limit. The memory guard watches Venus as a pooled profile every 250 ms with the admission's floor. It can observe VM pressure, not host Apple GPU pressure.
-
-The 2 GiB cap is provisional. On the 16 GiB M1, the 6 GiB VM plus the cap reaches about half of host RAM. No dynamic Vulkan memory budget is used for admission. Captured live evidence is still required before claiming Apple runtime validation; AMD remains unverified until measured on a real discrete Radeon GPU.
-
-The dashboard names AMD Vulkan and Apple Venus explicitly. RADV shows its unverified hardware status. Venus shows unknown headroom, the provisional cap and VM memory. A CPU fallback decision with `gpuBackend=vulkan` names the Vulkan GPU; CPU decisions without a known backend use generic GPU wording. Runner reports read Vulkan0 model, KV and compute buffers and nested device names only on these profiles; CUDA reports retain their existing parser.
-
-### Experimental AMD APU policy
-
-`LOCAL_LLM_AMD_APU=experimental` is read once from the controller's environment, passed through `readSnapshot({ apu })` and applied in `readVulkanGpu({ apuEnabled })`. The default is false. With the switch off the GPU keeps the existing unavailable snapshot shape and selects `cpu`, cause `unusable`; the reason names the operator command. With it on, integrated RADV must still pass the unique Vulkan0 device-name and safe-byte checks. Its driver is `radv`, memory model `shared`. Finite or unknown `memoryBudgetOf` observations refuse it at discovery and at admission. Container limits have not been proven to charge GTT allocations.
-
-Only `llama.cpp-vulkan` has `admitApu`. The CPU catalog determines eligibility, while APU recommendations are empty. The schema accepts only `ctxSize`, 512 to 131072 with default 4096, and `parallel`, 1 to 4 with default 1. Parameters such as GPU layers, threads or load mode cannot override the fixed launch. The launch uses `--device Vulkan0 -ngl 999 --fit off --flash-attn auto -ctk f16 -ctv f16`, high-performance threads, `-np`, unified KV above one slot, batch and micro-batch 512, prompt cache 256 MiB and `--load-mode none`. RADV's ICD is selected explicitly. Runner environment excludes MPS, the switches, tokens and other agent secrets; the Mesa cache remains outside `/data`.
-
-The provisional constants in `APU` are:
-
-| Constant | Value |
+| Topic | Specification |
 | --- | --- |
-| `stagingFactor` | 1.0 |
-| `runtimeBytes` | 1 GiB |
-| `deviceOverheadBytes` | 256 MiB |
-| `deviceTotalFraction` | 0.9 |
-| `deviceMarginBytes` | 512 MiB |
-| `cacheRamMiB` | 256 |
-| `batchSize` | 512 |
-| `guardSampleMs` | 250 ms |
-| `guardStaleMs` | 2000 ms |
-| `minModelBufferFraction` | null, pending hardware captures and review |
+| Detecting the memory model, Vulkan and Venus detection, the unified-memory table and the states of an unavailable GPU | pworker DS005 and DS003 |
+| Choosing the profile with `decideProfile`, the 60 s wait for an unreadable GPU, the committed profile | pworker DS005 |
+| llama.cpp, Ollama and vLLM on unified memory, on the CPU and on Vulkan; CPU, Venus and unified admission with their reserves, floors and constants | pworker DS005 |
+| The APU policy, its constants, the constraints C1, C2 and C4, its offload proof, and the activity and guard observations | pworker DS005 |
+| CPU threads and performance cores | pworker DS005 (the quota cap is below) |
+| Venus measurement status and the CPU fallback explanation | pworker DS005 |
 
-`deviceBytes` is pinned weights plus f16 KV for context times parallel slots plus fixed KV bytes, the compute estimate with flash attention assumed off, and device overhead. `needLoadPeak` is `deviceBytes + stagingFactor × weights + runtimeBytes + cacheRamBytes`. This counts device bytes once in physical RAM. The BIOS carve-out gives no credit. Vulkan total and free values constrain mappings; they never represent extra RAM or available CPU headroom.
+The engine's text is the one this specification used to hold, with the container's limits taken out. Where it says "the host's limits", this repository's plug-in is meant (DS003).
 
-| Constraint | Permanent refusal | Temporary refusal |
-| --- | --- | --- |
-| C1 physical RAM | Peak exceeds `cpuPool.totalBytes - cpuHostReserveBytes`; unreadable or contradictory meminfo | Peak exceeds `cpuPool.availableBytes - cpuFloorBytes` |
-| C2 mappings | Device need exceeds `deviceTotalFraction × gpu.totalBytes`; unreadable or contradictory device bytes | Device need exceeds `gpu.freeBytes - deviceMarginBytes` |
-| C3 budget | Finite container budget, not proven to constrain shared GPU pages | Unknown budget gives `budget_unreadable` |
-| C4 disk | No separate permanent refusal | Remaining download bytes plus 5 percent exceed free disk |
+### Operator switches and wording
 
-Admission returns `estimate.constraint` on APU C1-C4 refusals, `measured: false`, and an experimental, unqualified warning. Every Run repeats admission from a fresh snapshot before launch. After commitment, missing GPUs and driver or shared/dedicated memory-model changes refuse Runs with restart guidance. No allocation error, pressure stop or failed offload proof retries on CPU. Clearing the switch or revoking GPU access and restarting is the rollback. Retained APU deployment records in paused, idle or error remain records and never launch automatically.
-
-The pooled guard samples MemAvailable in every phase, stops immediately when meminfo is unreadable or below the admission floor, and applies the existing PSI rule, full avg10 at least 50 percent with available memory below twice the floor. A monotonic successful-sample gap over 2000 ms kills the process group with `stopped: memory telemetry stale`. Wall-clock jumps do not trigger staleness. `guardStats.maxMonotonicGapMs` records the largest gap. A finite or unknown budget observed during a run also stops it.
-
-A floor breach supplies a typed `host-memory-floor` cause with sampled bytes. The current APU launch's `guardStop` binds those bytes and the existing floor log sequence to the controller instance, deployment, request and process. It records the monotonic kill invocation immediately before calling the captured process object's kill, then records resolved or rejected settlement. The event remains through error or idle until another launch resets it. A delayed callback from an older launch cannot publish into a newer one. Staleness, PSI and unreadable-memory stops do not become floor events by matching log text. L10 requires elapsed invocation time from launch in the inclusive range 0 to 1000 ms, resolved valid settlement, deployment error with the floor cause, independently observed group absence and an untripped host guard. Late, unsettled or rejected observations remain nonPASS.
-
-`LOCAL_LLM_APU_GUARD_FLOOR_BYTES` is an optional raise-only test setting. A decimal safe integer at least as large as the admission floor sets the runtime floor to their maximum. Malformed, unsafe or lower values are ignored with a warning in the overview and log. It never changes admission, `estimate.floorBytes` or the dashboard floor, and it affects only APU guards. A floor above MemTotal exercises the runtime kill without making the Run incompatible at admission.
-
-Readiness requires a Vulkan0 device line, complete positive layer counts as a sanity check, positive Vulkan0 KV bytes and positive Vulkan0 model bytes. Layer counts alone echo the requested offload and cannot prove placement. The per-launch `createReportCollector` receives redacted runner lines before ring-buffer eviction; it sums every matching KV and model buffer and keeps the first device and offload facts. It has constant memory use, resets for each launch and cannot reuse late output from a previous launch. A failed check kills the group and records error `gpu_offload_unproven` with observed values. The controller never marks that deployment ready or retries on CPU.
-
-Status and overview report the observed Vulkan0 model-byte ratio and its denominator. The current bounded GGUF sizing reader and catalog expose no token-embedding tensor byte length, so the denominator is the full pinned weight size, labelled explicitly. `minModelBufferFraction` remains null until a reviewed capture-based decision sets it; current positive-buffer proof does not qualify hardware. The dashboard names the integrated APU, experimental status, shared physical memory, admission floor, observed ratio and ignored guard-floor warnings.
-
-Qualification requires owner-authorized captures showing UMA buffer names and that GTT allocations lower MemAvailable, plus all functional, refusal, pressure and cancellation cases on the exact candidate with the reviewed model-buffer fraction enforced. Readable GTT telemetry alone does not prove the guard's signal. Pre-Vega GCN identifiers such as Kaveri, Carrizo, Stoney or Bristol receive an untested warning when their names identify them, but family detection never refuses a device. No family or tuple is qualified yet; ROCm/HIP and `/dev/kfd` remain outside this profile.
-
-The controller exposes APU-only activity observations for L9, including lifetime and active counts for model jobs, runner installs and every model lookup. GGUF header acquisition goes through the counted lookup boundary. A genuine initial refusal includes its validated request/configuration and before/after observations under a fresh attempt UUID. Unchanged counters across complete valid same-controller snapshots, no active operations and independent process absence derive zero model/runner-artifact acquisition by proving no acquisition entry. This is not a measurement of network bytes. Any started or overlapping operation, overflow, missing reading or instance change prevents certification. Accepted replay and unrelated errors cannot supply a refusal receipt.
-
-L11 still requires the actual load marker and continuous current-launch sequence through idle. HTTP 503 startup observations cannot replace that marker. The opt-in `observedPrompt` operation supplies first-token and Stop observations, but APU L12 adoption still requires reviewed inference-request, deployment and runner binding, bounded concurrent routed execution, Stop-caused settlement and independent process-group absence. L12 remains explicit pending with `server-generation-observation-unavailable`. A ready-runner Stop test proves only ready-runner cancellation. Functional discovery, no-entry receipts and guard invocation observations cannot qualify a tuple while L12 or any other required case is pending.
-
-### NVIDIA memory detection
-
-The hardware snapshot (`src/controller/hardware.mjs`) keeps its first nvidia-smi query unchanged (`name,memory.total,memory.used,memory.free,driver_version`). A second, optional query reads `pci.device_id,compute_cap,addressing_mode,utilization.gpu,power.draw,temperature.gpu`; when it fails (an older driver, an unknown field) the GPU keeps its first-query values and only these facts are missing. Utilization, power and temperature are telemetry: a value of `[N/A]` (laptop GPUs report `power.draw` so) becomes null and never disables the GPU.
-
-| Memory figures | Device facts | Memory model |
-| --- | --- | --- |
-| any | PCI device id on the known-unified list (`0x2E1210DE`, NVIDIA GB10) | `unified`, also for a future driver that reports numbers |
-| all three numeric | not on the list | `dedicated` (GH200 reports ATS addressing with numeric HBM and is dedicated) |
-| any not numeric (`[N/A]`, `Not Supported`, empty) | addressing mode `ATS` or `HMM` | `unified` |
-| any not numeric | the second query answered, but with no `ATS` or `HMM` addressing and not on the known-unified list | unusable: models run on the CPU (`cpu` profile) |
-| any not numeric | the second query failed | unreadable: the profile waits (Choosing the profile) |
-
-Every unavailable GPU also says why (`gpu.state`):
-
-| State | When |
-| --- | --- |
-| `absent` | nvidia-smi is not in the container (Ploinky attached no GPU; its `PLOINKY_GPU_REASON` is kept) |
-| `unusable` | the row above |
-| `unreadable` | nvidia-smi fails or times out, reports no GPU, or its device query fails |
-
-A usable GPU carries no state. A snapshot without a state is treated as unreadable.
-
-The memory model is never inferred from the CPU architecture. On a unified GPU the snapshot's `totalBytes`, `usedBytes` and `freeBytes` are null; the pool is `memory.totalBytes` and `memory.availableBytes` from `/proc/meminfo`, which also gives `freeBytes` (MemFree) and `cachedBytes` (Cached) for display. Nothing sizes from `cudaMemGetInfo`: on GB10 it reports MemFree, not MemAvailable (48.2 GiB "free" while 106.3 GiB was available, measured 2026-09-28), and CUDA allocations reclaim clean page cache. Per-process GPU use (`--query-compute-apps`) stays numeric on GB10 and is shown as before.
-
-Measured on DGX Spark (driver 580.159.03): `NVIDIA GB10, [N/A], [N/A], [N/A], 580.159.03` and `0x2E1210DE, 12.1, ATS, 0, 4.52, 47`.
-
-
-### CPU threads
-
-On a CPU whose cores differ in capacity (sysfs `cpu_capacity`), `performanceCoreCount()` counts the allowed CPUs within 10 % of the highest capacity: 10 on DGX Spark (Cortex-X925 at 997–1024, Cortex-A725 at 718–731). When capacities are equal or not reported it returns null. The dedicated default thread count (physical cores minus 2, DS003) is unchanged. On the CPU profile the default is the high-performance cores where cores differ. Otherwise it is the physical cores minus 1 on hosts with four cores or fewer, and minus 2 above that (`cpuDefaultThreads`). A cgroup CPU quota caps it. On the 4-CPU Podman machine of a 16 GiB Mac this gives 3 (4 − 1; no CPU quota is set there).
+The switches are read from the controller's environment when they matter, and no model entry, parameter or saved value can set one (DS001): `LOCAL_LLM_AMD_APU=experimental` enables the APU profile (an integrated GPU otherwise selects `cpu`, cause `unusable`), `LOCAL_LLM_VLLM_UNIFIED=experimental` enables vLLM on unified memory (`ploinky var LOCAL_LLM_VLLM_UNIFIED experimental`, then a restart of local-llm; DS001, DS004), `LOCAL_LLM_LMSTUDIO=internal-use` enables LM Studio (DS000), and `LOCAL_LLM_APU_GUARD_FLOOR_BYTES` raises the APU guard's runtime floor. The last is an optional raise-only test setting: a decimal safe integer at least as large as the admission floor sets the runtime floor to their maximum, malformed, unsafe or lower values are ignored with a warning in the overview and log, and it never changes admission, `estimate.floorBytes` or the dashboard floor. A floor above MemTotal exercises the runtime kill without making the Run incompatible at admission. The sentences that tell an operator what to run (`ploinky var ...`, `ploinky gpu grant --agent local-llms/local-llm`, a restart of local-llm) are this agent's wording, in `src/ploinkyMessages.mjs`; the engine's own defaults are neutral, and `tests/ploinky-wording.test.mjs` holds every key to the text it replaced.
 
 ### Runner availability and the image's GPUs
 
 The image says what it contains: `/opt/local-llm/source.contract` (key=value lines). When it exists, a runner is available only if its executable is in the image (llama.cpp, ik_llama.cpp, Ollama) or the image's runner lock lists it (vLLM, TabbyAPI, LM Studio; DS004). An unavailable runner is `supported: false` in the overview with "not available on this platform: this image does not include it", and `local_llm_run` refuses it with `runner_unavailable` before anything downloads. Without a contract (tests, development) every runner counts as available. The arm64 image's contract names `gpu_compute_capabilities=12.1`, the GPUs its CUDA runners were built for; a GPU that reports another compute capability decides the `cpu` profile, and the Compute card and every CPU admission say why. This changes today's refusal on arm64 hosts with other NVIDIA GPUs, for example Thor or GH200. A GPU that does not report its capability counts as unreadable (Choosing the profile). The amd64 image names none and nothing is checked there. Phase 3: on the `cpu` profile the agent's runner lock (DS004) may also make a runner available, Ollama on arm64 and llama.cpp's CPU build on both architectures, when the runner has a CPU policy and the image does not already hold its executable. On the dedicated and unified profiles it makes none, so those profiles show the runners they always did, and a runner that names the profiles it serves (llama.cpp's CPU build serves `cpu`) is not listed on any other.
 
-### Choosing the profile
+### What the container's limits change
 
-The controller decides the profile with `decideProfile` (`src/controller/profiles.mjs`) from every snapshot it takes while the profile is undecided: the overview's, `local_llm_status`'s (one snapshot), a Run's, and an install's. It logs the decision (`hardware profile: cpu (absent: …)`) and keeps it for the container's lifetime. The overview and status report it as `profile` and `profileDecision` (cause and reason).
+The engine applies no limit. These are the effects of the limits plug-in (`src/hardwareLimits.mjs`, DS003) on the profiles, using the engine's hook names (pworker DS007).
 
-| Snapshot | Profile |
+| Profile | Effect |
 | --- | --- |
-| A usable NVIDIA GPU that the image supports | `dedicated` or `unified` |
-| A usable RADV discrete GPU or Venus device with a valid Vulkan contract | `vulkan` or `venus`; CUDA compute-capability constraints do not apply |
-| Integrated RADV with the experimental switch, valid contract and no finite or unknown budget | `apu`; CUDA compute-capability constraints do not apply |
-| A usable GPU that reports a compute capability the image's CUDA runners were not built for | `cpu` (cause `mismatch`) |
-| `absent` or `unusable` | `cpu`, at once |
-| `unreadable`, or a usable GPU that does not report its capability on an image that lists capabilities | undecided; `cpu` (cause `unreadable-timeout`) once 60 s have passed since the first such snapshot |
+| `cpu` | The pool (MemTotal and MemAvailable from `/proc/meminfo`) is at most the container's memory limit (cgroup `memory.max`), and what is available now is at most the limit less `memory.current` (`memoryPool`), with the warning that a container memory limit applies. Admission refuses, temporarily, a finite limit whose current use cannot be read. The default thread count is capped by the cgroup CPU quota (`capCores`): on the 4-CPU Podman machine of a 16 GiB Mac the default is 3 (4 minus 1) because no CPU quota is set there. |
+| `unified` | The default threads are capped by the CPU quota. Absolute RAM admission remains capped by a finite container budget, while the experimental vLLM utilization keeps the physical MemTotal as its denominator. |
+| `venus` | The VM staging reserve applies the CPU pool's host reserve and floor and any finite container limit. |
+| `vulkan` | A configured GPU share is refused with `gpu_share_unsupported`, and Vulkan runners receive no MPS environment. |
+| `apu` | A finite container budget is not proven to constrain shared GPU pages, so it is refused (below). |
 
-A readable snapshot resets that wait. A cold nvidia-smi therefore never locks a GPU host into the CPU profile, and a GPU that stays unreadable does not stop the agent from running. A stop is not a missing GPU: a snapshot cut short because the agent is draining, or because a Run was stopped, counts as no snapshot at all. It neither advances the wait nor decides the profile, so a status or an install that meets a shutdown leaves the profile as it was.
-
-While the profile is undecided:
-
-- the overview's rows use the dedicated defaults for display, and none is admitted;
-- `local_llm_run` refuses with `admission_incompatible`: "… the hardware profile is not decided; run again once the GPU can be read. If the GPU is still unreadable 60 s after the first failed read, the next Run uses the CPU."
-
-Nothing is recorded, so the same request can be sent again.
-
-A Run is normalized, admitted, launched and guarded under one committed profile, which the deployment records (`deployment.profile`). A later snapshot that disagrees is not acted on:
-
-- Under `dedicated` or `unified`, a GPU that is no longer usable refuses every Run as `incompatible`. When the snapshot shows positive evidence (no nvidia-smi at all, or a GPU that cannot be used) the refusal says to restart local-llm, which then decides `cpu`. When the GPU is merely unreadable the refusal gives the GPU's own reason and no hint: the failure may be transient, and a restart during it could lock a GPU host into `cpu`.
-- Under `cpu`, when the cause was `unreadable-timeout` and the GPU has since become usable, every admission warns that a restart would use it. Runs continue on the CPU.
-
-The catalog's `profiles` decide which models are offered. Vulkan uses the dedicated catalog and Venus and APU use the CPU catalog; the stored profile declarations retain DS002's schema. APU has no recommendations. Existing NVIDIA and CPU recommendations and validation labels retain their previous behavior.
-
-### llama.cpp on unified memory
-
-llama.cpp has the unified-memory policy of this release, and vLLM an experimental one behind the operator's switch (below); every other runner is `incompatible` there. llama.cpp's unified parameters (`paramSchemaFor('unified')`) are `ctxSize` (up to 262,144 and the model's training context per slot; the 32,768 default is lowered to that context when it is smaller), `parallel`, `loadMode` (`dio`, the default, or `none`), `mtp` (`--spec-type draft-mtp --spec-draft-n-max 3`), `threads` and `chatTemplateKwargs` (`reasoning_effort`, `preserve_thinking`). Every flag that changes memory is fixed: `-ngl 999 -fa on`, f16 K and V, `-b 2048 -ub 2048`, `--kv-unified` above one slot, and `--cache-ram 8192`. Threads default to the high-performance cores (10 on DGX Spark, capped by a cgroup CPU quota), else physical cores minus 2.
-
-**MTP is a capability of the weights.** A model entry declares `mtp: true` when its weights carry a multi-token-prediction head (DS002); a user entry may declare it too, since it is a capability, not a measurement. `mtp: true` is refused (a parameter error on `mtp`) for a model that does not declare the head, whatever the source of the value: an explicit value wins over a default but cannot make an unsupported configuration valid. A catalog `recommended` MTP default on a model without the head is refused when the catalog loads. The Qwen3.6-35B-A3B MTP entry declares the head and recommends `mtp: true` on unified memory, so omitting `mtp` turns it on and an explicit `false` turns it off; the overview's parameters, the preview, the launch flags and the estimate all use the same normalized value. gpt-oss and every other entry leave it off.
-
-`dio` loaded a cold gpt-oss-20b in 4.1–4.5 s with +0.8 GiB of page cache; `none` took 8.7 s and added 12.1 GiB (gpt-oss-120b: 16 s vs 51 s, +0.9 vs +37 GiB). After a controller download is verified, the file is dropped from the page cache (`dd iflag=nocache count=0`, which calls `posix_fadvise(DONTNEED)`; best effort).
-
-### llama.cpp on the CPU
-
-llama.cpp has a CPU policy, and so do Ollama (below) and llama.cpp's CPU build, `llama.cpp-cpu`: ggml-org's own CPU release (`b11295`, its `ubuntu-arm64` or `ubuntu-x64` asset), installed on demand from the agent's runner lock (DS004) and run from its runnable copy on port 18085. It is one adapter with llama.cpp's, created with `profiles: ['cpu']`: it gets the CPU schema, launch and `admitCpu` below, no schema and no policy for the GPU profiles, and the controller leaves it out of the overview there. A runner without a CPU policy is `incompatible` in the `cpu` profile ("… needs an NVIDIA GPU in this release"), and `local_llm_runner_install` refuses it with `runner_unavailable`. llama.cpp loads the best CPU backend for the CPU by itself (`libggml-cpu-armv8.2_2.so` on the M1's Podman machine, as `llama-server -lv 4 --list-devices` logs; a server run's log names only the device, `- CPU : CPU (…)` under `device_info:`, which is what the status reports). Its CUDA backend is skipped when the driver library is absent.
-
-llama.cpp's CPU parameters (`paramSchemaFor('cpu')`):
-
-| Parameter | Values |
-| --- | --- |
-| `ctxSize` | 512 to 131,072, at most the model's training context per slot; default 4,096 |
-| `parallel` | 1 to 4 |
-| `loadMode` | `mmap` (the default) or `none` |
-| `threads` | an integer, or empty for the default above |
-| `chatTemplateKwargs` | as in the other profiles |
-
-Every flag that changes memory or the device is fixed:
-
-- `--device none --n-gpu-layers 0 --fit off --flash-attn on`
-- f16 K and V
-- `-b 512 -ub 512`
-- `--kv-unified` above one slot
-- `--cache-ram 256`
-
-The launch environment has no `LD_LIBRARY_PATH` and an empty `CUDA_VISIBLE_DEVICES`. `mlock` and `dio` are not offered: the container's locked-memory limit is 8 MiB, and direct I/O on a Mac's shared folder is unmeasured.
-
-### CPU admission
-
-No benchmark is a prerequisite. `estimateCpuLlamaServer` builds the need from the model entry and fixed terms, never from a measurement on this machine. The need is the sum of:
-
-- the pinned weight size (every shard; all layers resident);
-- f16 KV for the whole `ctxSize`, `memory.kvBytesPerToken` × `ctxSize` + `memory.fixedKvBytes` (DS003's 64 KiB per token when the entry lacks it);
-- compute buffers (DS003's flash-attention formula at the fixed micro-batch of 512);
-- 512 MiB for the runner process;
-- the prompt cache's bound (256 MiB).
-
-The estimate reports the need as `ramBytes`, names every defaulted input and carries `measured: false`. The pool is MemTotal and MemAvailable. When a container memory limit is set (cgroup `memory.max`), the pool is at most that limit, and what is available now is at most the limit less `memory.current`.
-
-| Verdict | When |
-| --- | --- |
-| `incompatible` | the need is above the pool less the host reserve, min(16 GiB, max(1.5 GiB, 25 % of the pool)); or memory cannot be read; or the weight size is not pinned |
-| `insufficient-now` | the need is above what is available less the floor, min(8 GiB, max(512 MiB, 10 % of the pool)); or the download does not fit the disk |
-| `ok` | otherwise, with warnings: the run is on the CPU, with the decision's reason; the figure is an estimate; the guard stops the runner below the floor |
-
-Reserve and floor round up to whole bytes. On the 6 GiB Podman machine of a 16 GiB Mac (MemTotal 5.76 GiB) the reserve is 1.5 GiB and the floor 0.58 GiB. The constants are provisional, like the unified ones.
-
-### Ollama on the CPU
-
-Ollama's CPU parameters (`paramSchemaFor('cpu')`; the dedicated schema is unchanged, and unified memory has none):
-
-| Parameter | Values |
-| --- | --- |
-| `numCtx` | 512 to 131,072; default 4,096 |
-| `numThread` | an integer from 1 to 256, or empty for Ollama's default |
-| `keepAlive` | as in the dedicated schema |
-
-`numGpu` is fixed at 0, flash attention is Ollama's default, and the KV cache type is fixed at f16 (`OLLAMA_KV_CACHE_TYPE`). The CPU launch has no `LD_LIBRARY_PATH` and an empty `CUDA_VISIBLE_DEVICES`, and the load request carries `num_gpu: 0` (`requestOptions` with the profile). The chat target carries the same options, but the chat responder does not forward them, because Ollama's OpenAI-compatible endpoint takes no `options`: what keeps a chat request off a GPU is the hidden device, not a request option. The adapter starts `<runnable copy>/bin/ollama` when the agent's lock installed it (the arm64 image has no Ollama; the archive unpacks with `strip: 0`) and the image's `/opt/ollama/bin/ollama` otherwise, and detection asks the image's binary first and the installer second.
-
-`admitCpuOllama` sizes a run from the tag's pinned size, never from a measurement. The need is the sum of:
-
-- the pinned `size` (config plus layers);
-- f16 KV for `numCtx`, `memory.kvBytesPerToken` × `numCtx` + `memory.fixedKvBytes` (64 KiB per token when the entry lacks it, named in the warnings);
-- compute buffers at llama.cpp's flash-attention formula and Ollama's default batch of 512 (216.92 MiB);
-- 768 MiB for the Ollama server and its runner process (provisional).
-
-It is checked against the same pool, reserve and floor as llama.cpp, and the memory guard stops the runner below that floor. A tag whose size is not pinned, such as an entry stored before tags were pinned or added on another profile, is `incompatible` with "The tag's size is not pinned; update the model entry so it is pinned." An Update that names the bare tag pins it (DS002). The size is also what the pull's disk check counts.
-
-That `num_gpu: 0` and the hidden device keep `size_vram` at 0 in Ollama 0.34.4 is an assumption until a live run shows `sizeVramBytes: 0` in the state file.
-
-### Unified admission
-
-No benchmark, measured envelope or pre-calibrated configuration is a prerequisite for a Run (owner, 2026-09-29): bundled models and models added at run time are admitted from their data and a fresh snapshot, with the same reserve, floor and guard. The need comes from one of two sources.
-
-**A trusted envelope rectangle, where one covers the parameters.** `unified.envelope` (DS002) lists rectangles of total context and parallel slots, each with its load mode (`loadMode`, `dio` or `none`) and MTP allowed or not. A rectangle applies only to its own load mode: no rectangle stands in for a mode it was not measured with. The need is the corner's figures, labelled as catalog envelope data (`measured: false`) with a warning that they are not validated calibration for this host:
-
-need = `bufferBytes` (the model, KV, recurrent-state, output and compute buffers llama.cpp logs at `-lv 4`) + `transientBytes` (memory beyond those buffers during load, prefill and parallel requests, times 1.25) + 1.5 GiB (the CUDA context and the runner process) + the prompt cache's bound (`--cache-ram`, 8192 MiB).
-
-**An estimate, everywhere else** (`estimateUnifiedLlamaServer`): no envelope, parameters outside every rectangle, or another load mode. It is built only from the model entry and the existing formulas, never from a measurement on this machine:
-
-need = the pinned weight size (every shard; all layers resident) + f16 KV for the whole `ctxSize` (`memory.kvBytesPerToken` × `ctxSize` + `memory.fixedKvBytes`; `--kv-unified` makes `ctxSize` the pool, not a per-slot size) + compute buffers (the flash-attention formula of DS003 at the fixed micro-batch of 2048) + with MTP, a draft context: one more layer of KV (`kvBytes / memory.layers`) and one more set of compute buffers + 1.5 GiB + the prompt cache's bound.
-
-An entry without `memory.kvBytesPerToken` uses DS003's default of 64 KiB per token, and without `memory.layers` the default of 48 layers; the estimate names every defaulted input (`defaulted`, with `contextLength` when it is missing), and a warning says what each default can miss (the per-token default can understate the KV cache several times for large dense models; without `contextLength` the context is not capped at the training context) and how to add them (Settings, or `local_llm_model_update`): the actionable path for missing metadata is data, not a benchmark. The estimate carries `envelope: null` and `measured: false`, its `basis` says it is an estimate and where its per-token figure came from (the catalog, the entry added at run time, or a default), and a warning always says the run is unmeasured, that the figure is an estimate, and that the guard stops the runner below the floor. Parameters outside a trusted rectangle add a warning naming the rectangles. An entry without a pinned size is `incompatible`.
-
-**What sizing from an entry added at run time can change.** Its `memory.kvBytesPerToken`, `memory.fixedKvBytes` and, with MTP, `memory.layers` feed only the KV and MTP terms. The weights term is the pinned size, bound to the pinned sha256 that download and adoption enforce (DS002), and the compute, runtime and prompt-cache terms are fixed. So an understated value can lower only the KV and MTP terms; the estimate lists the fields it used (`userSizing`), and a warning says nothing checks them against the weights and that the memory guard is then the only backstop. An envelope, by contrast, replaces the whole need, which is why envelopes come only from the operator's trusted catalogs (the trusted unified envelope rationale below).
-
-llama-server's prompt cache lives in host memory, is bounded by `--cache-ram` (it evicts before it allocates, and skips a single state larger than the bound), and is allocated in one burst when a new task starts. `--cache-ram 0` is not an option: it also turns off the clearing of idle slots, so with a unified KV cache an idle slot keeps its cells and new requests fail (measured: 0 of 4). 8192 MiB, llama.cpp's default, is the measured baseline; smaller bounds wait for their measurements.
-
-| Verdict | When |
-| --- | --- |
-| `incompatible` | need above MemTotal less a 16 GiB host reserve; `/proc/meminfo` unreadable; no pinned weight size |
-| `insufficient-now` | need above MemAvailable less the 8 GiB floor (other processes on the machine hold the rest), or the download does not fit the disk |
-| `ok` | otherwise, with the estimate's warnings |
-
-No CPU offload (`nCpuMoe`) in this profile. The reserve, floor and runtime constant are provisional; the benchmark phases that would calibrate them are deferred by the owner, and none of them is a calibrated envelope.
-
-### vLLM on unified memory (experimental)
-
-vLLM runs on unified memory only as an explicit, experimental operator choice: `LOCAL_LLM_VLLM_UNIFIED=experimental` (`ploinky var LOCAL_LLM_VLLM_UNIFIED experimental`, then a restart of local-llm; DS001, DS004). Without it `local_llm_run` and `local_llm_runner_install` refuse vLLM with `runner_disabled` before anything downloads, and the overview shows why; no catalog entry, parameter, saved value or runner choice turns it on. The switch concerns unified memory only: on a dedicated GPU vLLM is not gated. While the profile is not decided (the GPU cannot be read), an image that can never run on unified memory counts as dedicated, but only on positive evidence that it is the amd64 image: a `source.contract` that does not say `architecture=arm64` and either names `ik_llama_cpp` (built only into the amd64 image) or runs on an x64 CPU. That image keeps vLLM enabled and installable as before. Every other case, meaning `architecture=arm64`, an empty, malformed or architecture-less contract on arm64, or no contract in development, keeps the switch closed. The reason then says the GPU could not be read, so it is not known whether it shares system memory, and names the switch, with no retry that cannot succeed; there, installing first tries to decide the profile from a snapshot. A caller of the switch that names no profile gets the same closed answer. The image must also carry vLLM in its runner lock (arm64: DS004), and an admin installs it on demand.
-
-Its unified parameters are the dedicated ones without `cpuOffloadGb` (one pool has nothing to offload to). Admission (`admitUnifiedVllm`) treats `--gpu-memory-utilization` as a share of the whole pool: on an integrated GPU, CUDA's total is MemTotal. An empty share is computed from the snapshot: at most 0.9, within the host reserve, and leaving the floor and the runner's own RAM free. The need is that share of MemTotal plus the runner's RAM beyond it (3 GiB, measured on a dedicated GPU and unvalidated here). The weights, a KV cache for `maxModelLen` and vLLM's overhead (768 MiB for activations, CUDA context and allocator slack, as on a dedicated GPU) must fit in the share; no usable-share discount applies, since CUDA's total is the pool itself. An entry added at run time that supplies `memory.kvBytesPerToken` gets the user-sizing warning above. An admin's share that cannot hold them, or whose need exceeds MemTotal less the reserve, is `incompatible`; a share that does not fit what is available now, or a computed share below 0.1, is `insufficient-now`. The estimate carries `experimental: true`, `measured: false` and `envelope: null`, and a warning says vLLM is experimental and unmeasured here. The fresh admission immediately before launch recomputes the share, which is the value vLLM is started with, and the 250 ms guard watches it like every runner. FlashInfer, caches and the runner's offline settings are unchanged (DS004); whether vLLM 0.30 contacts any host on GB10 is an open native check.
-
-Admission runs again from a fresh snapshot after the download, and last immediately before the runner starts, after the runner is prepared and the weights are checked for the last time (DS003). Memory taken meanwhile refuses the start as `insufficient-now`: the guard's floor is far below a run's need, so it would not stop a runner that starts into too little memory.
-
-**Who may certify an envelope.** `unified.envelope` and the `validated` labels come only from the trusted seed: the catalog shipped with the agent, or the operator's `LOCAL_LLM_CATALOG_FILE`, whose provenance is controlled outside the model-management API. `local_llm_model_add` and `_update` refuse an entry that carries an envelope or any `validated` label (`invalid_model`); the empty forms a stored entry carries (`unified: null`, `validated: {}`) are accepted. A registry entry stored with either before this rule is kept in the state file as it is, reported in the overview's `unsupportedModels` and the log, never offered, and can be removed. A user entry that names a seed's own file does not inherit the seed's envelope: an envelope belongs to the catalog entry, not to the artifact, so the alias is sized by estimate. No envelope is shipped in this release, and this rule approves none. An envelope is no longer a prerequisite for a Run; it only replaces the estimate where it applies.
+The APU policy's constraint C3 is the agent's. A finite container memory limit is a permanent refusal (`refuseProfile`, constraint C3: not proven to constrain shared GPU pages), and an unknown budget gives the temporary `budget_unreadable`. At discovery, a finite or unknown cgroup memory budget replaces the GPU with an unusable one, so the profile falls back to the CPU before launch (`decorateSnapshot`); the same C3 refusal repeats at admission, and the pooled guard stops a running APU runner whose budget becomes finite or unknown (`guardBreach`, below). Container limits have not been proven to charge GTT allocations.
 
 ### Memory guard
 
@@ -289,50 +83,18 @@ In the `cpu` profile the dashboard shows three cards:
 
 The run form shows one memory estimate against what is available now (under a container memory limit, what the limit leaves). A runner with no CPU policy gets no Models column and no Install, and the Runners tab says why; its intro promises installs only while some runner can be installed under the profile, and the run form's parameter preview gives the same reason. The dedicated and unified profiles add no such refusal. A runner that serves only some profiles (llama.cpp's CPU build) is not listed at all on the others: not in the Runners tab, not as a Models column, and its Install and Run are refused before anything downloads.
 
+The dashboard renders Venus measurement history as escaped text, without activating evidence references as links. The APU view names the integrated APU, experimental status, shared physical memory, the admission floor, the observed Vulkan0 model-byte ratio and ignored guard-floor warnings. The Venus view shows unknown headroom, the provisional cap and VM memory, and RADV shows its unverified hardware status. A CPU fallback decision with `gpuBackend=vulkan` names the Vulkan GPU; CPU decisions without a known backend use generic GPU wording.
+
 ### Rationale
 
-#### Unified device detection
+#### Container limits are not engine logic
 
-The addressing mode alone is not a unified-memory signal (GH200 reports ATS with dedicated HBM), and `[N/A]` memory is how this driver reports GB10 today. A future driver that reports numbers for GB10 would otherwise turn it into a dedicated GPU with a pool the size of system memory. The device id keeps GB10 unified whatever the driver reports; the addressing mode covers other GPUs that share memory, which the image then accepts or refuses by compute capability (DS000).
+A cgroup budget and an MPS share are properties of the container the agent runs in. The engine reads the physical machine and asks the limits plug-in at the places where a limit could matter, so a host without limits sees the physical figures and this agent sees them narrowed, with the same key order, warnings and refusal texts as before the engine moved. The 60 s grace for an unreadable GPU, the reserves and the floors are the engine's and are explained in its specification.
 
 #### Trusted unified envelopes
 
-Where an envelope applies it replaces the whole need (weights, buffers, transient), and `validated` tells an admin what was measured. An envelope sent through `local_llm_model_add` or `_update` carries no evidence of where its numbers came from, so it could shrink any configuration's entire need, weights included, on a shared host with only the guard behind it. A user entry's sizing fields are narrower: they feed only the KV and MTP terms of an estimate, never the pinned weights or the fixed terms, and every run they lower carries a warning that only the guard stands behind an understated value. Certification therefore stays with inputs whose provenance the operator controls outside the model-management API: the shipped catalog and `LOCAL_LLM_CATALOG_FILE`. Admin-measured envelopes would need a recorded owner decision and a provenance field; this release has neither. Stored entries are reported rather than migrated or deleted, because they are the admin's data.
+Where an envelope applies it replaces the whole need (weights, buffers, transient), and `validated` tells an admin what was measured. An envelope sent through `local_llm_model_add` or `_update` carries no evidence of where its numbers came from, so it could shrink any configuration's entire need, weights included, on a shared host with only the guard behind it. Certification therefore stays with inputs whose provenance the operator controls outside the model-management API: the shipped catalog and `LOCAL_LLM_CATALOG_FILE` (DS002). The rule, and what happens to entries stored before it, are in pworker DS005.
 
-#### Load mode in envelopes
-
-The two unified load modes use memory very differently: `none` added 12.1 GiB of page cache for gpt-oss-20b and 37 GiB for gpt-oss-120b, against 0.8–0.9 GiB for `dio`. A rectangle measured with one mode says nothing about the other, so each names the mode it was measured with and applies only to that mode. There is no inference from an older envelope; a mode no rectangle covers is sized by estimate.
-
-#### Admission without per-model benchmarks
-
-The owner decided on 2026-09-29 that users must be able to add and run models at run time without per-model benchmarks, and deferred the benchmark phases; the earlier measurements were disturbed by another user's fine-tuning and stay historical evidence, not calibration. So every run is sized by a labelled estimate from the model's data (or by a trusted envelope where one applies) and checked against a fresh snapshot with the host reserve and the floor, and the guard remains the backstop. An estimate can be wrong; it says so, names its defaults, and never presents itself as measured.
-
-#### Experimental vLLM on unified memory
-
-The owner chose experimental, opt-in vLLM on DGX Spark. vLLM preallocates its whole share of the pool for weights and KV cache, and its behaviour on GB10 (the share it can actually take, its host-side memory, any network access) has not been checked on the hardware. An explicit operator switch, outside the model-management API, keeps that choice with whoever runs the deployment; a model entry or a Run parameter cannot make it.
-
-#### Declared MTP capability
-
-MTP speculative decoding needs a multi-token-prediction head in the weights; llama.cpp cannot use it on a model without one. Honouring an explicit value must not turn an unsupported configuration into a Run that fails at load or silently misbehaves, so the entry declares the capability and the parameter is refused elsewhere. Declaring a capability is not certifying memory figures, so user entries may declare it.
-
-#### CPU selection and unreadable GPU grace period
-
-A container cannot gain a GPU without being recreated, so committing then is safe. A failing nvidia-smi or device query can be transient; committing on the first failure would lock DGX Spark or a GPU host into the CPU profile.
-
-#### CPU memory reserves
-
-The first CPU host has 5.76 GiB, where the unified values (16 GiB reserve, 8 GiB floor) would refuse everything. The proportional values converge to the unified ones on large hosts.
-
-#### CPU runner availability
-
-`profileUnsupportedReason` is set only on the `cpu` profile, on purpose: the dedicated and unified overviews must stay what they were, so a runner cannot be hidden there by a reason that only the new profile produces. A runner that serves one profile says so itself (`profiles`), and the overview, the table columns, the per-model rows, Run, preview and Install all read that one declaration. A test compares both GPU profiles' overviews with a golden file made before the runner existed.
+#### One committed profile
 
 The agent normalizes, admits, launches and guards each Run under one committed hardware profile. NVIDIA keeps the dedicated and unified policies. Vulkan serves discrete RADV, Venus and default-off experimental APU. Venus has a provisional device cap and a separate guarded VM staging pool; APU counts one shared physical pool and refuses finite or unknown budgets. An unusable or absent supported GPU falls back to the CPU at profile selection, while an unreadable query waits for the existing grace period. Every launch repeats admission against a fresh snapshot.
-
-### Historical Venus measurements and restart explanations
-
-Venus overview runner entries and Run previews add measurementStatus with state unverified or historical, applicability unknown or mismatch, record-specific reasons and structured records. Trusted historical records are compared independently against effective parameters. The aggregate is mismatch only when every record has a proven mismatch. Matching parameters still leave applicability unknown because the agent cannot observe the full host, VM and runtime identity. The active-profile raw validated map remains present. The dashboard renders history as escaped text without activating evidence references as links.
-
-History never changes admission or the memory guard. estimate.measured stays false. The device cap remains min(2 GiB, 25 percent of reported heap). Existing refusal comparisons add reason codes venus_device_cap, venus_device_free, venus_vm_unreadable, venus_vm_capacity and venus_vm_available. Disk refusal and status classification are unchanged.
-
-The CPU admission and public profile decision share cpuFallbackExplanation; Compute renders the supplied explanation. Unknown hardware is called GPU, an observed Vulkan backend is called Vulkan GPU, and Apple Venus requires observed Venus identity. There is no unconditional CPU speed claim. The committed decision, diagnostic and timestamp remain unchanged for the controller lifetime. Current recovery is published separately. Recovery after unreadable-timeout can advise restarting local-llm; it never switches the current CPU execution. Model Stop and Run do not reset the profile. Changing grants, machine or provider requires the supported agent or Box restart before profile reselection.
