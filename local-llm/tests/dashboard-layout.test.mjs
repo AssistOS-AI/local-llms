@@ -6,6 +6,19 @@ import { hardwareSummaryHtml, hardwareWarningsHtml } from '../IDE-plugins/local-
 import { helpHtml, initAddModelDialog } from '../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-help.js';
 import { estimateHtml, statusCardHtml } from '../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/local-llm-dashboard-view.js';
 
+test('the Runner selector label is bold and uses primary text without changing other labels', async () => {
+    const base = new URL('../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/', import.meta.url);
+    const html = await readFile(new URL('local-llm-dashboard.html', base), 'utf8');
+    const css = await readFile(new URL('local-llm-dashboard.css', base), 'utf8');
+    assert.match(html, /<span class="form-label local-llm-runner-label">Runner<\/span>/);
+    assert.equal((html.match(/local-llm-runner-label/g) || []).length, 1);
+    const titleSize = css.match(/\.settings-section-title \{[^}]*font-size: ([^;]+);/)?.[1];
+    const runnerSize = css.match(/\.form-label\.local-llm-runner-label \{[^}]*font-size: ([^;]+);/)?.[1];
+    assert.ok(titleSize);
+    assert.equal(runnerSize, titleSize, 'Runner label matches the model title size');
+    assert.match(css, /\.local-llm-field \.form-label\.local-llm-runner-label \{[^}]*font-weight: var\(--font-bold\);[^}]*color: var\(--text\)/);
+});
+
 test('approved design keeps underlined tabs, quiet actions, flat detail and compact rows', async () => {
     const base = new URL('../IDE-plugins/local-llm-tool-button/components/local-llm-dashboard/', import.meta.url);
     const html = await readFile(new URL('local-llm-dashboard.html', base), 'utf8');

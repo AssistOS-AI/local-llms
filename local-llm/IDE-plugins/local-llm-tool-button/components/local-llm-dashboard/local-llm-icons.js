@@ -10,6 +10,9 @@ const shapes = {
     play: '<path d="m7 4 14 8-14 8Z"/>',
     chevron: '<path d="m6 9 6 6 6-6"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/>',
+    check: '<path d="m5 12 4 4L19 6"/>',
+    blocked: '<circle cx="12" cy="12" r="9"/><path d="m6 6 12 12"/>',
+    warning: '<path d="m12 3 10 18H2Z M12 9v4m0 4h.01"/>',
 };
 
 export function iconHtml(name) {
